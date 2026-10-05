@@ -4,7 +4,7 @@ Repo MCP is a local, repository-scoped MCP server for ChatGPT and Claude Code. E
 
 The server makes no model API calls. ChatGPT or Claude supplies the model; Repo MCP supplies controlled access to local files and approved fixture tests. Git commits, pushes, task coordination, and unrestricted shell commands stay outside the MCP interface.
 
-**Status:** source release candidate for trusted, single-user macOS use. Current support is macOS, Node 26+, Git, and npm. The official OpenAI tunnel client is required for ChatGPT access. Linux and Windows have not been certified.
+**Status:** public v0.1.0 for trusted, single-user macOS use. Current verified support is macOS, Node 26+, Git, and npm. The official OpenAI tunnel client is required for ChatGPT access. Linux and Windows have not been certified.
 
 ## Install
 
@@ -32,6 +32,10 @@ npm run coord -- status
 ```
 
 Read [SETUP.md](SETUP.md) before installing the live service. It covers the private tunnel, durable task state, legacy-service migration, recovery, schema refresh, and exact coordinator commands.
+
+Copy `.codex/skills/repo-mcp` to `~/.codex/skills/repo-mcp` to let Codex agents bind
+the same installed service to their current checkout. Repository switches reuse the
+existing tunnel and ChatGPT plugin; they do not require parallel services.
 
 ## Policy and tools
 
@@ -61,7 +65,7 @@ The included `.claude/skills/repo-mcp-review/SKILL.md` performs an independent, 
 
 Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox. Filesystem containment uses descriptor and parent checks but cannot eliminate all races on macOS. Approved tests are executable code. Treat the local user, checkout, policies, and test suites as trusted.
 
-See [SECURITY.md](SECURITY.md) for the full model and [docs/V1-HARDENING-SPEC.md](docs/V1-HARDENING-SPEC.md) for the staged hardening contract.
+See [SECURITY.md](SECURITY.md) for the v0.1.0 model and [docs/V1-HARDENING-SPEC.md](docs/V1-HARDENING-SPEC.md) for the forward v1.0 hardening roadmap.
 
 ## Source archive
 

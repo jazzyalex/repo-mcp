@@ -15,6 +15,7 @@ files['README.md'] = base/'docs/PUBLIC-README.md'
 for doc in ['docs/V1-HARDENING-SPEC.md', 'docs/DESIGN-2B-PATH-POLICY.md', 'docs/WORKFLOW-SPEC.md']:
     files[doc] = base/doc
 files['.claude/skills/repo-mcp-review/SKILL.md'] = base/'.claude/skills/repo-mcp-review/SKILL.md'
+files['.codex/skills/repo-mcp/SKILL.md'] = base/'.codex/skills/repo-mcp/SKILL.md'
 for folder in ['src','scripts','test','examples']:
     for p in sorted((base/folder).rglob('*')):
         if p.is_file() and p.suffix in {'.ts','.mjs','.py','.sh','.json'} and '__pycache__' not in p.parts:

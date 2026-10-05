@@ -1,6 +1,6 @@
 # Security model
 
-This release candidate is for trusted single-user pilots on macOS. File allowlists,
+Repo MCP v0.1.0 is for trusted single-user use on macOS. File allowlists,
 current hashes, output caps, timeouts and snapshot runners reduce accidental scope
 expansion. They do not establish a complete hostile-code execution sandbox.
 
@@ -17,8 +17,9 @@ expansion. They do not establish a complete hostile-code execution sandbox.
 - Tests are executable code. Node uses its permission system; the optional Python
   runner applies the limited macOS profile described in SETUP.md. System operations
   outside the documented restrictions remain possible. Keep code trusted.
-- Secrets are local files with owner-only permissions. Do not commit or distribute
-  .trial, logs, generated profiles, health files or keys. Upstream private logs
+- Secrets are local files with owner-only permissions under
+  `~/Library/Application Support/repo-mcp`. Do not commit or distribute logs,
+  generated profiles, health files or keys. Upstream private logs
   may contain credential diagnostics; only sanitized status is printed.
 - Key rotation does not create a new tunnel. It restarts the client to reload the
   key, then checks a recent successful poll. A ChatGPT repo_info call is still the
@@ -26,6 +27,7 @@ expansion. They do not establish a complete hostile-code execution sandbox.
 - Login services start only after login. Sleeping/offline machines cannot serve
   ChatGPT. Credential revocation or expiry requires user action.
 
-No public vulnerability-reporting address has been established yet. Before public
-release, the maintainer must provide a private reporting channel. Do not publish
-credentials, private source or exploit details in public issues.
+Report vulnerabilities privately through GitHub's **Report a vulnerability** form:
+https://github.com/jazzyalex/repo-mcp/security/advisories/new
+
+Do not publish credentials, private source or exploit details in public issues.

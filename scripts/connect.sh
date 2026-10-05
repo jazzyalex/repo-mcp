@@ -2,8 +2,18 @@
 set -euo pipefail
 umask 077
 mcp_project="$(cd "$(dirname "$0")/.." && pwd)"
-mcp_state="${MCP_STATE_DIR:-$mcp_project/.trial}"
-mcp_bin="${TUNNEL_CLIENT_BIN:-$mcp_state/bin/tunnel-client}"
+if [[ -n "${MCP_STATE_DIR:-}" ]]; then
+  # Test/compatibility override: keep the historical flat layout only in the
+  # explicitly supplied private directory.
+  mcp_root="$MCP_STATE_DIR"
+  mcp_credentials="$mcp_root"
+  mcp_tunnel="$mcp_root"
+else
+  mcp_root="${REPO_MCP_HOME:-$HOME/Library/Application Support/repo-mcp}"
+  mcp_credentials="$mcp_root/credentials"
+  mcp_tunnel="$mcp_root/tunnel"
+fi
+mcp_bin="${TUNNEL_CLIENT_BIN:-$mcp_root/bin/tunnel-client}"
 mcp_rotate=false
 mcp_save=false
 case "${1:-}" in
@@ -12,24 +22,28 @@ case "${1:-}" in
   --save-key) mcp_save=true ;;
   *) printf 'Usage: bash scripts/connect.sh [--rotate-key|--save-key]\n' >&2; exit 2 ;;
 esac
-mkdir -p "$mcp_state"
-mcp_state="$(cd "$mcp_state" && pwd)"
-mcp_secret="$mcp_state/runtime.key"
+mkdir -p "$mcp_credentials" "$mcp_tunnel"
+chmod 700 "$mcp_root" "$mcp_credentials" "$mcp_tunnel"
+mcp_root="$(cd "$mcp_root" && pwd)"
+mcp_credentials="$(cd "$mcp_credentials" && pwd)"
+mcp_tunnel="$(cd "$mcp_tunnel" && pwd)"
+mcp_secret="$mcp_credentials/runtime.key"
 if [[ ! -x "$mcp_bin" ]]; then
   mcp_bin="$(command -v tunnel-client || true)"
 fi
 if [[ -z "$mcp_bin" || ! -x "$mcp_bin" ]]; then
   printf 'Install the official tunnel-client first. See SETUP.md.\n' >&2; exit 1
 fi
-if [[ -f "$mcp_state/tunnel-id" ]]; then
-  read -r mcp_tunnel_id < "$mcp_state/tunnel-id"
+if [[ -f "$mcp_credentials/tunnel-id" ]]; then
+  read -r mcp_tunnel_id < "$mcp_credentials/tunnel-id"
 else
   read -r -p 'Paste the private tunnel ID: ' mcp_tunnel_id
 fi
 if [[ ! "$mcp_tunnel_id" =~ ^tunnel_[a-zA-Z0-9_-]+$ ]]; then
   printf 'Invalid tunnel ID.\n' >&2; exit 1
 fi
-printf '%s\n' "$mcp_tunnel_id" > "$mcp_state/tunnel-id"
+printf '%s\n' "$mcp_tunnel_id" > "$mcp_credentials/tunnel-id"
+chmod 600 "$mcp_credentials/tunnel-id"
 mcp_temp=''
 trap '[[ -z "$mcp_temp" ]] || rm -f "$mcp_temp"' EXIT
 if [[ ! -s "$mcp_secret" || "$mcp_rotate" == true ]]; then
@@ -40,7 +54,7 @@ if [[ ! -s "$mcp_secret" || "$mcp_rotate" == true ]]; then
   if [[ -z "$mcp_key" || "$mcp_key" == *[[:space:]]* ]]; then
     printf 'Empty keys and whitespace are not accepted. Existing key preserved.\n' >&2; exit 1
   fi
-  mcp_temp="$(mktemp "$mcp_state/runtime-key.XXXXXX")"
+  mcp_temp="$(mktemp "$mcp_credentials/runtime-key.XXXXXX")"
   printf '%s' "$mcp_key" > "$mcp_temp"
   chmod 600 "$mcp_temp"
   mv -f "$mcp_temp" "$mcp_secret"
@@ -54,26 +68,26 @@ if [[ "$mcp_save" == true ]]; then
   printf 'Credential and tunnel ID saved. Install the standalone tunnel service next.\n'
   exit 0
 fi
-if [[ -f "$mcp_state/standalone-tunnel" ]]; then
+if [[ -f "$mcp_tunnel/install.json" ]]; then
   launchctl kickstart -k "gui/$(id -u)/local.repo-mcp.tunnel"
   # Wait for a new health URL and a successful poll, not the old process status.
   sleep 2
-  node "$mcp_project/scripts/tunnel-status.mjs" --health-file "$mcp_state/standalone-tunnel-health.url"
+  node "$mcp_project/scripts/tunnel-status.mjs" --health-file "$mcp_tunnel/health.url"
   exit $?
 fi
 # The managed runtime may reuse a running process with the old credential loaded.
 # Stop it explicitly so reconnect always reads the current key file.
-"$mcp_bin" runtimes stop repo-mcp > "$mcp_state/stop-result.json" 2> "$mcp_state/stop-error.log" || true
+"$mcp_bin" runtimes stop repo-mcp > "$mcp_tunnel/stop-result.json" 2> "$mcp_tunnel/stop-error.log" || true
 # Capture upstream output privately; never echo raw credential-bearing diagnostics.
 if ! "$mcp_bin" runtimes connect \
   --alias repo-mcp --profile repo-mcp \
-  --profile-dir "$mcp_state/tunnel-profiles" \
+  --profile-dir "$mcp_tunnel/profiles" \
   --tunnel-id "$mcp_tunnel_id" \
   --mcp-server-url "${MCP_SERVER_URL:-http://127.0.0.1:8787/mcp}" \
-  --runtime-api-key "file:$mcp_secret" --json > "$mcp_state/connect-result.json" 2> "$mcp_state/connect-error.log"; then
+  --runtime-api-key "file:$mcp_secret" --json > "$mcp_tunnel/connect-result.json" 2> "$mcp_tunnel/connect-error.log"; then
   printf 'Connection failed; checking status for an actionable diagnosis.\n' >&2
 fi
-if ! "$mcp_bin" runtimes status repo-mcp --json > "$mcp_state/status-result.json" 2> "$mcp_state/status-error.log"; then
+if ! "$mcp_bin" runtimes status repo-mcp --json > "$mcp_tunnel/status-result.json" 2> "$mcp_tunnel/status-error.log"; then
   printf 'Status command reported a failure.\n' >&2
 fi
-node "$mcp_project/scripts/tunnel-status.mjs" "$mcp_state/status-result.json"
+node "$mcp_project/scripts/tunnel-status.mjs" "$mcp_tunnel/status-result.json"

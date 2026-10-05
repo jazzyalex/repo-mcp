@@ -1,5 +1,7 @@
 import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
+import {homedir} from 'node:os';
+import path from 'node:path';
 
 export function summarizeStatus(data) {
   const errors = [data.error, data.remote_error].filter(Boolean).map(String).join(' ');
@@ -20,8 +22,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let summary;
   try {
     let data;
-    if (process.argv[2] === '--health-file') {
-      const url = new URL('/health?details=true', readFileSync(process.argv[3], 'utf8').trim());
+    if (process.argv[2] === '--health-file' || process.argv[2] === '--default-health') {
+      const healthFile = process.argv[2] === '--default-health'
+        ? path.join(homedir(), 'Library', 'Application Support', 'repo-mcp', 'tunnel', 'health.url')
+        : process.argv[3];
+      const url = new URL('/health?details=true', readFileSync(healthFile, 'utf8').trim());
       if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw new Error('Unexpected health address');
       const response = await fetch(url, {signal:AbortSignal.timeout(2000)});
       const health = await response.json();

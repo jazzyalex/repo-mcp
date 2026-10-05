@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,readFile,rm,stat} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,rm,stat,mkdir,realpath} from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {spawn,spawnSync} from 'node:child_process';
@@ -24,6 +24,36 @@ test('reconnect reuses the saved key without prompting or exposing upstream secr
   assert.equal(rotate.status,1); // credential failure remains a failure even after rotation
   assert.equal(await readFile(path.join(root,'runtime.key'),'utf8'),'replacement-synthetic-key');
   assert.doesNotMatch(rotate.stdout+rotate.stderr,/replacement-synthetic-key|sk-secret-sentinel/);
+ } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test('standalone tunnel preview uses durable private state with no checkout dependency', async () => {
+ const root=await mkdtemp(path.join(os.tmpdir(),'mcp-tunnel-install-'));
+ try {
+  const state=path.join(root,'app-support');
+  const credentials=path.join(state,'credentials');
+  await mkdir(credentials,{recursive:true,mode:0o700});
+  await writeFile(path.join(credentials,'runtime.key'),'synthetic-key',{mode:0o600});
+  await writeFile(path.join(credentials,'tunnel-id'),'tunnel_test\n',{mode:0o600});
+  const client=path.join(root,'tunnel-client');
+  await writeFile(client,'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const result=spawnSync('python3',['scripts/install-tunnel-service.py','--state-dir',state,'--client',client],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+  const canonicalState=await realpath(state);
+  const preview=path.join(canonicalState,'tunnel','local.repo-mcp.tunnel.preview.plist');
+  const decoded=spawnSync('python3',['-c',
+   'import json,plistlib,sys; d=plistlib.load(open(sys.argv[1],"rb")); print(json.dumps(d))',preview],{encoding:'utf8'});
+  assert.equal(decoded.status,0,decoded.stderr);
+  const plist=JSON.parse(decoded.stdout);
+  const args:string[]=plist.ProgramArguments;
+  assert.equal(plist.WorkingDirectory,path.join(canonicalState,'tunnel'));
+  assert.equal(args[args.indexOf('--control-plane.api-key')+1],`file:${path.join(canonicalState,'credentials','runtime.key')}`);
+  assert.equal(args[args.indexOf('--health.url-file')+1],path.join(canonicalState,'tunnel','health.url'));
+  assert.equal(plist.StandardOutPath,path.join(canonicalState,'tunnel','stdout.log'));
+  assert.equal(plist.StandardErrorPath,path.join(canonicalState,'tunnel','stderr.log'));
+  assert.doesNotMatch(JSON.stringify(plist),/repo-mcp-trial|\.trial/);
+  assert.equal((await stat(credentials)).mode & 0o777,0o700);
+  assert.equal((await stat(preview)).mode & 0o777,0o600);
  } finally {await rm(root,{recursive:true,force:true});}
 });
 

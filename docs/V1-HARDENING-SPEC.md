@@ -1,8 +1,14 @@
 # Repo MCP v1 Hardening and Release Specification
 
-Status: implementation-ready specification for the smallest dependable v1 hardening/release scope, 2026-10-02.
+Status: forward hardening specification for the eventual v1.0 scope, 2026-10-02.
 
-This document is normative for the v1 hardening work described here. “MUST”, “MUST NOT”, “SHOULD”, and “MAY” are used in their usual requirements sense. Requirement IDs are stable and should be referenced from implementation PRs and tests.
+Repo MCP v0.1.0 is intentionally narrower: trusted single-user macOS operation,
+repository/task switching, bounded policy-controlled tools, durable tunnel state and
+coordinator-run local validation. The acceptance criteria in sections 23-26 are the
+roadmap gate for a future v1.0 release; they are not claims made by v0.1.0. Current
+public support and validation are stated in README.md, SETUP.md and SECURITY.md.
+
+This document is normative for the future v1.0 hardening work described here. “MUST”, “MUST NOT”, “SHOULD”, and “MAY” are used in their usual requirements sense. Requirement IDs are stable and should be referenced from implementation PRs and tests.
 
 ## 1. Baseline and evidence status
 

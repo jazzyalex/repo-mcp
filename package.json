@@ -10,7 +10,7 @@
     "dev": "tsx src/main.ts",
     "prepare:fixture": "tsx scripts/prepare-fixture.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "connection:status": "node scripts/tunnel-status.mjs --health-file .trial/standalone-tunnel-health.url",
+    "connection:status": "node scripts/tunnel-status.mjs --default-health",
     "release:pack": "python3 scripts/package-release.py",
     "task": "tsx scripts/task.ts",
     "coord": "tsx scripts/coordinator.ts",

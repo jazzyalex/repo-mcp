@@ -1,6 +1,6 @@
 # Setup and operation
 
-This is an unpublished MIT-licensed release candidate. Current tested support is macOS with
+Repo MCP v0.1.0 is an MIT-licensed public release. Current verified support is macOS with
 Node 26+, Git at /usr/bin/git, and the official OpenAI tunnel-client. The Python
 runner additionally needs Python and pytest. Windows and Linux are not certified.
 No API inference calls are made by this server. Access to ChatGPT custom apps and
@@ -67,6 +67,19 @@ npm run task -- status --task TASK_ID
 npm run task -- phase --task TASK_ID --phase review
 npm run task -- rebind --task TASK_ID --root /path/to/checkout
 ```
+
+For a policy change on the same unfinished task, publish the task rebind, publish the
+matching active-service generation, and restart it in that order:
+
+```sh
+npm run task -- rebind --task TASK_ID --root /path/to/checkout --policy /path/to/policy.json
+npm run coord -- bind --task TASK_ID --repo /path/to/checkout --policy /path/to/policy.json
+npm run coord -- start
+```
+
+For another repository, finish the current task, choose a new task ID and run the
+ordinary `coord bind` / `coord start` sequence. The stable server and tunnel services
+are reused; no plist editing, plugin recreation or new tunnel credential is needed.
 
 ### Limits and paging
 
@@ -189,7 +202,8 @@ mutations and checks after the branch or HEAD changes; restart it to accept that
    Platform organization. Create a private tunnel and associate your ChatGPT workspace.
 2. Download the official tunnel-client from the link on that page or
    https://github.com/openai/tunnel-client/releases/latest. Verify the release checksum.
-   Install it on PATH, or place it at .trial/bin/tunnel-client. Do not copy someone
+   Install it on PATH. During an explicit legacy migration, a checkout-local client is
+   copied into the private Repo MCP Application Support directory. Do not copy someone
    else's tunnel configuration or credentials.
 3. Open https://platform.openai.com/settings/organization/api-keys. Create a runtime
    API key whose principal has **Tunnels Read + Use**. Tunnel management requires
@@ -208,6 +222,16 @@ Install the standalone tunnel service (no Codex required):
 ```sh
 python3 scripts/install-tunnel-service.py --install
 npm run connection:status
+```
+
+To migrate the recognized pre-v0.1 tunnel service from an older checkout, name that
+checkout explicitly. The installer refuses a modified or foreign service, preserves
+the old credentials until a fresh post-restart control-plane poll succeeds, and rolls
+the plist back if verification fails:
+
+```sh
+python3 scripts/install-tunnel-service.py --migrate --install \
+  --legacy-root /absolute/path/to/old/repo-mcp-checkout
 ```
 
 Do not run both the standalone service and a managed tunnel for the same profile.
@@ -229,17 +253,17 @@ bash scripts/connect.sh --rotate-key
 
 Use the same tunnel ID and ChatGPT plugin after rotation. There is no need to
 recreate them. The script reports authentication errors even when local process
-health flags say ready; upstream diagnostics stay in private .trial files.
+health flags say ready; upstream diagnostics stay in private Application Support files.
 Do not upload those files. The status summary never emits raw errors or keys.
 
-Optional settings: MCP_STATE_DIR (private state directory), TUNNEL_CLIENT_BIN
-(official executable), and MCP_SERVER_URL (defaults to localhost:8787/mcp).
-The standalone installer uses .trial state in this project and macOS launchd.
-It starts tunnel-client directly, reuses the credential file, and restarts after
-exit. No Codex session is required. After installation, connect.sh detects
-the standalone marker and restarts that service. Without the marker, it retains
-the older Codex-managed path for compatibility. MCP_STATE_DIR overrides apply to
-the legacy path; the standalone installer always uses the project .trial folder.
+Optional settings: `REPO_MCP_HOME` (defaults to
+`~/Library/Application Support/repo-mcp`), `MCP_STATE_DIR` (flat private
+test/compatibility override), `TUNNEL_CLIENT_BIN` (official executable), and
+`MCP_SERVER_URL` (defaults to localhost:8787/mcp). The standalone installer and
+`connect.sh` use the same durable credentials and tunnel directories. It starts
+tunnel-client directly, reuses the credential file, and restarts after exit. No Codex
+session or source checkout is required after installation. The durable
+`tunnel/install.json` record identifies the installed standalone service.
 
 Inspect or stop the tunnel service with:
 
@@ -248,9 +272,8 @@ launchctl print "gui/$(id -u)/local.repo-mcp.tunnel"
 launchctl bootout "gui/$(id -u)/local.repo-mcp.tunnel"
 ```
 
-Move its plist out of ~/Library/LaunchAgents to disable login startup. Preserve
-runtime.key for later reuse. If returning to the legacy managed path, remove the
-.trial/standalone-tunnel marker only after stopping the standalone service.
+Move its plist out of `~/Library/LaunchAgents` to disable login startup. Preserve
+`~/Library/Application Support/repo-mcp/credentials/runtime.key` for later reuse.
 
 ## 3. Keep the MCP server running on macOS
 
@@ -548,14 +571,15 @@ service control, commits and pushes remain separate coordinator actions.
 | Wrong repository | Stop before edits; select the intended server policy and restart it. |
 | Unknown suite | Only operator-configured suites are supported. No arbitrary shell fallback. |
 
-## Before an open-source release
+## Public release boundary
 
 Do not publish this entire working directory. It includes private runtime state,
 local repository clones, screenshots and account-specific evidence. Share only
 reviewed source, tests, dependency lockfile, generic examples and setup docs.
-MIT licensing and allowlisted packaging are included. An external-machine setup test,
-a private security-reporting channel and platform support verification remain release
-requirements. This documentation is not a claim of production or universal support.
+MIT licensing, allowlisted packaging and GitHub private vulnerability reporting are
+enabled. The public tree was installed and tested from a clean sanitized checkout on
+the supported macOS/Node 26 environment. This is not a claim of hostile-code isolation,
+Linux/Windows support or universal production suitability.
 
 Official references:
 - https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
