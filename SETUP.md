@@ -257,8 +257,10 @@ health flags say ready; upstream diagnostics stay in private Application Support
 Do not upload those files. The status summary never emits raw errors or keys.
 
 Optional settings: `REPO_MCP_HOME` (defaults to
-`~/Library/Application Support/repo-mcp`), `MCP_STATE_DIR` (flat private
-test/compatibility override), `TUNNEL_CLIENT_BIN` (official executable), and
+`~/Library/Application Support/repo-mcp` for the installer, connection script and
+default status command), `MCP_STATE_DIR` (flat `connect.sh` test/compatibility
+override), installer `--state-dir` (nested-layout test override),
+`TUNNEL_CLIENT_BIN` (official executable), and
 `MCP_SERVER_URL` (defaults to localhost:8787/mcp). The standalone installer and
 `connect.sh` use the same durable credentials and tunnel directories. It starts
 tunnel-client directly, reuses the credential file, and restarts after exit. No Codex

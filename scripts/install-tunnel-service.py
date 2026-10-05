@@ -169,7 +169,8 @@ def main() -> int:
     if args.migrate and (not args.install or not args.legacy_root):
         parser.error('--migrate requires --install and an explicit --legacy-root.')
 
-    root = (args.state_dir or (Path.home() / 'Library/Application Support/repo-mcp')).expanduser().resolve()
+    configured_root = args.state_dir or (Path(os.environ['REPO_MCP_HOME']) if os.environ.get('REPO_MCP_HOME') else None)
+    root = (configured_root or (Path.home() / 'Library/Application Support/repo-mcp')).expanduser().resolve()
     credentials, tunnel, binaries = root / 'credentials', root / 'tunnel', root / 'bin'
     for directory in (root, credentials, tunnel, binaries):
         private_dir(directory)

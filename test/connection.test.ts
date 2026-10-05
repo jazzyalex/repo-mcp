@@ -37,7 +37,9 @@ test('standalone tunnel preview uses durable private state with no checkout depe
   await writeFile(path.join(credentials,'tunnel-id'),'tunnel_test\n',{mode:0o600});
   const client=path.join(root,'tunnel-client');
   await writeFile(client,'#!/bin/sh\nexit 0\n',{mode:0o700});
-  const result=spawnSync('python3',['scripts/install-tunnel-service.py','--state-dir',state,'--client',client],{encoding:'utf8'});
+  const result=spawnSync('python3',['scripts/install-tunnel-service.py','--client',client],{
+   env:{...process.env,REPO_MCP_HOME:state},encoding:'utf8'
+  });
   assert.equal(result.status,0,result.stdout+result.stderr);
   const canonicalState=await realpath(state);
   const preview=path.join(canonicalState,'tunnel','local.repo-mcp.tunnel.preview.plist');

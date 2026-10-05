@@ -32,6 +32,7 @@ test('public source archive is deterministic, allowlisted and self-contained', a
     'README.md', 'SETUP.md', 'SECURITY.md', 'LICENSE', 'SOURCE-MANIFEST.json',
     'docs/DESIGN-2B-PATH-POLICY.md', 'docs/WORKFLOW-SPEC.md',
     'docs/V1-HARDENING-SPEC.md', '.claude/skills/repo-mcp-review/SKILL.md',
+    '.codex/skills/repo-mcp/SKILL.md',
     'scripts/model-policy.ts', 'src/model-policy.ts'
   ]) assert.ok(listing.includes(root + required), `missing ${required}`);
   assert.ok(listing.every(entry => entry.startsWith(root)));
