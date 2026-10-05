@@ -1,0 +1,45 @@
+{
+  "name": "repo-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test test/*.test.ts",
+    "start": "node dist/src/main.js",
+    "dev": "tsx src/main.ts",
+    "prepare:fixture": "tsx scripts/prepare-fixture.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "connection:status": "node scripts/tunnel-status.mjs --health-file .trial/standalone-tunnel-health.url",
+    "release:pack": "python3 scripts/package-release.py",
+    "task": "tsx scripts/task.ts",
+    "coord": "tsx scripts/coordinator.ts",
+    "model-policy": "tsx scripts/model-policy.ts"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "diff": "9.0.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/diff": "7.0.2",
+    "@types/node": "26.6.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "license": "MIT",
+  "description": "A repository-scoped MCP server for controlled local coding and code review",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jazzyalex/repo-mcp.git"
+  },
+  "homepage": "https://github.com/jazzyalex/repo-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/jazzyalex/repo-mcp/issues"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "files": ["AGENTS.md", "README.md", "package.json", "src/clamp.js", "test/clamp.test.js"],
+  "editable": ["src/clamp.js"],
+  "tests": ["test/clamp.test.js"]
+}

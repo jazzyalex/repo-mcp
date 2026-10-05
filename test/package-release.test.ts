@@ -1,0 +1,39 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { PROJECT_BASE, RELEASE_VERSION } from '../src/version.js';
+
+function run(command: string, args: string[]) {
+  const result = spawnSync(command, args, { cwd: PROJECT_BASE, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout;
+}
+
+test('public source archive is deterministic, allowlisted and self-contained', async () => {
+  assert.equal(
+    await readFile(path.join(PROJECT_BASE, 'README.md'), 'utf8'),
+    await readFile(path.join(PROJECT_BASE, 'docs/PUBLIC-README.md'), 'utf8'),
+    'repository and packaged public README must stay identical'
+  );
+  const release = path.join(PROJECT_BASE, 'release');
+  await rm(release, { recursive: true, force: true });
+  const first = JSON.parse(run('python3', ['scripts/package-release.py'])) as { archive: string; sha256: string };
+  const firstBytes = await readFile(first.archive);
+  const second = JSON.parse(run('python3', ['scripts/package-release.py'])) as { archive: string; sha256: string };
+  const secondBytes = await readFile(second.archive);
+  assert.equal(first.sha256, second.sha256);
+  assert.deepEqual(firstBytes, secondBytes);
+
+  const root = `repo-mcp-${RELEASE_VERSION}/`;
+  const listing = run('tar', ['-tzf', first.archive]).trim().split('\n');
+  for (const required of [
+    'README.md', 'SETUP.md', 'SECURITY.md', 'LICENSE', 'SOURCE-MANIFEST.json',
+    'docs/DESIGN-2B-PATH-POLICY.md', 'docs/WORKFLOW-SPEC.md',
+    'docs/V1-HARDENING-SPEC.md', '.claude/skills/repo-mcp-review/SKILL.md',
+    'scripts/model-policy.ts', 'src/model-policy.ts'
+  ]) assert.ok(listing.includes(root + required), `missing ${required}`);
+  assert.ok(listing.every(entry => entry.startsWith(root)));
+  assert.ok(listing.every(entry => !entry.includes('/.git/') && !entry.includes('/.trial/') && !entry.includes('/evidence/')));
+});
