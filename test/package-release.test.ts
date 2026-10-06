@@ -37,9 +37,10 @@ test('public source archive is deterministic, allowlisted and self-contained', a
   const root = `repo-mcp-${RELEASE_VERSION}/`;
   const listing = run('tar', ['-tzf', first.archive]).trim().split('\n');
   for (const required of [
-    'README.md', 'SETUP.md', 'SECURITY.md', 'LICENSE', 'SOURCE-MANIFEST.json',
+    'README.md', 'SETUP.md', 'SECURITY.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 'SOURCE-MANIFEST.json',
     'docs/MULTI-REPO-SPEC.md', 'docs/DESIGN-2B-PATH-POLICY.md', 'docs/WORKFLOW-SPEC.md',
-    'docs/V1-HARDENING-SPEC.md', '.claude/skills/repo-mcp-review/SKILL.md',
+    'docs/V1-HARDENING-SPEC.md', '.claude/skills/repo-mcp/SKILL.md',
+    '.claude/skills/repo-mcp-review/SKILL.md',
     '.codex/skills/repo-mcp/SKILL.md',
     'scripts/model-policy.ts', 'src/model-policy.ts',
     'src/multirepo-state.ts', 'src/multirepo-server.ts', 'test/multirepo.test.ts'

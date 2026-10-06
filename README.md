@@ -6,7 +6,37 @@ The service makes no model inference API calls. Git commit/push, repository regi
 
 **Status:** v0.2.0 source targets trusted, single-user macOS operation with Node 26+, Git, npm, and the official OpenAI tunnel client. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
 
-## Install
+## Set up with Codex or Claude
+
+You do not need to copy setup commands. Clone or open this repository in Codex or
+Claude Code and say:
+
+> Use the Repo MCP skill in this repository to install Repo MCP and verify ChatGPT access.
+
+The bundled agent instructions lead the agent through dependency checks, tests, broker
+and tunnel installation, durable service startup, ChatGPT tool refresh, and an end-to-end
+smoke test. They also install the Repo MCP skills into the user's Codex and Claude skill
+directories so future sessions in other projects can find them.
+The installed skill locates the permanent broker's control checkout automatically; the
+user does not need to remember its path.
+
+To connect a project later, open that project in Codex or Claude and say one of:
+
+> Use the Repo MCP skill to connect this repository for read-only review.
+
+> Use the Repo MCP skill to prepare this repository for coding task NAME.
+
+The agent creates a policy for the requested scope, registers the checkout, binds a task,
+and verifies the workspace. It should ask the user only for account-bound steps it cannot
+perform. On a new installation, that can include creating the private OpenAI tunnel and
+its **Tunnels Read + Use** runtime credential, and connecting or refreshing the Repo MCP
+app in ChatGPT. The credential is entered through a hidden local prompt and is never
+pasted into chat.
+
+Codex follows [AGENTS.md](AGENTS.md) and the bundled Repo MCP skill. Claude follows
+[CLAUDE.md](CLAUDE.md) and its bundled setup/review skills.
+
+## Manual setup and troubleshooting
 
 From the source checkout:
 
@@ -14,6 +44,7 @@ From the source checkout:
 npm ci
 npm run build
 npm test
+python3 scripts/install-agent-skills.py --install
 python3 scripts/install-server-service.py --install
 ```
 

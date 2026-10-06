@@ -11,6 +11,28 @@ the private tunnel is controlled separately by OpenAI.
 The normative authority/lifecycle contract is
 [docs/MULTI-REPO-SPEC.md](docs/MULTI-REPO-SPEC.md).
 
+## Agent-driven setup (recommended)
+
+Open the Repo MCP checkout in Codex or Claude Code and ask:
+
+> Use the Repo MCP skill in this repository to install Repo MCP and verify ChatGPT access.
+
+Codex is routed by `AGENTS.md` to `.codex/skills/repo-mcp/SKILL.md`; Claude is routed by
+`CLAUDE.md` to `.claude/skills/repo-mcp/SKILL.md`. The agent runs the commands in this
+document, installs the bundled skills globally, inspects existing state before changing
+it, and completes the end-to-end smoke test. This document remains the detailed manual
+reference and recovery guide.
+
+For a later project, open that checkout in either agent and ask it to connect the current
+repository for review or prepare it for a named coding task. The installed skill tells the
+agent to create a bounded external policy, register the exact checkout, bind a task, and
+verify the workspace without restarting the permanent service.
+
+The agent may still need the user for an account-bound action: creating the private
+OpenAI tunnel/runtime credential, or connecting/refreshing the developer-mode app in the
+signed-in ChatGPT UI when browser control is unavailable. Runtime credentials must be
+entered through the hidden local prompt, never in chat.
+
 ## 1. Install, migrate, and configure
 
 From the source checkout, validate locally before deploying:
@@ -19,6 +41,7 @@ From the source checkout, validate locally before deploying:
 npm ci
 npm run build
 npm test
+python3 scripts/install-agent-skills.py --install
 ```
 
 Install the repository-agnostic launchd definition:

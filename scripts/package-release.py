@@ -10,11 +10,12 @@ import re
 base = Path(__file__).resolve().parents[1]
 version = json.loads((base/'package.json').read_text())['version']
 name = f'repo-mcp-{version}'
-files = {p:base/p for p in ['package.json','package-lock.json','tsconfig.json','LICENSE','SETUP.md','SECURITY.md','CLAUDE.md','.gitignore']}
+files = {p:base/p for p in ['package.json','package-lock.json','tsconfig.json','LICENSE','SETUP.md','SECURITY.md','AGENTS.md','CLAUDE.md','.gitignore']}
 files['README.md'] = base/'docs/PUBLIC-README.md'
 for doc in ['docs/MULTI-REPO-SPEC.md', 'docs/V1-HARDENING-SPEC.md', 'docs/DESIGN-2B-PATH-POLICY.md', 'docs/WORKFLOW-SPEC.md']:
     files[doc] = base/doc
 files['.claude/skills/repo-mcp-review/SKILL.md'] = base/'.claude/skills/repo-mcp-review/SKILL.md'
+files['.claude/skills/repo-mcp/SKILL.md'] = base/'.claude/skills/repo-mcp/SKILL.md'
 files['.codex/skills/repo-mcp/SKILL.md'] = base/'.codex/skills/repo-mcp/SKILL.md'
 for folder in ['src','scripts','test','examples']:
     for p in sorted((base/folder).rglob('*')):

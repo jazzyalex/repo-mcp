@@ -1,24 +1,64 @@
 ---
 name: repo-mcp
-description: Register approved local Git checkouts with the permanent Repo MCP broker and coordinate policy-bounded ChatGPT or Claude coding, planning, and review.
+description: Install, configure, upgrade, or operate the permanent Repo MCP broker and connect approved local Git repositories for ChatGPT or Claude coding, planning, and review.
 ---
 
 # Repo MCP operator
 
-Use one installed Repo MCP broker across approved repositories. Repository selection is
+Use one installed Repo MCP broker across approved repositories. The user describes the
+outcome; run the installation and coordinator commands yourself. Repository selection is
 per workspace and does not restart or retarget the service. Filesystem roots, policies,
 task phases and write grants remain local operator decisions; the model selects only
 registered repository/task IDs.
+
+Common requests are:
+
+- "Use the Repo MCP skill to install Repo MCP and verify ChatGPT access."
+- "Use the Repo MCP skill to connect this repository for read-only review."
+- "Use the Repo MCP skill to prepare this repository for coding task NAME."
+
+When this skill is invoked from another project, locate the installed Repo MCP control
+checkout from the `WorkingDirectory` in
+`~/Library/LaunchAgents/local.repo-mcp.server.plist` and verify that it contains the
+expected `package.json` and coordinator. Run Repo MCP control commands there while
+treating the user's current Git checkout as the repository being registered. If the
+service is not installed and no source checkout was provided, clone the public Repo MCP
+repository into a user-approved development location first.
+
+## First-time setup or upgrade
+
+1. Work from the Repo MCP source checkout. Read `README.md`, `SETUP.md`, and its root
+   instructions. Verify macOS, Git, npm, and Node 26 or newer.
+2. Inspect existing Repo MCP launchd definitions and state before changing them. Never
+   overwrite a foreign or modified service. For v0.1, follow the documented migration
+   before issuing a v0.2 workspace or write grant.
+3. Run `npm ci`, `npm run build`, `npm test`, and
+   `python3 scripts/install-agent-skills.py --install`. Install the stable broker with
+   `python3 scripts/install-server-service.py --install`, configure it if needed, start
+   it with `npm run coord -- service start`, and verify `service status`.
+4. Configure the durable tunnel only if missing or unhealthy. Reuse saved credentials.
+   If no tunnel ID/runtime credential exists, explain the one-time account step and guide
+   the user through creating a private tunnel and a runtime key with **Tunnels Read +
+   Use**. Accept the key only through the hidden prompt used by
+   `scripts/connect.sh --save-key`; never ask for it in chat or in a command. Install the
+   tunnel service and verify `npm run connection:status`.
+5. Help create or refresh the developer-mode ChatGPT MCP app using the private tunnel.
+   Use available authorized browser control; otherwise ask for the single precise UI
+   action. After a schema update, use **Refresh tools** and a new ChatGPT conversation.
+   Repository selection alone never needs a refresh.
+6. Prove the real route with `service_info`, `repository_list`, `workspace_open`, scoped
+   `repo_info`, and `workspace_close`. Local process/tunnel health alone is insufficient.
 
 ## Prepare a repository and task
 
 1. Resolve the intended checkout with `git rev-parse --show-toplevel`. Read its root
    agent instructions before changing Repo MCP state. Never guess among sibling
    checkouts/worktrees.
-2. Keep the operator policy outside every served repository, normally under
+2. Create the operator policy outside every served repository, normally under
    `~/Library/Application Support/repo-mcp/policies/`, owner-only. Exclude generated
-   caches, vendor snapshots, credentials and private operator state. Grant write/create
-   only where the task needs them.
+   caches, dependencies, build products, vendor snapshots, credentials and private
+   operator state. Expose only the requested task scope. Grant write/create only where
+   the task needs them; inspection and planning should remain read-only.
 3. Verify the permanent broker separately from repository state:
 
    ```sh
