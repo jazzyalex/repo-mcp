@@ -1,12 +1,12 @@
 {
   "name": "repo-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc",
     "test": "tsx --test test/*.test.ts",
-    "start": "node dist/src/main.js",
+    "start": "node dist/src/service-main.js",
     "dev": "tsx src/main.ts",
     "prepare:fixture": "tsx scripts/prepare-fixture.ts",
     "smoke": "tsx scripts/smoke.ts",
@@ -33,7 +33,7 @@
     "typescript": "7.0.2"
   },
   "license": "MIT",
-  "description": "A repository-scoped MCP server for controlled local coding and code review",
+  "description": "A multi-repository MCP broker for controlled local coding and code review",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jazzyalex/repo-mcp.git"

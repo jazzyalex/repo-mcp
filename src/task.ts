@@ -10,8 +10,9 @@ import { StateStore, StateError, acquireLock, lockOwnerAlive, validateLockRecord
 // running server.
 
 export type Phase = 'coding' | 'review';
+type PhaseRecord = { phase: Phase; epoch?: number };
 export type TaskOptions = { stateDir: string; taskId: string; policyDigest: string; allowDetached?: boolean; recoverStaleLock?: boolean };
-type Binding = { task_id: string; root: string; git_dir: string; common_dir: string; branch: string | null; head: string; allow_detached: boolean; policy_digest: string; bound_at: string };
+type Binding = { task_id: string; root: string; git_dir: string; common_dir: string; branch: string | null; head: string; allow_detached: boolean; policy_digest: string; bound_at: string; binding_epoch?: number };
 export type Completion = { finished_at: string; result: 'committed' | 'abandoned'; commit_sha?: string };
 type Stage1Protocol = {
   protocol: 'v1-stage1';
@@ -67,7 +68,7 @@ async function ensureStage1Binding(store: StateStore, paths: ReturnType<typeof t
   const desired: Binding = {
     task_id: taskId, root: identity.root, git_dir: identity.git_dir, common_dir: identity.common_dir,
     branch: identity.branch, head: identity.head, allow_detached: allowDetached, policy_digest: policyDigest,
-    bound_at: new Date().toISOString()
+    bound_at: new Date().toISOString(), binding_epoch: 1
   };
   const protocolDesired: Stage1Protocol = {
     protocol: 'v1-stage1', root: identity.root, git_dir: identity.git_dir, common_dir: identity.common_dir,
@@ -97,16 +98,17 @@ async function ensureStage1Binding(store: StateStore, paths: ReturnType<typeof t
     } else existing = desired;
   }
 
-  let phase = await store.read<{ phase: Phase }>(paths.phase, 'phase');
+  let phase = await store.read<PhaseRecord>(paths.phase, 'phase');
   if (!phase) {
-    await store.create(paths.phase, 'phase', { phase: 'coding' });
-    phase = await store.read<{ phase: Phase }>(paths.phase, 'phase');
+    await store.create(paths.phase, 'phase', { phase: 'coding', epoch: 1 } satisfies PhaseRecord);
+    phase = await store.read<PhaseRecord>(paths.phase, 'phase');
   }
-  if (!phase || !PHASES.includes(phase.phase)) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
+  if (!phase || !PHASES.includes(phase.phase) || (phase.epoch !== undefined && (!Number.isSafeInteger(phase.epoch) || phase.epoch < 1))) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
   return existing!;
 }
 
 export class TaskContext {
+  private closePromise?: Promise<void>;
   private constructor(private readonly store: StateStore, readonly taskId: string, private readonly lock: Lock, private readonly policyDigest: string) {}
 
   static argsDigest(operation: string, args: unknown[]) { return sha256(JSON.stringify([operation, ...args])); }
@@ -153,15 +155,18 @@ export class TaskContext {
     return binding;
   }
 
-  async phase(): Promise<Phase> {
-    const record = await this.store.read<{ phase: Phase }>(taskPaths(this.taskId).phase, 'phase');
-    if (!record || !PHASES.includes(record.phase)) throw new StateError(`Task ${this.taskId} phase record is missing or invalid.`);
-    return record.phase;
+  private async phaseRecord(): Promise<Required<PhaseRecord>> {
+    const record = await this.store.read<PhaseRecord>(taskPaths(this.taskId).phase, 'phase');
+    if (!record || !PHASES.includes(record.phase) || (record.epoch !== undefined && (!Number.isSafeInteger(record.epoch) || record.epoch < 1))) throw new StateError(`Task ${this.taskId} phase record is missing or invalid.`);
+    return { phase: record.phase, epoch: record.epoch ?? 1 };
   }
+
+  async phase(): Promise<Phase> { return (await this.phaseRecord()).phase; }
 
   async summary() {
     const binding = await this.binding();
-    return { task_id: this.taskId, phase: await this.phase(), bound_branch: binding.branch, bound_head: binding.head, policy_digest: binding.policy_digest };
+    const phase = await this.phaseRecord();
+    return { task_id: this.taskId, phase: phase.phase, phase_epoch: phase.epoch, binding_epoch: binding.binding_epoch ?? 1, bound_branch: binding.branch, bound_head: binding.head, policy_digest: binding.policy_digest };
   }
 
   /** The binding's policy must still be the one this server loaded and enforces. */
@@ -258,13 +263,25 @@ export class TaskContext {
     } satisfies Outcome);
   }
 
-  async close() { await this.lock.release(); }
+  close() {
+    if (this.closePromise) return this.closePromise;
+    const run = this.lock.release();
+    this.closePromise = run;
+    void run.catch(() => { if (this.closePromise === run) this.closePromise = undefined; });
+    return run;
+  }
 }
 
 // Coordinator operations (not exposed through MCP).
 
 /** Persist or recover an exact Stage 1 task binding without acquiring the long-lived checkout writer lock. */
-export async function bindTask(stateDir: string, taskId: string, root: string, policyDigest: string, options: { allowDetached?: boolean } = {}) {
+export async function bindTask(
+  stateDir: string,
+  taskId: string,
+  root: string,
+  policyDigest: string,
+  options: { allowDetached?: boolean; gateWaitMs?: number } = {}
+) {
   const paths = taskPaths(taskId);
   const identity = await resolveIdentity(root);
   const store = await StateStore.open(stateDir, { forbiddenRoots: [identity.root, identity.common_dir] });
@@ -272,7 +289,7 @@ export async function bindTask(stateDir: string, taskId: string, root: string, p
   return withShortLock(store, gateKey(taskId), async () => {
     if (await store.read<Completion>(paths.completion, 'completion')) throw new SafeError(`Task ${taskId} is completed and cannot be reused. Use a new task ID.`);
     return ensureStage1Binding(store, paths, taskId, identity, policyDigest, !!options.allowDetached);
-  }, { waitMs: COORDINATOR_GATE_WAIT_MS, purpose: `task ${taskId} bind` });
+  }, { waitMs: options.gateWaitMs ?? COORDINATOR_GATE_WAIT_MS, purpose: `task ${taskId} bind` });
 }
 
 export async function isStage1BoundTask(stateDir: string, taskId: string) {
@@ -302,6 +319,12 @@ async function recoverStaleGate(store: StateStore, taskId: string) {
 const coordinatorGate = <T>(store: StateStore, taskId: string, fn: () => Promise<T>) =>
   withShortLock(store, gateKey(taskId), fn, { waitMs: COORDINATOR_GATE_WAIT_MS, purpose: 'coordinator' });
 
+/** Serialize an operator authorization/catalog transition with task mutations and checks. */
+export async function withTaskCoordinatorGate<T>(stateDir: string, taskId: string, fn: () => Promise<T>) {
+  const { store } = await coordinatorStore(stateDir, taskId);
+  return coordinatorGate(store, taskId, fn);
+}
+
 export async function recoverTaskStaleLocks(stateDir: string, taskId: string) {
   const { store, binding } = await coordinatorStore(stateDir, taskId);
   const identity = await resolveIdentity(binding.root);
@@ -318,7 +341,12 @@ export async function setTaskPhase(stateDir: string, taskId: string, phase: Phas
   const { store, paths } = await coordinatorStore(stateDir, taskId);
   await coordinatorGate(store, taskId, async () => {
     if (await store.read(paths.completion, 'completion')) throw new SafeError(`Task ${taskId} is completed and cannot change phase.`);
-    await store.write(paths.phase, 'phase', { phase });
+    const current = await store.read<PhaseRecord>(paths.phase, 'phase');
+    if (!current || !PHASES.includes(current.phase)) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
+    const epoch = current.epoch ?? 1;
+    if (!Number.isSafeInteger(epoch) || epoch < 1) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
+    if (current.phase === phase) return;
+    await store.write(paths.phase, 'phase', { phase, epoch: epoch + 1 } satisfies PhaseRecord);
   });
 }
 
@@ -340,7 +368,8 @@ export async function rebindTask(stateDir: string, taskId: string, root: string,
       head: identity.head,
       allow_detached: allowDetached,
       policy_digest: options.policyDigest ?? binding.policy_digest,
-      bound_at: new Date().toISOString()
+      bound_at: new Date().toISOString(),
+      binding_epoch: (binding.binding_epoch ?? 1) + 1
     };
     await store.write(paths.binding, 'binding', updated);
     return updated;
@@ -380,5 +409,7 @@ export async function taskWriterLockStatus(stateDir: string, taskId: string, opt
 
 export async function taskStatus(stateDir: string, taskId: string, options: { readOnly?: boolean } = {}) {
   const { store, paths, binding, completion } = await coordinatorStore(stateDir, taskId, { allowCompleted: true, readOnly: options.readOnly });
-  return { ...binding, phase: (await store.read<{ phase: Phase }>(paths.phase, 'phase'))?.phase ?? null, completion: completion ?? null };
+  const phase = await store.read<PhaseRecord>(paths.phase, 'phase');
+  if (!phase || !PHASES.includes(phase.phase) || (phase.epoch !== undefined && (!Number.isSafeInteger(phase.epoch) || phase.epoch < 1))) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
+  return { ...binding, binding_epoch: binding.binding_epoch ?? 1, phase: phase.phase, phase_epoch: phase.epoch ?? 1, completion: completion ?? null };
 }

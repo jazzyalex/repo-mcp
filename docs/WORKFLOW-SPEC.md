@@ -1,8 +1,10 @@
 # ChatGPT local coding workflow
 
-Status: proposed implementation contract, 2026-09-30; updated 2026-10-02. These capabilities are planned unless explicitly marked current.
+Status: proposed implementation contract, 2026-09-30; updated 2026-10-05.
 
-**Current, accepted source (2026-10-02):** milestones 1, 2a and 2b are source-accepted (216 of 216 tests and `tsc` clean independently, final Oracle review CLEAN, SHIP). The MCP server has eight tools: `repo_info`, `list_files`, `search`, `read`, `edit`, `create_file`, `run_tests` (fixture suites only, synchronous, ten-second timeout, output unpaged up to 32 KiB) and `git_diff`. It has **no asynchronous checks**, no `check_status`, `read_check_output` or `cancel_check`, and no new tool is promised. **Deferred, not accepted and not required before the first pilot:** the real-project check runner and evidence (milestone 3; a partial unfinished checkpoint is archived at [evidence/checkpoints/m3-20261002/CHECKPOINT.md](../evidence/checkpoints/m3-20261002/CHECKPOINT.md)), the automatic handoff utility (milestone 4), and macOS sandbox profiles. Sections marked "planned, deferred" below are future direction, kept as the technical design. The first pilot is described under "First acceptance pilot".
+**v0.2 lifecycle note:** [MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md) is normative for the current permanent broker, twelve-tool production schema, explicit workspace tokens and concurrent approved repositories. The single-active/sequential workflow below records the v0.1 pilot and older design context; follow it only where it does not conflict with MULTI-REPO-SPEC.md. Real-project check jobs, verified candidate/commit evidence and sandbox hardening remain separate future work.
+
+**Historical accepted baseline (2026-10-02):** milestones 1, 2a and 2b were source-accepted (216 of 216 tests and `tsc` clean independently, final Oracle review CLEAN, SHIP). That v0.1 MCP server had eight repository tools: `repo_info`, `list_files`, `search`, `read`, `edit`, `create_file`, `run_tests` (fixture suites only, synchronous, ten-second timeout, output unpaged up to 32 KiB) and `git_diff`. v0.2 retains those repository operations behind explicit workspaces and adds four bootstrap tools. The deferred real-project check runner/evidence, automatic handoff utility, and macOS sandbox profiles remain future direction.
 
 ## Current operating procedure: ChatGPT owns code and review
 

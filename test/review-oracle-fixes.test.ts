@@ -450,23 +450,24 @@ test('long AGENTS.md instructions are retrieved completely through read(path, cu
 
 // --- 6. tool count in operator docs -----------------------------------------------------------------------------
 
-test('operator docs name the eight tools the server registers', async t => {
+test('single-repository adapter stays eight tools while operator docs describe the twelve-tool production broker', async t => {
   const m = await makeRepo(t);
   const service = await startServer(m.root, 0, undefined, policyDoc());
   const { client } = await connect(service.url);
   try {
     const names = (await client.listTools()).tools.map(x => x.name).sort();
-    assert.equal(names.length, 8);
+    assert.equal(names.length, 8, 'startServer remains the explicit single-repository adapter');
     for (const doc of ['README.md', 'SETUP.md']) {
       const text = await readFile(path.join(process.cwd(), doc), 'utf8');
       assert.doesNotMatch(text, /\bseven tools\b|\bSeven tools\b/, doc);
-      assert.match(text, /\b[Ee]ight tools\b/, doc);
-      assert.ok(text.includes('list_files'), doc);
-      for (const name of names) assert.ok(text.includes(name), `${doc} mentions ${name}`);
+      assert.match(text, /\btwelve tools\b|\bTwelve tools\b/i, doc);
+      for (const name of names) assert.ok(text.includes(name), `${doc} mentions repository tool ${name}`);
+      for (const name of ['service_info', 'repository_list', 'workspace_open', 'workspace_close']) assert.ok(text.includes(name), `${doc} mentions bootstrap tool ${name}`);
+      assert.match(text, /workspace_token/, doc);
     }
     const publicReadme = await readFile(path.join(process.cwd(), 'docs/PUBLIC-README.md'), 'utf8');
     assert.doesNotMatch(publicReadme, /32 KiB (?:per|source|file)|linked worktrees? (?:are|is) not supported/i);
-    assert.match(publicReadme, /milestone 2b|list_files/);
+    assert.match(publicReadme, /multi-repository|list_files/i);
   } finally { await client.close(); await service.close(); }
 });
 

@@ -680,10 +680,10 @@ test('Stage 1 rejects finish --commit in CLI and production without publishing c
 
   const cli = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/coordinator.ts'),
-    'finish', '--commit', sha, '--state-dir', stateDir
+    'task', 'finish', '--task', 'commit-task', '--commit', sha, '--state-dir', stateDir
   ], { cwd: projectRoot, encoding: 'utf8' });
   assert.notEqual(cli.status, 0);
-  assert.match(cli.stderr, /Stage 3|not supported.*commit|--abandon/i);
+  assert.match(cli.stderr, /commit|unknown option/i);
   await assert.rejects(
     coordinatorFinish({ stateDir, result: 'committed', commitSha: sha }),
     /Stage 3|not supported.*commit|abandon/i
@@ -1387,32 +1387,40 @@ test('policy rebind makes local readiness blocked until active service policy ma
   });
 });
 
-test('coordinator CLI rejects extra positionals, out-of-command options, and empty --commit by presence', async () => {
+test('multi-repository coordinator CLI rejects extra positionals and out-of-command options', async () => {
   const base = await realpath(await tmp('repo-mcp-stage1-cli-contract-'));
   const stateDir = path.join(base, 'state');
   const run = (...args: string[]) => spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/coordinator.ts'), ...args, '--state-dir', stateDir
   ], { cwd: projectRoot, encoding: 'utf8' });
 
-  const extra = run('status', 'extra');
+  const extra = run('service', 'status', 'extra');
   assert.notEqual(extra.status, 0);
-  assert.match(extra.stderr, /exactly one|positional/i);
+  assert.match(extra.stderr, /Use: coord|single-active CLI/i);
 
-  const startTask = run('start', '--task', 'not-valid-here');
+  const startTask = run('service', 'start', '--task', 'not-valid-here');
   assert.notEqual(startTask.status, 0);
-  assert.match(startTask.stderr, /--task.*start|not valid.*start/i);
+  assert.match(startTask.stderr, /--task.*not valid.*service start/i);
 
-  const statusRecover = run('status', '--recover-stale');
-  assert.notEqual(statusRecover.status, 0);
-  assert.match(statusRecover.stderr, /--recover-stale.*status|not valid.*status/i);
+  const repositoryPort = run('repository', 'list', '--port', '9000');
+  assert.notEqual(repositoryPort.status, 0);
+  assert.match(repositoryPort.stderr, /--port.*not valid.*repository list/i);
 
-  const emptyCommit = run('finish', '--abandon', '--commit=');
-  assert.notEqual(emptyCommit.status, 0);
-  assert.match(emptyCommit.stderr, /finish --commit|Stage 3|not support/i);
+  const legacyStatusTask = run('status', '--task', 'not-valid-here');
+  assert.notEqual(legacyStatusTask.status, 0);
+  assert.match(legacyStatusTask.stderr, /--task.*not valid.*status/i);
 
-  const finishJson = run('finish', '--abandon', '--json');
+  const finishJson = run('task', 'finish', '--task', 't1', '--json');
   assert.notEqual(finishJson.status, 0);
-  assert.match(finishJson.stderr, /--json.*finish|not valid.*finish/i);
+  assert.match(finishJson.stderr, /--json.*not valid.*task finish/i);
+
+  const recoverControlTask = run('service', 'recover-stale-control', '--task', 'not-valid-here');
+  assert.notEqual(recoverControlTask.status, 0);
+  assert.match(recoverControlTask.stderr, /--task.*not valid.*service recover-stale-control/i);
+
+  const recoverWorkspaceMissing = run('workspace', 'recover-stale');
+  assert.notEqual(recoverWorkspaceMissing.status, 0);
+  assert.match(recoverWorkspaceMissing.stderr, /requires --workspace/i);
   await rm(base, { recursive: true, force: true });
 });
 

@@ -171,9 +171,14 @@ export type Lock = { key: string; token: string; owned(): Promise<boolean>; rele
  * A lock left by a dead process is reported as stale and only removed when the
  * operator asks for explicit recovery.
  */
-export async function acquireLock(store: StateStore, key: string, purpose: string, options: { recoverStale?: boolean; expectedExistingPurpose?: string } = {}): Promise<Lock> {
+export async function acquireLock(store: StateStore, key: string, purpose: string, options: {
+  recoverStale?: boolean;
+  expectedExistingPurpose?: string;
+  expectedExistingToken?: string;
+} = {}): Promise<Lock> {
   const rel = `locks/${key}.json`;
   const record: LockRecord = { pid: process.pid, hostname: os.hostname(), token: randomUUID(), purpose, acquired_at: new Date().toISOString() };
+  let releasePromise: Promise<void> | undefined;
   const lock: Lock = {
     key, token: record.token,
     owned: async () => {
@@ -181,7 +186,15 @@ export async function acquireLock(store: StateStore, key: string, purpose: strin
       if (!current) return false;
       return validateLockRecord(current, key).token === record.token;
     },
-    release: async () => { if (await lock.owned()) await store.remove(rel); }
+    release: () => {
+      if (releasePromise) return releasePromise;
+      const run = (async () => {
+        if (await lock.owned()) await store.remove(rel);
+      })();
+      releasePromise = run;
+      void run.catch(() => { if (releasePromise === run) releasePromise = undefined; });
+      return run;
+    }
   };
   let existing: LockRecord;
   while (true) {
@@ -196,6 +209,7 @@ export async function acquireLock(store: StateStore, key: string, purpose: strin
   if (existing.hostname !== record.hostname) throw new StateError(`Lock ${key} is owned by a process on ${existing.hostname}; it cannot be verified from this host.`);
   if (lockOwnerAlive(existing.pid)) throw new StateError(`Lock ${key} is already owned by live process ${existing.pid} (${existing.purpose}).`);
   if (options.expectedExistingPurpose !== undefined && existing.purpose !== options.expectedExistingPurpose) throw new StateError(`Lock ${key} belongs to ${existing.purpose}, not ${options.expectedExistingPurpose}; refusing stale recovery.`);
+  if (options.expectedExistingToken !== undefined && existing.token !== options.expectedExistingToken) throw new StateError(`Lock ${key} changed before stale recovery; refusing to remove a replacement lock.`);
   if (!options.recoverStale) throw new StateError(`Stale lock ${key} from exited process ${existing.pid} (${existing.purpose}, ${existing.acquired_at}). Inspect task state, then recover the lock explicitly.`);
   // Recovery is serialized by an exclusive marker. Normal acquisition only ever
   // creates, and the stale owner is dead, so under the marker the record cannot

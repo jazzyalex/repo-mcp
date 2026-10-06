@@ -26,6 +26,7 @@ export const files = ['AGENTS.md', 'README.md', 'package.json', 'src/clamp.js', 
 export type RepoPolicy = { files: string[]; editable: string[]; tests: string[]; creatable?: string[]; runner?: PythonRunner };
 export const defaultPolicy: RepoPolicy = { files, editable: ['src/clamp.js'], tests: ['test/clamp.test.js'] };
 /** Test seams: `monotonicClock` drives operation deadlines, `captureHook` observes capture stages. */
+export type OperationPreflight = () => Promise<void>;
 export type RepoOptions = {
   task?: TaskOptions; limits?: Partial<Limits>; operationBudgetMs?: number; clock?: () => number;
   monotonicClock?: () => number; captureHook?: (stage: 'before-git' | 'after-git', attempt: number, run?: number) => void | Promise<void>;
@@ -33,6 +34,8 @@ export type RepoOptions = {
   pathHook?: PathHook;
   /** Test seam: sees the arguments and timeout (ms, when given) of every buffered Git call the repo makes (`git()`). */
   gitHook?: (args: string[], timeout?: number) => void;
+  /** Test seam: pauses the first/only close before task ownership is released. */
+  closeHook?: () => void | Promise<void>;
 };
 /** repo_info carries at most this much of AGENTS.md; the rest is read with its continuation cursor. */
 const INSTRUCTIONS_BYTES = 8 * 1024;
@@ -114,6 +117,7 @@ export class RepoWorkspace {
   private busy = false;
   private testHashes = new Map<string, string>();
   private task?: TaskContext;
+  private closePromise?: Promise<void>;
   /** Retained Git output; assigned in create(). */
   captures!: CaptureStore;
   private ownsCaptureDir = false;
@@ -123,6 +127,7 @@ export class RepoWorkspace {
   private readonly captureHook?: RepoOptions['captureHook'];
   private readonly pathHook?: PathHook;
   private readonly gitHook?: RepoOptions['gitHook'];
+  private readonly closeHook?: RepoOptions['closeHook'];
   private readonly clock: () => number;
   private readonly paths: PathPolicy;
   /** The v1 exact-list form; present exactly when the policy is made of exact paths (exact mode). */
@@ -138,6 +143,7 @@ export class RepoWorkspace {
     this.captureHook = options.captureHook;
     this.pathHook = options.pathHook;
     this.gitHook = options.gitHook;
+    this.closeHook = options.closeHook;
     this.clock = options.clock ?? Date.now;
     this.paths = compiled.paths;
     this.legacy = compiled.legacy;
@@ -196,7 +202,17 @@ export class RepoWorkspace {
     }
     await this.requireEditableTracked(writes.filter(f => !/[*?]/.test(f) && this.paths.decide(f, 'write').ok), this.startupDeadline());
   }
-  async close() { await this.task?.close(); if (this.ownsCaptureDir) await this.captures.destroy(); }
+  close() {
+    if (this.closePromise) return this.closePromise;
+    const run = (async () => {
+      await this.closeHook?.();
+      await this.task?.close();
+      if (this.ownsCaptureDir) await this.captures.destroy();
+    })();
+    this.closePromise = run;
+    void run.catch(() => { if (this.closePromise === run) this.closePromise = undefined; });
+    return run;
+  }
   /** True when the policy is made of exact paths (v1 behaviour); false for discovered (glob) policies. */
   get exactPolicy() { return !!this.legacy; }
 
@@ -485,7 +501,7 @@ export class RepoWorkspace {
   }
 
   // --- Mutations ---------------------------------------------------------------------------------
-  async exclusive<T>(kind: 'mutation' | 'check', fn: () => Promise<T>) {
+  async exclusive<T>(kind: 'mutation' | 'check', fn: () => Promise<T>, preflight?: OperationPreflight) {
     if (this.busy) throw new SafeError('A mutation or test is running; retry after it finishes.');
     this.busy = true;
     const run = async () => {
@@ -493,9 +509,11 @@ export class RepoWorkspace {
       const current = await resolveIdentity(this.root);
       if (this.task) await this.task.verify(current, kind);
       else { const drift = identityDrift(this.identity, current); if (drift) throw new SafeError(drift); }
+      // Broker authorization must be checked inside this same task-gated critical section.
+      await preflight?.();
       return fn();
     };
-    try { return kind === 'mutation' && this.task ? await this.task.withMutationGate(run) : await run(); }
+    try { return this.task ? await this.task.withMutationGate(run) : await run(); }
     finally { this.busy = false; }
   }
   /** Read-only tools stop as soon as the bound policy no longer matches the loaded one. */
@@ -611,7 +629,7 @@ export class RepoWorkspace {
     if (!this.paths.decide(rel, 'write').ok) throw new SafeError('Path is not editable by this repository policy.');
     return rel;
   }
-  async edit(file: string, oldText: string, newText: string, expectedHash: string, requestId?: string) {
+  async edit(file: string, oldText: string, newText: string, expectedHash: string, requestId?: string, preflight?: OperationPreflight) {
     return this.exclusive('mutation', () => this.once(requestId, 'edit', [file, oldText, newText, expectedHash], file, async intent => {
       await this.touch();
       const rel = this.editable(file);
@@ -642,7 +660,7 @@ export class RepoWorkspace {
         await verifyPublished(this.root, rel, { dev: written.dev, ino: written.ino });
       } finally { await handle.close().catch(() => {}); await unlink(temp).catch(() => {}); }
       return { path: rel, before_sha256: before.sha256, after_sha256: sha256(after), ...this.boundedPatch(rel, before.content, after) };
-    }));
+    }), preflight);
   }
   /** Fail on a sibling that differs from `name` only by case or Unicode form; tells whether `name` exists exactly. */
   private async siblingCheck(parentRel: string, name: string) {
@@ -651,7 +669,7 @@ export class RepoWorkspace {
     if (names.some(n => n !== name && fold(n) === key)) throw new SafeError('A file or directory with a conflicting name already exists here (names that differ only by case or Unicode form count as the same).');
     return names.includes(name);
   }
-  async createFile(file: string, content: string, requestId?: string) {
+  async createFile(file: string, content: string, requestId?: string, preflight?: OperationPreflight) {
     return this.exclusive('mutation', () => this.once(requestId, 'create_file', [file, content], file, async (intent, publication) => {
       await this.touch();
       const rule = this.paths.createRule(file);
@@ -735,7 +753,7 @@ export class RepoWorkspace {
       }
       const reserve = created.length ? { created_directories: Array(MAX_CREATE_DIRS).fill('x'.repeat(259)) } : {};
       return { path: file, before_sha256: null, after_sha256: sha256(content), ...this.boundedPatch(file, '', content, reserve), ...(created.length ? { created_directories: created } : {}) };
-    }));
+    }), preflight);
   }
   async git(args: string[], timeout?: number) {
     this.gitHook?.(args, timeout);
@@ -1047,7 +1065,7 @@ export class RepoWorkspace {
   }
 
   // --- Tests -----------------------------------------------------------------------------------
-  async test(suite?: string) {
+  async test(suite?: string, preflight?: OperationPreflight) {
     return this.exclusive('check', async () => {
       const tests = this.legacy ? this.legacy.tests : this.paths.literalPaths.tests;
       if (!tests.length) throw new SafeError('No test suites are configured for this read-only scope.');
@@ -1078,7 +1096,7 @@ export class RepoWorkspace {
         const writable = (file: string) => this.legacy ? this.legacy.editable.includes(file) : this.paths.decide(file, 'write').ok;
         return { test_files: selected.map(file => ({ path: file, editable: writable(file) })), command: command.label, ...result };
       } finally { await rm(snapshot, { recursive: true, force: true }); }
-    });
+    }, preflight);
   }
 }
 

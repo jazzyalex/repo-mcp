@@ -1,85 +1,160 @@
 # Setup and operation
 
-Repo MCP v0.1.0 is an MIT-licensed public release. Current verified support is macOS with
-Node 26+, Git at /usr/bin/git, and the official OpenAI tunnel-client. The Python
-runner additionally needs Python and pytest. Windows and Linux are not certified.
-No API inference calls are made by this server. Access to ChatGPT custom apps and
-OpenAI tunnel permissions is required; account eligibility is controlled by OpenAI.
+Repo MCP v0.2.0 uses one permanent multi-repository broker for trusted single-user
+macOS operation. Current platform assumptions remain Node 26+, Git at /usr/bin/git,
+npm, and the official OpenAI tunnel client. The Python fixture runner additionally
+needs Python and pytest. Windows and Linux are not certified.
 
-## 1. Install and verify locally
+No model inference API call is made by Repo MCP itself. Access to ChatGPT apps and
+the private tunnel is controlled separately by OpenAI.
 
-From your copy of this project:
+The normative authority/lifecycle contract is
+[docs/MULTI-REPO-SPEC.md](docs/MULTI-REPO-SPEC.md).
+
+## 1. Install, migrate, and configure
+
+From the source checkout, validate locally before deploying:
 
 ```sh
 npm ci
 npm run build
 npm test
-npm run prepare:fixture
-REPO_ROOT="$PWD/.trial/repo" npm start
 ```
 
-Keep the last command running. Preparation refuses to overwrite existing files.
-This starts a disposable fixture; do not begin by exposing your main repository.
-The default profile permits one source edit and protects tests. For other projects,
-select an existing checkout or a linked Git worktree and write an explicit policy.
-Bare repositories are rejected. See README.md for policy examples, creation
-permissions, and supported runners. Do not share a writable checkout with an
-editor or another agent while a task runs.
-
-### Task mode (durable binding and locks)
-
-Set `REPO_MCP_TASK_ID` to bind the server to a task. State lives outside served
-repositories in `REPO_MCP_STATE_DIR` (default
-`~/Library/Application Support/repo-mcp/state` on macOS). The binding records the
-checkout, Git directories, branch, HEAD and policy digest. A cooperative lock allows
-one server per checkout; it does not stop editors or shells. If the branch, HEAD or
-policy changes, mutations and checks stop until the coordinator rebinds. A detached
-HEAD needs `REPO_MCP_ALLOW_DETACHED=1`. A lock left by a crashed server is reported
-as stale; after inspection, start once with `REPO_MCP_RECOVER_STALE_LOCK=1`.
-That also clears a stale mutation gate left by a crashed server or coordinator command.
-`phase` and `rebind` wait for in-flight mutations to finish, and return only after
-the change is durable (up to 60 s, then they report busy). After a policy rebind, the
-running server refuses all tools until it restarts with the new policy file.
-`edit` and `create_file` accept a `request_id`; a retry with the same ID and
-arguments returns the recorded outcome instead of applying the change twice.
-`already_applied` confirms the file already has the request's resulting contents; it
-is not proof that this request wrote them. Request IDs exist only in task mode;
-untracked servers omit the argument and reject it if sent.
-
-**Crash recovery of `create_file`.** A create publishes by hard-linking a complete temporary
-file (`.mcp-<uuid>.tmp`, in the target's directory) to the target and then removing the
-temporary. Before the link, the task state records the temporary's path and inode. If the
-server dies between the link and the removal, the target has two links, which reads and
-discovery refuse. On the next start of that task (before exact-mode validation), and on a
-retry with the same `request_id`, the server removes only that recorded temporary, and only
-if it is still the recorded inode, in the target's directory, with the recorded content hash
-and exactly the expected links. Then the retry returns `already_applied`. If anything
-differs (a replaced temporary, an extra hard link, a symlink, a different file at the
-target, malformed evidence), nothing is removed or written and the retry reports an
-uncertain outcome to inspect by hand. A target that exists but that reads refuse is never
-treated as absent. Outcomes recorded by older versions have no evidence and are never
-cleaned up (a hard-linked target stays and is reported as uncertain). A crash before the
-evidence is recorded leaves an unexposed `.mcp-*.tmp` orphan that is not removed by name;
-delete it by hand if it bothers you. The retry still creates the file once.
+Install the repository-agnostic launchd definition:
 
 ```sh
-npm run task -- status --task TASK_ID
-npm run task -- phase --task TASK_ID --phase review
-npm run task -- rebind --task TASK_ID --root /path/to/checkout
+python3 scripts/install-server-service.py --install
 ```
 
-For a policy change on the same unfinished task, publish the task rebind, publish the
-matching active-service generation, and restart it in that order:
+For a machine upgrading from the v0.1 single-active coordinator, first import the
+existing active-service/task binding into the v0.2 catalog while the old source/runtime
+state is still available:
 
 ```sh
-npm run task -- rebind --task TASK_ID --root /path/to/checkout --policy /path/to/policy.json
-npm run coord -- bind --task TASK_ID --repo /path/to/checkout --policy /path/to/policy.json
-npm run coord -- start
+npm run coord -- migration active-service --repository LEGACY_REPOSITORY_ID
 ```
 
-For another repository, finish the current task, choose a new task ID and run the
-ordinary `coord bind` / `coord start` sequence. The stable server and tunnel services
-are reused; no plist editing, plugin recreation or new tunnel credential is needed.
+This migration copies the normalized policy into owner-only Repo MCP state. It does
+not delete the legacy active-service record. Before any workspace/grant/new catalog
+use, the catalog-only migration can be rolled back:
+
+```sh
+npm run coord -- migration rollback-active-service
+```
+
+The rollback does not change binaries, launchd, tunnel state, repository contents,
+or task mutation outcomes.
+
+Configure and start the permanent broker:
+
+```sh
+npm run coord -- service configure --port 8787
+npm run coord -- service start
+npm run coord -- service status
+```
+
+The broker can start with an empty catalog. Repository registration, selection,
+switching, phase changes and normal task completion do not restart it.
+
+### Register approved repositories
+
+Keep source policy files outside every served repository, for example under
+`~/Library/Application Support/repo-mcp/policies/`.
+
+```sh
+npm run coord -- repository add \
+  --repository PROJECT_ID \
+  --repo /absolute/path/to/checkout \
+  --policy "$HOME/Library/Application Support/repo-mcp/policies/PROJECT_ID.json"
+
+npm run coord -- task bind \
+  --repository PROJECT_ID \
+  --task TASK_ID
+
+npm run coord -- repository list
+npm run coord -- task status --task TASK_ID
+```
+
+Registration stores canonical checkout/Git identity and copies a normalized,
+content-addressed policy snapshot into private operator state. MCP never accepts a
+filesystem root or policy path.
+
+One unfinished task owns one registered checkout. To run independent coding tasks
+against the same project at the same time, create and register separate Git worktrees.
+
+### Workspace selection
+
+Production repository tools have no ambient repository. A model first uses
+`service_info`, `repository_list`, then `workspace_open`.
+
+Read-only inspect/review selections need only registered repository/task IDs. Coding
+requires a short-lived single-use write grant issued locally:
+
+```sh
+npm run coord -- workspace grant --task TASK_ID
+```
+
+The coding handoff uses the returned grant once with `workspace_open`; repository
+calls thereafter use the returned `workspace_token`.
+
+A workspace token is a bearer capability, not cryptographic proof of one ChatGPT
+conversation. Do not put tokens into source, logs, prompts intended for another
+conversation, or release artifacts.
+
+The fixed production tool set is twelve tools:
+
+- bootstrap: `service_info`, `repository_list`, `workspace_open`, `workspace_close`;
+- repository: `repo_info`, `list_files`, `search`, `read`, `edit`,
+  `create_file`, `run_tests`, `git_diff`.
+
+Every repository tool requires `workspace_token`. Old unscoped production calls
+fail closed after the v0.2 schema refresh.
+
+### Task phases, durable epochs, and mutation outcomes
+
+Task state remains outside served repositories under `REPO_MCP_STATE_DIR` (default
+`~/Library/Application Support/repo-mcp/state`). The binding records canonical
+checkout identity, branch, HEAD and policy digest plus a monotonic binding epoch.
+The phase record has a monotonic phase epoch.
+
+```sh
+npm run coord -- task phase --task TASK_ID --phase review
+npm run coord -- task phase --task TASK_ID --phase coding
+npm run coord -- task rebind --task TASK_ID
+# only after inspecting a stale task/checkout lock:
+npm run coord -- task recover-stale --task TASK_ID
+# only after inspecting a dead-owner global broker control lock:
+npm run coord -- service recover-stale-control
+# only after inspecting a dead-owner admission lock for this persisted workspace:
+npm run coord -- workspace recover-stale --workspace WORKSPACE_ID
+```
+
+The two multi-repository recovery commands verify the lock is on this host, its owner PID is dead, its purpose matches a known Repo MCP operation, and its exact stale token still matches immediately before replacement. Workspace recovery additionally verifies the persisted workspace status/capability is compatible with the lock purpose. Live, different-host, unexpected-purpose, and replacement locks are never stolen. A stale `.recovery.json` recovery marker still requires manual operator-state inspection/removal; these commands do not alter repository/task/workspace authorization.
+
+Phase and rebind changes invalidate prior workspace selections. An old coding token
+therefore cannot become writable again after review/resume.
+
+The review transition waits for admitted MCP mutations and approved fixture checks
+to drain. Current v0.2 review assurance is a task-wide write freeze, not a
+content-verified candidate snapshot; `repo_info` reports that distinction.
+
+`edit` and `create_file` require public `request_id` values. The broker namespaces
+them by workspace before using the durable task outcome journal. Retrying the same
+workspace request with identical arguments reconciles the recorded result; changing
+arguments under the same request ID is rejected.
+
+**Crash recovery of `create_file`.** A create publishes by hard-linking a complete
+temporary file (`.mcp-<uuid>.tmp`) to the target and then removing the temporary.
+Before the link, task state records the temporary path/inode. After interruption,
+cleanup occurs only when that exact physical identity, content hash and expected link
+count still match. Replaced/malformed/extra-link evidence is uncertain and fails
+closed. Existing v0.1 outcome records without publication evidence remain
+non-destructive and require inspection.
+
+The low-level `npm run task -- ...` interface remains a compatibility/recovery
+surface for old task state; new production workflows use the grouped
+`npm run coord -- task ...` commands above.
 
 ### Limits and paging
 
@@ -277,91 +352,78 @@ launchctl bootout "gui/$(id -u)/local.repo-mcp.tunnel"
 Move its plist out of `~/Library/LaunchAgents` to disable login startup. Preserve
 `~/Library/Application Support/repo-mcp/credentials/runtime.key` for later reuse.
 
-## 3. Keep the MCP server running on macOS
+## 3. Keep the permanent MCP broker running on macOS
 
-V1 uses one repository-agnostic `local.repo-mcp.server` definition. Build first,
-then preview or install that stable definition:
+v0.2 keeps one repository-agnostic `local.repo-mcp.server` launchd definition.
+Build and install only when intentionally deploying new source:
 
 ```sh
 npm run build
-python3 scripts/install-server-service.py
 python3 scripts/install-server-service.py --install
+npm run coord -- service start
 ```
 
-The stable plist contains only the Node path, stable service entry point, and the
-operator state-directory path. It contains no repository, policy, task, or tunnel
-credential. `--install` is idempotent only for a definition whose exact bytes are
-still backed by the private install record; an unexpected or modified plist is a
-hard failure rather than an implicit adoption.
+The stable plist contains only the Node path, stable service entry point, and owner
+state-directory path. It contains no repository, policy, task, workspace token, or
+tunnel credential. An unexpected/modified plist is a hard failure rather than an
+implicit adoption.
 
-Bind a new task ID before loading the service, then start through the coordinator:
+Broker readiness is service-level. It verifies the expected package version and
+that the loopback listener PID matches the inspected launchd process. Repository
+identity is verified later under each workspace selection; changing repository
+selection never calls `kickstart` and never changes the service plist.
+
+Launchd inspection remains fail-closed. The only `launchctl print` result treated
+as positively unloaded is exit 113 with empty stdout and the exact C-locale
+not-found error. Timeout, truncation, invalid UTF-8, signals, ambiguous output, and
+other nonzero results are inspection failures.
+
+If an installation still uses the exact older repository-specific plist, migrate
+that plist through the explicit service migration flow before using the broker.
+For ordinary v0.1 stable-service upgrades, use the catalog migration described in
+section 1; the stable plist itself is already repository-agnostic.
+
+Task completion no longer stops the service:
 
 ```sh
-npm run coord -- bind --task TASK_ID --repo /absolute/path/to/checkout \
-  --policy /absolute/path/to/operator-policy.json
-npm run coord -- start
-npm run coord -- status
+npm run coord -- task finish --task TASK_ID
 ```
 
-`coord start` uses `kickstart -k` for an already-loaded expected definition and
-bootstrap for an unloaded definition. A changed trusted service definition is
-replaced with explicit bootout/bootstrap. Success requires loopback process
-attestation to match the desired generation, task ID, canonical-root digest, and
-package version; HTTP `ok=true` by itself is not readiness. Use
-`coord start --recover-stale` only after inspecting a stale server lock; ordinary
-start never deletes stale lock state.
+v0.2 task finish supports abandonment only. Verified commit completion remains
+deferred to the separate candidate/staging/post-commit gate. Git commit/push remain
+outside MCP.
 
-Launchd inspection is fail-closed. The only `launchctl print` result treated as
-positively unloaded is exit 113, empty stdout, and the C-locale two-line error
-`Bad request.` followed by
-`Could not find service "local.repo-mcp.server" in domain for user gui: UID`.
-Timeout, truncation, invalid UTF-8, signals, and every other nonzero result are
-inspection failures. The deterministic classifier is regression-tested; this
-Stage 1 repair did not execute that exact classification against the real macOS
-user launchd domain, because doing so through the pilot would touch live service
-state.
-
-The old repository-specific plist is migrated only by the explicit
-`npm run coord -- migrate-legacy` flow. With no safely bound new task it is backed
-up and replaced as `prepared_unbound`, and the stable service remains unloaded;
-a later bind/start performs the first task-bound generation verification. Stage 1
-does not infer ownership for pre-hardening task IDs: use a new task ID rather than
-synthesizing Stage 2 claims.
-
-Finish is terminal for that task ID and stops the service before publishing the
-completion marker. Stage 1 supports abandonment only:
-
-```sh
-npm run coord -- finish --abandon
-```
-
-`finish --commit` is intentionally rejected in Stage 1. It becomes eligible only
-after Stage 3 supplies the durable candidate/staging/post-commit verification
-handoff required by the hardening contract.
-
-The separate tunnel service above keeps its private connection running. Mac sleep
-and loss of internet can still interrupt connections; launchd does not keep the
-Mac awake and no work can be served while the machine is sleeping/offline. After
-wake or network return, evaluate local process attestation and tunnel freshness
-separately, then perform a fresh `repo_info` route proof before another mutation.
+The separate tunnel service keeps its private connection across repository/task
+changes. Sleep or network loss can still interrupt the route. After recovery,
+evaluate local broker process health and tunnel freshness separately, then make a
+fresh `service_info` call and re-open the intended workspace before mutation.
 
 Operator state and server logs default under
-`~/Library/Application Support/repo-mcp/`; move the launchd plist out of
-`~/Library/LaunchAgents` only for manual recovery. After changing code, rebuild
-and use `coord start`; a running process does not reload source.
+`~/Library/Application Support/repo-mcp/`. Source edits do not hot-reload the
+running service; rebuild/restart only as an explicit deployment action, never as
+part of repository selection.
 
 ## 4. Connect ChatGPT and verify
 
-Create a developer-mode MCP app in ChatGPT Plugins, choose Tunnel, and select the
-same tunnel. Choose no MCP-layer authentication for this loopback-only pilot; the
-private tunnel supplies remote authorization. Never expose the HTTP port publicly.
+Create or retain the developer-mode MCP app using the private tunnel. Never expose
+the loopback HTTP port directly to a public network.
 
-After adding/changing tool schemas, refresh tools in the plugin settings and start
-a new chat. Expect eight tools (`repo_info`, `list_files`, `search`, `read`, `edit`,
-`create_file`, `run_tests`, `git_diff`); a server built from `dist/` before milestone 2b
-shows seven, without `list_files`. Ask for repo_info first;
-verify the repository, HEAD, writable files and test suites before any edits.
-Then run the baseline tests. A local ready flag alone is not end-to-end proof.
+After deploying the v0.2 schema, refresh tools in the plugin settings and start a
+compatible chat. Expect twelve tools: four bootstrap tools plus the eight repository
+tools documented above. All eight repository tool schemas require
+`workspace_token`.
+
+End-to-end verification sequence:
+
+1. call `service_info`;
+2. call `repository_list`;
+3. call `workspace_open` with the intended registered repository/task and mode;
+4. call scoped `repo_info` with the returned workspace token;
+5. verify repository root/branch/HEAD/task/phase and policy scope before any edit.
+
+A local ready flag or healthy tunnel alone is not end-to-end proof. A valid
+workspace token is also not proof of a unique ChatGPT conversation; it is a bearer
+capability.
 
 ### ChatGPT model-profile authorization helper
 
@@ -556,43 +618,64 @@ mkdir -p ~/.claude/skills/repo-mcp-review
 cp .claude/skills/repo-mcp-review/SKILL.md ~/.claude/skills/repo-mcp-review/SKILL.md
 ```
 
-Freeze the task with `npm run task -- phase ... --phase review`, then ask Claude
-to use `$repo-mcp-review`. The skill refuses repository identity mismatches and
-requires repository evidence to come only through Repo MCP. Coding, task phase,
-service control, commits and pushes remain separate coordinator actions.
+Freeze the task with `npm run coord -- task phase --task TASK_ID --phase review`,
+then ask Claude to use `$repo-mcp-review` with the registered repository/task IDs.
+The skill opens a new review workspace, verifies scoped `repo_info`, and requires
+repository evidence to come only through Repo MCP. Coding grants, task phase, service
+control, commits and pushes remain separate operator/coordinator actions.
 
 ## Troubleshooting
 
 | Symptom | Action |
 | --- | --- |
-| Local server unavailable | Check the HTTP server/service, repository and policy paths. |
-| 401 / credential_rejected | Replace expired/revoked key using --rotate-key. Restarting cannot renew it. |
+| Local broker unavailable | Check the permanent service and configured loopback port. |
+| 401 / credential_rejected | Replace an expired/revoked tunnel key using --rotate-key. Restarting cannot renew it. |
 | 403 / access_denied | Check organization membership and Tunnels Read + Use. |
-| Local ready but remote_unverified | Do not assume ChatGPT works; check tunnel lookup and perform repo_info. |
-| create_file missing | Refresh plugin tools and start a new chat. |
-| Wrong repository | Stop before edits; select the intended server policy and restart it. |
-| Unknown suite | Only operator-configured suites are supported. No arbitrary shell fallback. |
+| Local ready but remote_unverified | Do not assume ChatGPT works; check tunnel freshness and call service_info from the actual client. |
+| Old eight-tool schema / workspace_token missing | Refresh plugin tools after deploying v0.2 and start a compatible chat. |
+| Wrong repository | Stop before edits, call repository_list, and open the intended registered repository/task; do not restart the service. |
+| Workspace stale | Open a new workspace; phase/rebind/registration changes intentionally invalidate old tokens. |
+| Unknown suite | Only operator-configured fixture suites are supported. No arbitrary shell fallback. |
 
 ## Public release boundary
 
-Do not publish this entire working directory. It includes private runtime state,
+Do not publish this entire working directory. It may include private runtime state,
 local repository clones, screenshots and account-specific evidence. Share only
-reviewed source, tests, dependency lockfile, generic examples and setup docs.
-MIT licensing, allowlisted packaging and GitHub private vulnerability reporting are
-enabled. The public tree was installed and tested from a clean sanitized checkout on
-the supported macOS/Node 26 environment. This is not a claim of hostile-code isolation,
-Linux/Windows support or universal production suitability.
+reviewed source, tests, dependency lockfile, generic examples and setup docs through
+the allowlisted release packager. A v0.2 release must be typechecked/tested from a
+clean supported environment before publication; this document does not claim that a
+particular working tree has already passed that release gate.
 
-Official references:
+MIT licensing, allowlisted packaging and GitHub private vulnerability reporting
+remain enabled. This is not a claim of hostile-code isolation, Linux/Windows support,
+or universal production suitability.
+
+Official references retained by this project:
 - https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
 - https://developers.openai.com/api/docs/guides/production-best-practices
 
 ## Instruction spelling and schema refresh gate
 
-Allow the root instruction file using its actual disk spelling, for example `agents.md` in an exact policy. `repo_info.instructions_path` names that exposed file (or is null if none is exposed). Continue its instructions using `read(path: instructions_path, cursor: instructions_next_cursor)`. Permission matching stays exact; this does not expose differently spelled aliases. Expose only one root instruction-file spelling. No glob workaround is needed.
+Allow the root instruction file using its actual disk spelling, for example
+`agents.md` in an exact policy. Scoped `repo_info.instructions_path` names that
+exposed file (or is null). Continue using `read` with the same workspace token and
+the returned workspace-wrapped continuation cursor. Permission matching stays exact;
+expose only one root instruction-file spelling.
 
-After rebuilding/restarting or enabling task mode, open **Plugins → Repo MCP → More actions → Manage → Refresh tools** (the path verified on this account on 2026-10-02). Other clients may label the action Refresh. Keep the existing connection and tunnel credential. Then start a new chat and attach the plugin. Refresh reloads tool schemas; a server version bump alone cannot invalidate an old chat's cached descriptors. Official reference: [connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt).
+After deploying any tool-schema change, refresh the existing Repo MCP app/plugin
+tool list, then start a compatible conversation. Refresh reloads tool schemas; a
+server version bump alone cannot update a client's cached descriptors.
 
-Before writes, inspect the offered tool schemas: eight tools; `read`, `search`, `git_diff`, `list_files` have `cursor`; `repo_info` has `status_cursor` and `files_cursor`; task-mode `edit` and `create_file` require `request_id`, while untracked compatibility mode omits that property. If repo_info advertises request IDs but the client cannot supply them, stop coding and refresh; do not silently use a weaker retry workflow. Run the local MCP discovery tests with `npm test`; this validates the server, while a fresh ChatGPT conversation validates the client cache. Tool-list verification must not mutate the real repository.
+Before repository work, verify twelve production tools. The eight repository tools
+must all require `workspace_token`; `edit` and `create_file` also require
+`request_id`. Begin with `service_info`, `repository_list`, `workspace_open`,
+then scoped `repo_info`. If the client exposes the old unscoped schema, stop and
+refresh rather than relying on a single-repository fallback.
 
-Codex's repeatable command/evidence role and coding/review prompts are in [WORKFLOW-SPEC.md](docs/WORKFLOW-SPEC.md#current-operating-procedure-chatgpt-owns-code-and-review). Real-project tests still run locally through Codex. Commit/push remain coordinator operations, separately authorized. Milestone 3 remains deferred.
+Run the local source test/typecheck suite before deployment. A fresh ChatGPT/Claude
+route proof validates client schema/transport separately from local tests.
+
+The older [WORKFLOW-SPEC.md](docs/WORKFLOW-SPEC.md) remains useful historical
+context, while [MULTI-REPO-SPEC.md](docs/MULTI-REPO-SPEC.md) is normative for v0.2.
+Real-project builds still run locally through a trusted coordinator. Commit/push
+remain separately authorized operations outside MCP.

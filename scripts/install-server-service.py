@@ -1,8 +1,8 @@
 """Install the stable repository-agnostic Repo MCP launchd definition.
 
 This script never embeds repository, policy, task, or tunnel credentials in the plist and
-never claims the service is ready. `npm run coord -- start` owns load/reload plus process
-attestation after a task has been bound.
+never claims the service is ready. `npm run coord -- service start` owns load/reload plus
+permanent-broker process attestation; repository/task selection is separate and does not restart it.
 """
 import argparse
 from datetime import datetime, timezone
@@ -71,7 +71,7 @@ bytes_out = stable_plist_bytes(plist)
 preview = runtime/(label+'.preview.plist')
 preview.write_bytes(bytes_out); preview.chmod(0o600)
 if not a.install:
-    print(f'Preview written: {preview}. Add --install to install the stable definition; use coord start to load it.')
+    print(f'Preview written: {preview}. Add --install to install the stable definition; use npm run coord -- service start to load it.')
     sys.exit(0)
 
 target = Path.home()/'Library/LaunchAgents'/(label+'.plist')
@@ -336,7 +336,7 @@ try:
                 transaction = {**transaction, 'claim_path': str(claim), 'desired_definition': plist}
                 write_install_data(install.get('installed_plist_sha256'), transaction)
                 install = read_install()
-            print('Trusted older Repo MCP definition retained with a prepared exact-claim upgrade transaction. Run npm run coord -- start; the coordinator will claim, verify, replace, and attest it.')
+            print('Trusted older Repo MCP definition retained with a prepared exact-claim upgrade transaction. Run npm run coord -- service start; the coordinator will claim, verify, replace, and attest it.')
             sys.exit(0)
 
     if current is None:
@@ -365,9 +365,9 @@ try:
             'previous_definition': exact,
             'desired_definition': plist
         })
-        print('Trusted older Repo MCP definition retained with a prepared exact-claim upgrade transaction. Run npm run coord -- start; the coordinator will claim, verify, replace, and attest it.')
+        print('Trusted older Repo MCP definition retained with a prepared exact-claim upgrade transaction. Run npm run coord -- service start; the coordinator will claim, verify, replace, and attest it.')
         sys.exit(0)
 
-    print(f'Installed stable definition: {target}. Bind a task and run npm run coord -- start to load and attest it.')
+    print(f'Installed stable definition: {target}. Bind a task and run npm run coord -- service start to load and attest it.')
 finally:
     release_service_plist_lock(lock_token)

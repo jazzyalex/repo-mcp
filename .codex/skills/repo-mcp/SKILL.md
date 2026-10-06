@@ -1,55 +1,114 @@
 ---
 name: repo-mcp
-description: Bind the installed Repo MCP service to the current local Git checkout and coordinate policy-bounded ChatGPT or Claude coding, planning, and review.
+description: Register approved local Git checkouts with the permanent Repo MCP broker and coordinate policy-bounded ChatGPT or Claude coding, planning, and review.
 ---
 
 # Repo MCP operator
 
-Use one installed Repo MCP service sequentially across local repositories. The MCP
-server never chooses a repository; the local coordinator binds the checkout and an
-operator-owned policy before ChatGPT or Claude uses the tools.
+Use one installed Repo MCP broker across approved repositories. Repository selection is
+per workspace and does not restart or retarget the service. Filesystem roots, policies,
+task phases and write grants remain local operator decisions; the model selects only
+registered repository/task IDs.
 
-## Select a repository
+## Prepare a repository and task
 
-1. Resolve the current checkout with `git rev-parse --show-toplevel`. Read its root
-   agent instructions before changing Repo MCP state.
-2. Use the operator's canonical Repo MCP source checkout. Record it in
-   `REPO_MCP_PROJECT` or resolve the installed checkout explicitly; never guess among
-   sibling repositories. Build it before installing a changed server.
-3. Inspect `npm run --silent coord -- status --json`. Never silently replace an
-   unfinished task. Finish or rebind it only when the user's request authorizes moving
-   Repo MCP to another task/repository.
-4. Store policies outside served repositories, under
-   `~/Library/Application Support/repo-mcp/policies/`, mode `0600`. Read access can be
-   broad, but exclude generated caches, derived data, archives, vendor snapshots,
-   credentials and project-private operator state. Grant write and creation only where
-   the requested work needs them. Real project builds remain local coordinator actions;
-   do not expose arbitrary shell commands as MCP checks.
-5. For a new repository/task, use a new task ID:
+1. Resolve the intended checkout with `git rev-parse --show-toplevel`. Read its root
+   agent instructions before changing Repo MCP state. Never guess among sibling
+   checkouts/worktrees.
+2. Keep the operator policy outside every served repository, normally under
+   `~/Library/Application Support/repo-mcp/policies/`, owner-only. Exclude generated
+   caches, vendor snapshots, credentials and private operator state. Grant write/create
+   only where the task needs them.
+3. Verify the permanent broker separately from repository state:
 
    ```sh
-   npm run --silent coord -- bind --task TASK_ID \
-     --repo /absolute/path/to/checkout \
-     --policy "$HOME/Library/Application Support/repo-mcp/policies/NAME.json"
-   npm run --silent coord -- start
-   npm run --silent coord -- status --json
+   npm run --silent coord -- service status
+   npm run --silent connection:status
    ```
 
-6. Prove the local MCP route with a read-only handshake and `repo_info`. Confirm root,
-   branch, HEAD, task ID, phase, policy digest, instruction path and all eight tools.
-   Also require `npm run --silent connection:status` before relying on ChatGPT access.
+   Start/rebuild the service only for deployment/recovery, never merely to select a
+   repository.
+4. Register the checkout once if it is not already in `repository list`:
 
-## Use the bound service
+   ```sh
+   npm run --silent coord -- repository add \
+     --repository REPOSITORY_ID \
+     --repo /absolute/path/to/checkout \
+     --policy "$HOME/Library/Application Support/repo-mcp/policies/NAME.json"
+   ```
 
-- Coding or planning begins with `repo_info`, then the complete exposed instruction
-  file. Use `list_files`, `search` and bounded `read` for evidence. Mutations use current
-  hashes and unique request IDs. Run real builds/tests locally through Codex.
-- Before an independent review, set the task phase to `review`; review the complete
-  paged diff in a fresh ChatGPT or Claude conversation. Review mode is read-only.
-- Commits, pushes, branch/worktree changes, service control and policy changes remain
-  local coordinator actions and require the user's normal authorization.
-- After a repository switch, server upgrade or tool-schema change, refresh the Repo MCP
-  plugin tools, start a new chat and require a fresh `repo_info` before any mutation.
+5. Bind a new task ID to the registered checkout:
 
-The stable tunnel and plugin are reused across repository switches. Do not create a new
-tunnel, runtime key or plugin merely to bind another local checkout.
+   ```sh
+   npm run --silent coord -- task bind \
+     --repository REPOSITORY_ID \
+     --task TASK_ID
+   ```
+
+   Never silently replace an unfinished task. One unfinished task owns one registered
+   checkout; use separately registered Git worktrees for independent concurrent coding.
+
+## Coding handoff
+
+For a coding conversation, issue one short-lived write grant:
+
+```sh
+npm run --silent coord -- workspace grant --task TASK_ID
+```
+
+Give the coding conversation the exact REPOSITORY_ID, TASK_ID and returned write grant.
+The model must:
+
+1. call `service_info`;
+2. call `repository_list` and verify the named task exists;
+3. call `workspace_open` in `code` mode with that grant;
+4. pass the returned `workspace_token` to every repository tool;
+5. call scoped `repo_info`, verify root/branch/HEAD/task/phase/policy scope and read the
+   complete instruction file before edits;
+6. use fresh file hashes and fresh public request IDs; after a lost mutation reply,
+   retry the identical workspace/request/arguments;
+7. inspect the complete paginated `git_diff`.
+
+Do not copy workspace/write-grant tokens into source, logs or unrelated conversations.
+They are bearer capabilities, not proof of conversation identity.
+
+Run real project builds/integration tests locally through the trusted coordinator.
+MCP `run_tests` is only for policy-approved fixture suites.
+
+## Review handoff
+
+Freeze the whole task:
+
+```sh
+npm run --silent coord -- task phase --task TASK_ID --phase review
+```
+
+The transition drains admitted mutations/checks and advances the phase epoch, so every
+older workspace for that task becomes stale. A separate reviewer opens a fresh
+`review` workspace; no write grant is needed.
+
+Current review assurance is `phase_only`: it is a task-wide write freeze, not a
+content-verified candidate manifest. Do not present it as stronger evidence.
+
+If repairs are required:
+
+```sh
+npm run --silent coord -- task phase --task TASK_ID --phase coding
+npm run --silent coord -- workspace grant --task TASK_ID
+```
+
+Open a new coding workspace. A pre-review coding token never becomes valid again.
+
+## Authority boundaries
+
+- Repository add/enable/disable/remove, task bind/phase/rebind/finish, grant/revoke,
+  service control, policies, Git commit/push, branch/worktree changes and arbitrary
+  shell remain coordinator/operator actions.
+- The MCP never accepts a filesystem root or policy path for repository selection.
+- Repository switching uses a new workspace token; it does not call `service start`.
+- Disable/rebind/phase/finish intentionally invalidate old workspace authority.
+- Commit/push remain outside MCP and need the user's normal authorization.
+- Keep the existing tunnel/plugin across repository switches. Refresh plugin tools only
+  after a deployed schema change, not after ordinary repository selection.
+
+See `docs/MULTI-REPO-SPEC.md` for the normative v0.2 contract.

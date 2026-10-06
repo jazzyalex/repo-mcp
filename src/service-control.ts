@@ -1088,6 +1088,165 @@ async function trustedInstalledDefinition(
   return parseBytes(bytes);
 }
 
+export type BrokerProcessAttestation = {
+  ok: true;
+  name: 'repo-mcp';
+  server_version: string;
+  service_mode: 'multirepo';
+  process_pid: number | null;
+};
+
+export function compareBrokerAttestation(expectedVersion: string, value: unknown): { state: LocalHealthState; process?: BrokerProcessAttestation } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { state: 'unhealthy' };
+  const v = value as Record<string, unknown>;
+  if (v.ok !== true || v.name !== 'repo-mcp' || v.service_mode !== 'multirepo') return { state: 'unhealthy' };
+  const process: BrokerProcessAttestation = {
+    ok: true,
+    name: 'repo-mcp',
+    server_version: typeof v.server_version === 'string' ? v.server_version : '',
+    service_mode: 'multirepo',
+    process_pid: typeof v.process_pid === 'number' && Number.isSafeInteger(v.process_pid) && v.process_pid > 0 ? v.process_pid : null
+  };
+  if (process.process_pid === null) return { state: 'unhealthy', process };
+  if (process.server_version !== expectedVersion) return { state: 'wrong_version', process };
+  return { state: 'ready', process };
+}
+
+async function waitForBrokerAttestation(expectedVersion: string, port: number, driver: ServiceDriver, waitMs = 5_000) {
+  const deadline = Date.now() + waitMs;
+  let last: ReturnType<typeof compareBrokerAttestation> = { state: 'unhealthy' };
+  do {
+    last = compareBrokerAttestation(expectedVersion, await driver.health(port));
+    if (last.state === 'ready') return last;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (true);
+  throw new SafeError(`Server reload did not produce the requested multi-repository process attestation (${last.state}).`);
+}
+
+export async function installOrReloadBroker(options: {
+  stateDir: string;
+  port: number;
+  expectedServerVersion: string;
+  base?: string;
+  node?: string;
+  launchAgentsDir?: string;
+  driver?: ServiceDriver;
+  parsePlist?: (file: string) => Promise<PlistObject>;
+  waitMs?: number;
+}) {
+  if (!Number.isInteger(options.port) || options.port < 1024 || options.port > 65535) throw new SafeError('Broker service port is invalid.');
+  const base = await realpath(options.base ?? PROJECT_BASE);
+  const node = options.node ?? await currentNodePath(base);
+  const target = targetPath(options.launchAgentsDir);
+  const driver = options.driver ?? realDriver(target, base);
+  const parsePlist = options.parsePlist ?? ((file: string) => parsePlistFile(file, base));
+  const plistLock = await acquireServicePlistLock(target);
+  try {
+    const prepared = await ensureStableDefinition({ stateDir: options.stateDir, base, node, launchAgentsDir: options.launchAgentsDir, driver, parsePlist });
+    const loadedJob = await driver.inspectLoadedJob();
+    if (loadedJob) {
+      if (jobMatchesDefinition(loadedJob, prepared.target, prepared.desired)) {
+        await driver.kickstart();
+      } else {
+        const previous = prepared.install?.plist_transaction?.previous_definition;
+        if (!previous || !jobMatchesDefinition(loadedJob, prepared.target, previous)) {
+          throw new SafeError('Loaded launchd job matches neither the prepared previous nor desired trusted definition; refusing service control.');
+        }
+        await driver.bootout();
+        if (await driver.portOccupied(options.port)) throw new SafeError(`Port ${options.port} is occupied after service unload; refusing bootstrap.`);
+        await driver.bootstrap();
+      }
+    } else {
+      if (await driver.portOccupied(options.port)) throw new SafeError(`Port ${options.port} is occupied; refusing to bootstrap the Repo MCP service.`);
+      await driver.bootstrap();
+    }
+    let attestation: Awaited<ReturnType<typeof waitForBrokerAttestation>>;
+    try {
+      attestation = await waitForBrokerAttestation(options.expectedServerVersion, options.port, driver, options.waitMs);
+      const runningJob = assertLoadedJob(await driver.inspectLoadedJob(), prepared.target, prepared.desired);
+      const listenerPid = await driver.portOwnerPid(options.port);
+      if (runningJob.pid !== attestation.process?.process_pid || listenerPid !== runningJob.pid) {
+        throw new SafeError('Loopback listener/health PID does not match the inspected launchd process PID.');
+      }
+    } catch (error) {
+      await bootoutControlledTrustedJob(driver, prepared.target, prepared.desired);
+      throw error;
+    }
+    let committedInstall = prepared.install;
+    if (committedInstall?.plist_transaction) committedInstall = await finalizePlistTransaction(prepared.store, committedInstall, prepared.desiredHash);
+    if (committedInstall?.migration_state === 'prepared' || committedInstall?.migration_state === 'prepared_unbound') {
+      committedInstall = await writeInstall(prepared.store, {
+        label: committedInstall.label,
+        target: committedInstall.target,
+        installed_plist_sha256: prepared.desiredHash,
+        migration_state: 'verified',
+        ...(committedInstall.legacy_backup_path ? { legacy_backup_path: committedInstall.legacy_backup_path } : {}),
+        ...(committedInstall.legacy_backup_sha256 ? { legacy_backup_sha256: committedInstall.legacy_backup_sha256 } : {}),
+        ...(committedInstall.legacy_original_path ? { legacy_original_path: committedInstall.legacy_original_path } : {})
+      });
+    }
+    return { ...attestation, target: prepared.target, plist_changed: prepared.changed };
+  } finally { await plistLock.release(); }
+}
+
+export async function brokerServiceStatus(options: {
+  stateDir: string;
+  port: number;
+  expectedServerVersion: string;
+  base?: string;
+  launchAgentsDir?: string;
+  driver?: ServiceDriver;
+  parsePlistBytes?: (bytes: Uint8Array) => Promise<PlistObject>;
+} ) {
+  const base = options.base ?? PROJECT_BASE;
+  const target = targetPath(options.launchAgentsDir);
+  const driver = options.driver ?? realDriver(target, base);
+  const loadedJob = await driver.inspectLoadedJob();
+  if (!loadedJob) {
+    if (await driver.portOccupied(options.port)) return { launchd: 'unloaded', local_mcp: 'blocked' as LocalHealthState };
+    return { launchd: 'unloaded', local_mcp: 'stopped' as LocalHealthState };
+  }
+  let definition: PlistObject;
+  try {
+    definition = await trustedInstalledDefinition(options.stateDir, target, base, options.parsePlistBytes);
+    assertLoadedJob(loadedJob, target, definition);
+  } catch (error) {
+    return { launchd: 'loaded', local_mcp: 'blocked' as LocalHealthState, service_error: error instanceof Error ? error.message : 'Loaded service identity is untrusted.' };
+  }
+  const compared = compareBrokerAttestation(options.expectedServerVersion, await driver.health(options.port));
+  if (compared.state !== 'ready') return { launchd: 'loaded', local_mcp: compared.state, process: compared.process };
+  const processPid = compared.process?.process_pid;
+  const listenerPid = await driver.portOwnerPid(options.port);
+  if (loadedJob.pid !== processPid || listenerPid !== processPid) {
+    return { launchd: 'loaded', local_mcp: 'blocked' as LocalHealthState, process: compared.process };
+  }
+  return { launchd: 'loaded', local_mcp: 'ready' as LocalHealthState, process: compared.process };
+}
+
+export async function stopBrokerService(options: {
+  stateDir: string;
+  port: number;
+  base?: string;
+  launchAgentsDir?: string;
+  driver?: ServiceDriver;
+}) {
+  const base = options.base ?? PROJECT_BASE;
+  const target = targetPath(options.launchAgentsDir);
+  const driver = options.driver ?? realDriver(target, base);
+  const loadedJob = await driver.inspectLoadedJob();
+  if (loadedJob) {
+    const definition = await trustedInstalledDefinition(options.stateDir, target, base);
+    assertLoadedJob(loadedJob, target, definition);
+    await driver.bootout();
+  }
+  for (let i = 0; i < 20; i++) {
+    if (!await driver.portOccupied(options.port)) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new SafeError(`Port ${options.port} remains occupied after server service shutdown.`);
+}
+
 export async function serviceStatus(active: ActiveServiceRecord, options: {
   base?: string;
   launchAgentsDir?: string;
