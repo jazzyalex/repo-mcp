@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, type Stats } from 'node:fs';
-import { lstat, mkdir, open, realpath } from 'node:fs/promises';
+import { access, lstat, mkdir, open, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual, TextDecoder } from 'node:util';
@@ -730,7 +730,39 @@ export async function verifyModelSelection(
   };
 }
 
-export const ORACLE_CLI_PATH = '/opt/homebrew/bin/oracle' as const;
+export async function resolveOracleExecutable(explicit?: string, searchPath = process.env.PATH ?? '') {
+  const validate = async (candidate: string) => {
+    if (!path.isAbsolute(candidate) || CONTROL.test(candidate)) {
+      fail('ORACLE_PATH_UNSAFE', 'Oracle executable must be an absolute control-free path.');
+    }
+    const canonical = await realpath(candidate);
+    const info = await lstat(canonical);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || (info.mode & 0o022) !== 0) {
+      fail('ORACLE_PATH_UNSAFE', 'Oracle executable must be one regular file without group/world write access.');
+    }
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid() && info.uid !== 0) {
+      fail('ORACLE_PATH_UNSAFE', 'Oracle executable must be owned by the current user or root.');
+    }
+    await access(canonical, fsConstants.X_OK);
+    return canonical;
+  };
+  if (explicit !== undefined) {
+    try { return await validate(explicit); }
+    catch (error) {
+      if (error instanceof ModelPolicyError) throw error;
+      fail('ORACLE_EXECUTABLE_UNAVAILABLE', 'Explicit Oracle executable is unavailable or not executable.');
+    }
+  }
+  // Never implicitly execute from the working directory via empty/relative PATH entries.
+  for (const directory of searchPath.split(path.delimiter)) {
+    if (!path.isAbsolute(directory) || CONTROL.test(directory)) continue;
+    const candidate = path.join(directory, 'oracle');
+    try { await access(candidate, fsConstants.X_OK); }
+    catch { continue; }
+    return validate(candidate);
+  }
+  fail('ORACLE_EXECUTABLE_UNAVAILABLE', 'Oracle was not found on an absolute PATH entry. Install supported Oracle or pass --oracle-path /absolute/path/to/oracle.');
+}
 export const ORACLE_SUPPORTED_VERSION = '0.21.1' as const;
 export const ORACLE_SESSION_META_MAX_BYTES = 1024 * 1024;
 export const ORACLE_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
@@ -1482,7 +1514,7 @@ export async function runOracleModelProfile(options: {
   const repoRoot = await realpath(options.repo);
   const identity = await resolveIdentity(repoRoot);
   const files = await validateOracleFiles(repoRoot, options.files ?? []);
-  const oraclePath = options.oraclePath ?? ORACLE_CLI_PATH;
+  const oraclePath = await resolveOracleExecutable(options.oraclePath, (options.environment ?? process.env).PATH);
   const homeDir = await realpath(options.homeDir ?? os.homedir());
   assertOwnerDirectory(await lstat(homeDir), 'Oracle home');
   const oracleEnv = sanitizedOracleEnv(options.environment ?? process.env, homeDir);

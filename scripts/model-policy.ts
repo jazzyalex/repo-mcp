@@ -101,6 +101,7 @@ async function main() {
         file: { type: 'string', multiple: true },
         slug: { type: 'string' },
         'browser-tab': { type: 'string' },
+        'oracle-path': { type: 'string' },
         'repo-mcp-preattached-tab': { type: 'boolean' }
       }
     });
@@ -122,6 +123,7 @@ async function main() {
       slug: values.slug,
       repoMcpPreattachedTab: true,
       browserTab: values['browser-tab'],
+      oraclePath: values['oracle-path'],
       onReserved: reservation => {
         process.stderr.write(JSON.stringify({ event: 'oracle-run-reserved', ...reservation }) + '\n');
       }

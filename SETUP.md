@@ -1,9 +1,10 @@
 # Setup and operation
 
 Repo MCP v0.2.0 uses one permanent multi-repository broker for trusted single-user
-macOS operation. Current platform assumptions remain Node 26+, Git at /usr/bin/git,
-npm, and the official OpenAI tunnel client. The Python fixture runner additionally
-needs Python and pytest. Windows and Linux are not certified.
+macOS operation. Normal installation requires Python 3.9+, Node 26+, Git at /usr/bin/git,
+npm, and the official OpenAI tunnel client. Install a supported Python on PATH before
+onboarding; `python3 scripts/check-prerequisites.py` checks normal dependencies without
+changing state. pytest is optional and needed only by the Python fixture runner. Windows and Linux are not certified.
 
 No model inference API call is made by Repo MCP itself. Access to ChatGPT apps and
 the private tunnel is controlled separately by OpenAI.
@@ -38,11 +39,21 @@ entered through the hidden local prompt, never in chat.
 From the source checkout, validate locally before deploying:
 
 ```sh
+python3 scripts/check-prerequisites.py
 npm ci
 npm run build
 npm test
 python3 scripts/install-agent-skills.py --install
 ```
+
+Global skills are hash-owned through private state at
+`~/Library/Application Support/repo-mcp/agent-skills/installed.json` (or
+`REPO_MCP_HOME/agent-skills`). Installation updates only recorded copies whose bytes
+still match their owned hash. Foreign/modified copies are preserved; inspect them before
+using `python3 scripts/install-agent-skills.py --install --replace` (alias
+`--force`), which creates an owner-only backup. Legacy installations without the new
+ledger require this explicit backup-and-replace adoption. Keep ownership state and
+backups outside every served checkout; never copy them into a release.
 
 Install the repository-agnostic launchd definition:
 
@@ -83,7 +94,11 @@ switching, phase changes and normal task completion do not restart it.
 ### Register approved repositories
 
 Keep source policy files outside every served repository, for example under
-`~/Library/Application Support/repo-mcp/policies/`.
+`~/Library/Application Support/repo-mcp/policies/`. Copy `docs/policy-readonly.json` for
+inspection or `docs/policy-coding.json` for bounded `src`/`test` coding, set mode 0600,
+and tailor scopes/exclusions to the project. Creation scope roots must already exist.
+Both templates grant no MCP test execution; dotfiles are opt-in and built-in secret
+and VCS denials remain in force.
 
 ```sh
 npm run coord -- repository add \
@@ -105,6 +120,38 @@ filesystem root or policy path.
 
 One unfinished task owns one registered checkout. To run independent coding tasks
 against the same project at the same time, create and register separate Git worktrees.
+
+### First-install smoke target
+
+For a fresh install, prepare a disposable, committed Git fixture outside the control
+checkout. If any named fixture, policy, repository registration or task already exists,
+inspect and reuse it instead of rerunning this block. This works from a clone or
+extracted source archive and never edits a user's project:
+
+```sh
+npm run prepare:fixture -- --root "$HOME/Library/Application Support/repo-mcp/onboarding/repo"
+mkdir -p "$HOME/Library/Application Support/repo-mcp/policies"
+cp -n docs/policy-readonly.json "$HOME/Library/Application Support/repo-mcp/policies/onboarding.json"
+chmod 600 "$HOME/Library/Application Support/repo-mcp/policies/onboarding.json"
+npm run coord -- repository add --repository repo-mcp-onboarding \
+  --repo "$HOME/Library/Application Support/repo-mcp/onboarding/repo" \
+  --policy "$HOME/Library/Application Support/repo-mcp/policies/onboarding.json"
+npm run coord -- task bind --repository repo-mcp-onboarding --task repo-mcp-onboarding-smoke
+```
+
+In the actual ChatGPT client, call `service_info`, `repository_list`,
+open an `inspect` workspace for repository `repo-mcp-onboarding` and task
+`repo-mcp-onboarding-smoke` with a fresh request ID, then call scoped `repo_info`.
+Verify the fixture root/branch/HEAD and read its complete `AGENTS.md` and `README.md`;
+inspect the complete diff and close the workspace. No write grant is needed.
+The fixture contains an intentionally failing clamp test; that is unrelated to this
+read-only transport/schema smoke. Local health alone does not pass this gate.
+
+The preparation command refuses overwrite. Never remove or reset a user's checkout.
+Reuse an unfinished smoke task; if it was already finished, bind a fresh task ID
+such as `repo-mcp-onboarding-smoke-YYYYMMDD` and use that ID in the client calls.
+After successful smoke, the operator may finish this disposable task with
+`npm run coord -- task finish --task repo-mcp-onboarding-smoke`.
 
 ### Workspace selection
 
@@ -322,6 +369,16 @@ python3 scripts/install-tunnel-service.py --install
 npm run connection:status
 ```
 
+For an existing durable service, the same `--install` command upgrades its client path
+or port only when the current plist exactly matches the private `tunnel/install.json`
+installed hash. Use `--client /absolute/path/to/tunnel-client` and `--port PORT` when
+needed. Installation is serialized, preserves a backup, requires a successful fresh
+post-restart control-plane poll, and restores the previous plist/install record on
+failure. Foreign, modified, symlinked or unrecorded definitions are preserved; inspect
+and reconcile them locally before retrying. A crash during deployment may require
+manual comparison with the retained owner-only `.backup-*.plist`; never delete a foreign
+service to bypass the guard.
+
 To migrate the recognized pre-v0.1 tunnel service from an older checkout, name that
 checkout explicitly. The installer refuses a modified or foreign service, preserves
 the old credentials until a fresh post-restart control-plane poll succeeds, and rolls
@@ -532,7 +589,10 @@ itself prevents adapter bypass or post-verification UI changes.
 
 The installed Oracle browser controller is integrated through the same CLI with a
 narrow `run` command. The supported Oracle contract is pinned to the verified local
-Oracle v0.21.1 interface at `/opt/homebrew/bin/oracle`. Profile mappings are exact:
+Oracle v0.21.1 interface. Resolve the executable from absolute PATH entries by default,
+or pass `--oracle-path /absolute/path/to/oracle`. The executable must be a regular,
+executable file owned by the current user or root, without group/world write access;
+symlink installation aliases resolve to that validated executable. Profile mappings are exact:
 
 - `code` -> `gpt-5.6-sol` / `high`
 - `code-hard`, `review` -> `gpt-5.6-sol` / `extra-high`
@@ -634,12 +694,14 @@ claude mcp add --scope user --transport http repo-mcp http://127.0.0.1:8787/mcp
 claude mcp get repo-mcp
 ```
 
-Install the review skill for all Claude Code projects, or keep the project copy:
+Install the bundled setup and review skills through the ownership-aware installer:
 
 ```sh
-mkdir -p ~/.claude/skills/repo-mcp-review
-cp .claude/skills/repo-mcp-review/SKILL.md ~/.claude/skills/repo-mcp-review/SKILL.md
+python3 scripts/install-agent-skills.py --install
 ```
+
+If a same-name skill is foreign or modified, inspect it and use the documented
+`--replace` option only when replacement is intended; the installer retains a backup.
 
 Freeze the task with `npm run coord -- task phase --task TASK_ID --phase review`,
 then ask Claude to use `$repo-mcp-review` with the registered repository/task IDs.
@@ -665,7 +727,10 @@ control, commits and pushes remain separate operator/coordinator actions.
 Do not publish this entire working directory. It may include private runtime state,
 local repository clones, screenshots and account-specific evidence. Share only
 reviewed source, tests, dependency lockfile, generic examples and setup docs through
-the allowlisted release packager. A v0.2 release must be typechecked/tested from a
+the allowlisted release packager. Source manifests are generated only inside archives;
+do not commit `SOURCE-MANIFEST.json` in the control checkout. The packaging regression
+validates a clean extraction using already-installed dependencies and selected tests;
+it does not replace a fresh dependency installation and full supported-platform gate. A v0.2 release must be typechecked/tested from a
 clean supported environment before publication; this document does not claim that a
 particular working tree has already passed that release gate.
 

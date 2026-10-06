@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prerequisites": "python3 scripts/check-prerequisites.py",
+    "preinstall": "python3 scripts/check-prerequisites.py",
+    "pretest": "python3 scripts/check-prerequisites.py",
     "build": "tsc",
     "test": "tsx --test test/*.test.ts",
     "start": "node dist/src/service-main.js",

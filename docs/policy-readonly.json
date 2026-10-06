@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "read": {
+    "include": [
+      "**"
+    ],
+    "exclude": [
+      "node_modules/**",
+      "dist/**",
+      "build/**",
+      "coverage/**",
+      "vendor/**",
+      ".trial/**",
+      "release/**",
+      "evidence/**",
+      "state/**",
+      "credentials/**",
+      "logs/**",
+      "SOURCE-MANIFEST.json"
+    ]
+  },
+  "write": {
+    "include": [],
+    "exclude": []
+  },
+  "create": {
+    "paths": [],
+    "directories": [],
+    "extensions": []
+  },
+  "dotfiles": [],
+  "checks": []
+}

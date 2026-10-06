@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -11,6 +11,7 @@ import {
   ModelPolicyError,
   oracleTargetForProfile,
   readOraclePromptFile,
+  resolveOracleExecutable,
   recordTrustedBrowserObservation,
   resolveModelProfile,
   runOracleModelProfile,
@@ -20,6 +21,16 @@ import {
   type SanitizedModelSelectionEvidence
 } from '../src/model-policy.js';
 import { resolveIdentity } from '../src/identity.js';
+import { prepareFixture } from '../src/fixture.js';
+
+let oracleFixtureBase: string;
+let oracleRepoRoot: string;
+before(async () => {
+  oracleFixtureBase = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-oracle-target-')));
+  oracleRepoRoot = path.join(oracleFixtureBase, 'repo');
+  await prepareFixture(oracleRepoRoot);
+});
+after(async () => { if (oracleFixtureBase) await rm(oracleFixtureBase, { recursive: true, force: true }); });
 
 const NOW = new Date('2026-10-04T21:00:00.000Z');
 const VERIFY_NOW = new Date('2026-10-04T21:00:03.000Z');
@@ -574,7 +585,7 @@ type FakeOracleConfig = {
 };
 
 async function fakeOracleFixture(t: { after(callback: () => unknown): void }) {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-fake-oracle-'));
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-fake-oracle-')));
   t.after(() => rm(home, { recursive: true, force: true }));
   const executable = path.join(home, 'fake-oracle.mjs');
   const configPath = path.join(home, '.fake-oracle-config.json');
@@ -788,7 +799,7 @@ async function writeExistingOracleJournal(
 ) {
   const profile = options.profile ?? 'code';
   const target = oracleTargetForProfile(profile);
-  const identity = await resolveIdentity(projectRoot);
+  const identity = await resolveIdentity(oracleRepoRoot);
   const journalDir = path.join(await realpath(home), '.repo-mcp-oracle-runs');
   await mkdir(journalDir, { recursive: true, mode: 0o700 });
   await chmod(journalDir, 0o700);
@@ -852,7 +863,7 @@ test('Oracle adapter pins exact v0.21.1 argv, strips unsafe environment, require
   const rawPrompt = 'Review this safely; --model gpt-5-pro; $(touch /tmp/never)';
   const receipt = await runOracleModelProfile({
     profile: 'code',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: rawPrompt,
     files: ['package.json'],
     slug,
@@ -886,9 +897,9 @@ test('Oracle adapter pins exact v0.21.1 argv, strips unsafe environment, require
     '--slug', slug,
     '--write-output', outputPath,
     '-p', promptArg,
-    '--file', path.join(projectRoot, 'package.json')
+    '--file', path.join(oracleRepoRoot, 'package.json')
   ]);
-  assert.equal(captured.cwd, projectRoot);
+  assert.equal(captured.cwd, oracleRepoRoot);
   assert.equal(captured.env.HOME, canonicalHome);
   assert.equal(captured.env.PATH, process.env.PATH ?? null);
   assert.equal(captured.env.TMPDIR, process.env.TMPDIR ?? null);
@@ -914,7 +925,7 @@ test('Oracle adapter pins exact v0.21.1 argv, strips unsafe environment, require
 test('Oracle CLI run rejects protected overrides and requires both acknowledgement and browser tab before launch', () => {
   const override = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
-    'run', '--profile', 'code', '--repo', projectRoot,
+    'run', '--profile', 'code', '--repo', oracleRepoRoot,
     '--prompt', 'safe prompt', '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01',
     '--engine', 'api'
   ], { cwd: projectRoot, encoding: 'utf8' });
@@ -926,7 +937,7 @@ test('Oracle CLI run rejects protected overrides and requires both acknowledgeme
 
   const missingTab = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
-    'run', '--profile', 'code', '--repo', projectRoot,
+    'run', '--profile', 'code', '--repo', oracleRepoRoot,
     '--prompt', 'safe prompt', '--repo-mcp-preattached-tab'
   ], { cwd: projectRoot, encoding: 'utf8' });
   assert.notEqual(missingTab.status, 0);
@@ -942,7 +953,7 @@ test('Oracle compatibility preflight fails before journal reservation or prompt 
     await assert.rejects(
       runOracleModelProfile({
         profile: 'code',
-        repo: projectRoot,
+        repo: oracleRepoRoot,
         prompt: 'must never submit',
         slug: `oracle-preflight-${index + 10}`,
         repoMcpPreattachedTab: true,
@@ -969,7 +980,7 @@ test('Oracle version preflight accepts only the exact Oracle CLI v0.21.1 release
     await assert.rejects(
       runOracleModelProfile({
         profile: 'code',
-        repo: projectRoot,
+        repo: oracleRepoRoot,
         prompt: 'must never submit',
         slug,
         repoMcpPreattachedTab: true,
@@ -1002,7 +1013,7 @@ test('Oracle postflight requires fallbackUsed exactly false for both model and t
     await fixture.configure({ mode });
     const result = await runOracleModelProfile({
       profile: 'review',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'review fallback evidence',
       slug: `oracle-fallback-${String(index).padStart(2, '0')}`,
       repoMcpPreattachedTab: true,
@@ -1026,7 +1037,7 @@ test('promptSubmitted=false is no-submit only for the exact terminal pre-submit 
     const slug = `oracle-false-state-${index + 10}`;
     const result = await runOracleModelProfile({
       profile: 'plan',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'plan without guessing',
       slug,
       repoMcpPreattachedTab: true,
@@ -1048,7 +1059,7 @@ test('promptSubmitted=false is no-submit only for the exact terminal pre-submit 
   await assert.rejects(
     runOracleModelProfile({
       profile: 'plan',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'known pre-submit failure',
       slug: 'oracle-no-submit-exact-01',
       repoMcpPreattachedTab: true,
@@ -1082,7 +1093,7 @@ test('Oracle adapter rejects missing, malformed, stale, wrong-session, wrong-mod
     await fixture.configure({ mode, count });
     const result = await runOracleModelProfile({
       profile: 'review',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'review current change',
       slug: `oracle-evidence-${String(index).padStart(2, '0')}`,
       repoMcpPreattachedTab: true,
@@ -1105,7 +1116,7 @@ test('Oracle adapter rejects symlinked and unsafe-permission metadata without ri
     await fixture.configure({ mode, count });
     const result = await runOracleModelProfile({
       profile: 'code',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'code safely',
       slug: `oracle-unsafe-${index + 10}`,
       repoMcpPreattachedTab: true,
@@ -1129,7 +1140,7 @@ test('Oracle Pro profiles require exact verified Pro model and thinking evidence
   await fixture.configure({ mode: 'weak-pro' });
   const weak = await runOracleModelProfile({
     profile: 'review-critical',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'critical review',
     slug: 'oracle-pro-weak-01',
     repoMcpPreattachedTab: true,
@@ -1144,7 +1155,7 @@ test('Oracle Pro profiles require exact verified Pro model and thinking evidence
   await fixture.configure({ mode: 'success' });
   const strong = await runOracleModelProfile({
     profile: 'review-critical',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'critical review',
     slug: 'oracle-pro-strong-01',
     repoMcpPreattachedTab: true,
@@ -1169,7 +1180,7 @@ test('submitted Oracle errors return recovery for the same slug and never auto-r
   await fixture.configure({ mode: 'submitted-error', count });
   const result = await runOracleModelProfile({
     profile: 'code-hard',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'hard coding task',
     slug: 'oracle-submitted-err-01',
     repoMcpPreattachedTab: true,
@@ -1193,7 +1204,7 @@ test('slug journal is durable, owner-only, created before spawn, and binds gener
   let reservedSlug: string | undefined;
   const result = await runOracleModelProfile({
     profile: 'code-hard',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'journaled coding task',
     repoMcpPreattachedTab: true,
     browserTab: 'tab-test-01',
@@ -1222,7 +1233,7 @@ test('slug journal is durable, owner-only, created before spawn, and binds gener
   assert.equal(journal.kind, 'oracle-run-journal-v1');
   assert.equal(journal.data.slug, reservedSlug);
   assert.equal(journal.data.profile, 'code-hard');
-  assert.equal(journal.data.repository.root, projectRoot);
+  assert.equal(journal.data.repository.root, oracleRepoRoot);
   assert.equal(journal.data.repository.head.length, 40);
   assert.ok(Number.isFinite(Date.parse(journal.data.started_at)));
   assert.equal((Number((await lstat(journalDir)).mode) & 0o077), 0);
@@ -1238,7 +1249,7 @@ test('existing Oracle journal is authoritative for exact binding recovery and is
 
   const result = await runOracleModelProfile({
     profile: 'code',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'must recover existing journal',
     slug,
     repoMcpPreattachedTab: true,
@@ -1270,7 +1281,7 @@ test('same Oracle slug with a different profile fails closed using the existing 
 
   const result = await runOracleModelProfile({
     profile: 'code',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'must not reuse mismatched slug',
     slug,
     repoMcpPreattachedTab: true,
@@ -1305,7 +1316,7 @@ test('same Oracle slug with a different repository binding fails closed without 
 
   const result = await runOracleModelProfile({
     profile: 'code',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'must not cross repository binding',
     slug,
     repoMcpPreattachedTab: true,
@@ -1346,7 +1357,7 @@ test('unsafe or malformed existing Oracle journals are recovery-only and never s
 
     const result = await runOracleModelProfile({
       profile: 'code',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'must not trust unsafe journal',
       slug,
       repoMcpPreattachedTab: true,
@@ -1377,7 +1388,7 @@ test('generated Oracle slug requires a pre-launch reservation surface', async t 
   await assert.rejects(
     runOracleModelProfile({
       profile: 'code',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'must not launch without surfacing slug',
       repoMcpPreattachedTab: true,
       browserTab: 'tab-test-01',
@@ -1397,7 +1408,7 @@ test('atomic slug reservation permits only one concurrent same-slug Oracle submi
   const slug = 'oracle-concurrent-01';
   const options = {
     profile: 'code' as const,
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'single submission only',
     slug,
     repoMcpPreattachedTab: true as const,
@@ -1428,7 +1439,7 @@ test('interrupted Oracle child keeps the journal and returns same-slug recovery 
   const slug = 'oracle-interrupted-01';
   const result = await runOracleModelProfile({
     profile: 'review',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'interrupted review',
     slug,
     repoMcpPreattachedTab: true,
@@ -1460,7 +1471,7 @@ test('existing Oracle session is recovery-only and is never resubmitted automati
   await fixture.configure({ mode: 'success', count });
   const result = await runOracleModelProfile({
     profile: 'brainstorm',
-    repo: projectRoot,
+    repo: oracleRepoRoot,
     prompt: 'brainstorm task',
     slug,
     repoMcpPreattachedTab: true,
@@ -1483,7 +1494,7 @@ test('Oracle adapter requires acknowledgement plus a conservative browser-tab re
   await assert.rejects(
     runOracleModelProfile({
       profile: 'code',
-      repo: projectRoot,
+      repo: oracleRepoRoot,
       prompt: 'code task',
       repoMcpPreattachedTab: false,
       browserTab: 'tab-test-01',
@@ -1497,7 +1508,7 @@ test('Oracle adapter requires acknowledgement plus a conservative browser-tab re
     await assert.rejects(
       runOracleModelProfile({
         profile: 'code',
-        repo: projectRoot,
+        repo: oracleRepoRoot,
         prompt: 'code task',
         repoMcpPreattachedTab: true,
         browserTab,
@@ -1544,7 +1555,7 @@ test('CLI prompt-file path uses the bounded safe reader before any Oracle launch
   await symlink(target, linked);
   const processResult = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
-    'run', '--profile', 'code', '--repo', projectRoot,
+    'run', '--profile', 'code', '--repo', oracleRepoRoot,
     '--prompt-file', linked,
     '--repo-mcp-preattached-tab',
     '--browser-tab', 'tab-test-01'
@@ -1557,4 +1568,46 @@ test('CLI prompt-file path uses the bounded safe reader before any Oracle launch
 test('package exposes the production model-policy adapter entry point', async () => {
   const packageJson = JSON.parse(await readFile(path.join(projectRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
   assert.equal(packageJson.scripts?.['model-policy'], 'tsx scripts/model-policy.ts');
+});
+
+test('Oracle executable resolution uses PATH or an explicit path and rejects unsafe files', async t => {
+  const fixture = await fakeOracleFixture(t);
+  const link = path.join(fixture.home, 'oracle');
+  await symlink(fixture.executable, link);
+  assert.equal(await resolveOracleExecutable(undefined, fixture.home), await realpath(fixture.executable));
+  assert.equal(await resolveOracleExecutable(fixture.executable, ''), await realpath(fixture.executable));
+  await assert.rejects(resolveOracleExecutable('oracle', ''), /absolute/i);
+  await assert.rejects(resolveOracleExecutable(undefined, '.:'), /not found/i);
+  await chmod(fixture.executable, 0o777);
+  await assert.rejects(resolveOracleExecutable(fixture.executable, ''), /regular file|write access/i);
+});
+
+test('public Oracle CLI supports PATH discovery and explicit executable override with preflight', async t => {
+  const fixture = await fakeOracleFixture(t);
+  await fixture.configure({ mode: 'success' });
+  await symlink(fixture.executable, path.join(fixture.home, 'oracle'));
+  for (const [index, explicit] of [false, true].entries()) {
+    const result = spawnSync(process.execPath, [
+      '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'), 'run',
+      '--profile', 'code', '--repo', oracleRepoRoot, '--prompt', 'portable fake run',
+      '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01', '--slug', 'oracle-portable-cli-' + index,
+      ...(explicit ? ['--oracle-path', fixture.executable] : [])
+    ], {
+      cwd: projectRoot, encoding: 'utf8', timeout: 15000,
+      // NODE_OPTIONS affects this test's wrapper process before the CLI can
+      // sanitize the environment passed to Oracle, so keep it empty here.
+      env: { ...fakeEnvironment(fixture.home), NODE_OPTIONS: '', PATH: fixture.home + path.delimiter + (process.env.PATH ?? '') }
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout).ok, true);
+  }
+  await fixture.configure({ mode: 'bad-version' });
+  const failed = spawnSync(process.execPath, [
+    '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'), 'run',
+    '--profile', 'code', '--repo', oracleRepoRoot, '--prompt', 'must not submit',
+    '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01',
+    '--oracle-path', fixture.executable, '--slug', 'oracle-portable-bad-version'
+  ], { cwd: projectRoot, encoding: 'utf8', timeout: 15000, env: fakeEnvironment(fixture.home, { NODE_OPTIONS: '' }) });
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stdout, /ORACLE.*COMPAT|version/i);
 });

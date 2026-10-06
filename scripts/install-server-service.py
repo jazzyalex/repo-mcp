@@ -4,6 +4,9 @@ This script never embeds repository, policy, task, or tunnel credentials in the 
 never claims the service is ready. `npm run coord -- service start` owns load/reload plus
 permanent-broker process attestation; repository/task selection is separate and does not restart it.
 """
+from prerequisites import require_python
+require_python()
+
 import argparse
 from datetime import datetime, timezone
 import hashlib

@@ -4,7 +4,7 @@ Repo MCP is a local MCP service for policy-bounded coding and review across mult
 
 The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and unrestricted shell commands stay outside MCP.
 
-**Status:** v0.2.0 source targets trusted, single-user macOS operation with Node 26+, Git, npm, and the official OpenAI tunnel client. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
+**Status:** v0.2.0 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
 
 ## Set up with Codex or Claude
 
@@ -41,6 +41,7 @@ Codex follows [AGENTS.md](AGENTS.md) and the bundled Repo MCP skill. Claude foll
 From the source checkout:
 
 ```sh
+python3 scripts/check-prerequisites.py
 npm ci
 npm run build
 npm test
@@ -62,9 +63,20 @@ Repository registration and selection do not restart that process. `npm start` r
 
 For a disposable single-repository fixture, the historical `startServer` adapter remains available through the development/demo path; it is not the production multi-repository authority model.
 
+Global skills are hash-owned through private state at
+`~/Library/Application Support/repo-mcp/agent-skills/installed.json` (or
+`REPO_MCP_HOME/agent-skills`). Installation updates only recorded copies whose bytes
+still match their owned hash. Foreign/modified copies are preserved; inspect them before
+using `python3 scripts/install-agent-skills.py --install --replace` (alias
+`--force`), which creates an owner-only backup. Legacy installations without the new
+ledger require this explicit backup-and-replace adoption. Keep ownership state and
+backups outside every served checkout; never copy them into a release.
+
 ## Register repositories and tasks
 
 Policies remain operator-owned files outside every served checkout. Registration validates the checkout and copies the normalized policy into owner-only, content-addressed Repo MCP state.
+
+Copy [the read-only v2 template](docs/policy-readonly.json) or [the bounded coding v2 template](docs/policy-coding.json) to an external owner-only policy file. Tailor it to the target: the coding example permits only `src`/`test` edits and creation under existing directories; it grants no dependency installation, package-file edits, or test execution. Dotfiles require explicit opt-in. Review exclusions for private project-specific data.
 
 ```sh
 npm run coord -- repository add \
@@ -84,6 +96,38 @@ npm run coord -- repository list
 ```
 
 One unfinished task owns one registered checkout. For independent concurrent coding against the same project, use separately registered Git worktrees.
+
+### First-install smoke target
+
+For a fresh install, prepare a disposable, committed Git fixture outside the control
+checkout. If any named fixture, policy, repository registration or task already exists,
+inspect and reuse it instead of rerunning this block. This works from a clone or
+extracted source archive and never edits a user's project:
+
+```sh
+npm run prepare:fixture -- --root "$HOME/Library/Application Support/repo-mcp/onboarding/repo"
+mkdir -p "$HOME/Library/Application Support/repo-mcp/policies"
+cp -n docs/policy-readonly.json "$HOME/Library/Application Support/repo-mcp/policies/onboarding.json"
+chmod 600 "$HOME/Library/Application Support/repo-mcp/policies/onboarding.json"
+npm run coord -- repository add --repository repo-mcp-onboarding \
+  --repo "$HOME/Library/Application Support/repo-mcp/onboarding/repo" \
+  --policy "$HOME/Library/Application Support/repo-mcp/policies/onboarding.json"
+npm run coord -- task bind --repository repo-mcp-onboarding --task repo-mcp-onboarding-smoke
+```
+
+In the actual ChatGPT client, call `service_info`, `repository_list`,
+open an `inspect` workspace for repository `repo-mcp-onboarding` and task
+`repo-mcp-onboarding-smoke` with a fresh request ID, then call scoped `repo_info`.
+Verify the fixture root/branch/HEAD and read its complete `AGENTS.md` and `README.md`;
+inspect the complete diff and close the workspace. No write grant is needed.
+The fixture contains an intentionally failing clamp test; that is unrelated to this
+read-only transport/schema smoke. Local health alone does not pass this gate.
+
+The preparation command refuses overwrite. Never remove or reset a user's checkout.
+Reuse an unfinished smoke task; if it was already finished, bind a fresh task ID
+such as `repo-mcp-onboarding-smoke-YYYYMMDD` and use that ID in the client calls.
+After successful smoke, the operator may finish this disposable task with
+`npm run coord -- task finish --task repo-mcp-onboarding-smoke`.
 
 ## Production MCP tools
 
@@ -217,7 +261,9 @@ Build the deterministic allowlisted source archive with:
 npm run release:pack
 ```
 
-The archive excludes `.git`, `.trial`, runtime credentials, operator state, logs, evidence, build output, and local repositories. It includes a SHA-256 source manifest and archive checksum.
+The archive excludes `.git`, `.trial`, runtime credentials, operator state, logs, evidence, build output, and local repositories. It includes a generated SHA-256 source manifest and archive checksum. `SOURCE-MANIFEST.json` belongs only inside generated archives and is not maintained as a source-tree manifest.
+
+The bounded packaging regression extracts into a temporary directory, verifies manifest hashes, builds there using the current installation's dependencies, and runs selected onboarding/model tests without recursively invoking the release test. A release still needs a separate fresh `npm ci`, build, and full test gate on supported macOS.
 
 The normative multi-repository contract is [docs/MULTI-REPO-SPEC.md](docs/MULTI-REPO-SPEC.md). Older workflow/hardening documents remain useful historical and future-hardening references where they do not conflict with that v0.2 contract.
 

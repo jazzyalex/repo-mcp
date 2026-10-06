@@ -118,3 +118,86 @@ for (const scenario of [
   await rm(root,{recursive:true,force:true});
  }
 });
+
+test('durable tunnel upgrades require recorded ownership and roll back failed startup', () => {
+ const program = String.raw`
+import importlib.util, sys, tempfile, pathlib, json, hashlib, os, stat
+sys.path.insert(0, 'scripts')
+spec = importlib.util.spec_from_file_location('installer', 'scripts/install-tunnel-service.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+with tempfile.TemporaryDirectory() as temp:
+ root = pathlib.Path(temp)
+ tunnel = root/'tunnel'; tunnel.mkdir(mode=0o700)
+ launch = root/'LaunchAgents'; launch.mkdir(mode=0o700)
+ target = launch/(m.LABEL+'.plist')
+ old = b'old owned definition'
+ new = b'new owned definition'
+ target.write_bytes(old); target.chmod(0o600)
+ record_path = tunnel/'install.json'
+ record = {'version':1, 'label':m.LABEL, 'plist_sha256':hashlib.sha256(old).hexdigest()}
+ m.atomic_write(record_path, json.dumps(record).encode())
+ calls=[]
+ m.bootout = lambda target: calls.append('bootout')
+ m.wait_fresh_poll = lambda *args: calls.append('verify')
+ m.launchctl = lambda *args, **kwargs: calls.append('bootstrap')
+ new_record = {'version':1, 'label':m.LABEL, 'plist_sha256':hashlib.sha256(new).hexdigest()}
+ m.install_definition(target, tunnel, old, new, new_record)
+ assert target.read_bytes()==new and json.loads(record_path.read_text())==new_record
+ assert calls==['bootout','bootstrap','verify']
+
+ target.write_bytes(b'user modification'); calls.clear()
+ try: m.install_definition(target, tunnel, b'user modification', old, record)
+ except ValueError: pass
+ else: raise AssertionError('modified service accepted')
+ assert target.read_bytes()==b'user modification' and calls==[]
+
+ target.write_bytes(new)
+ prior_record=record_path.read_bytes(); calls.clear()
+ def fail_verify(*args): raise RuntimeError('startup failed')
+ m.wait_fresh_poll=fail_verify
+ try: m.install_definition(target, tunnel, new, old, record)
+ except RuntimeError: pass
+ else: raise AssertionError('failed verification accepted')
+ assert target.read_bytes()==new and record_path.read_bytes()==prior_record
+ assert calls==['bootout','bootstrap','bootout','bootstrap']
+
+ # Publication followed by a sync failure must also restore the prior definition.
+ target.write_bytes(new); calls.clear()
+ original_write=m.atomic_write
+ def fail_after_publication(destination, data, mode=0o600):
+  original_write(destination, data, mode)
+  if destination==target and data==old: raise OSError('directory sync failed')
+ m.atomic_write=fail_after_publication
+ try: m.install_definition(target, tunnel, new, old, record)
+ except OSError: pass
+ else: raise AssertionError('publication failure accepted')
+ assert target.read_bytes()==new and record_path.read_bytes()==prior_record
+ assert calls==['bootout','bootout','bootstrap']
+ m.atomic_write=original_write
+
+ # A bootstrap failure restores both the definition and its ownership record.
+ calls.clear()
+ def fail_bootstrap(*args, **kwargs):
+  calls.append('bootstrap')
+  if target.read_bytes()==old: raise RuntimeError('bootstrap failed')
+ m.launchctl=fail_bootstrap
+ try: m.install_definition(target, tunnel, new, old, record)
+ except RuntimeError: pass
+ else: raise AssertionError('bootstrap failure accepted')
+ assert target.read_bytes()==new and record_path.read_bytes()==prior_record
+ assert calls==['bootout','bootstrap','bootout','bootstrap']
+
+ record_path.unlink(); calls.clear()
+ try: m.install_definition(target, tunnel, new, new, new_record)
+ except ValueError: pass
+ else: raise AssertionError('unrecorded identical definition adopted')
+ assert calls==[] and target.read_bytes()==new
+
+ target.unlink(); target.symlink_to(root/'missing')
+ try: m.install_definition(target, tunnel, None, old, record)
+ except ValueError: pass
+ else: raise AssertionError('symlink adopted')
+`;
+ const result=spawnSync('python3',['-c',program],{encoding:'utf8',timeout:10000});
+ assert.equal(result.status,0,result.stdout+result.stderr);
+});

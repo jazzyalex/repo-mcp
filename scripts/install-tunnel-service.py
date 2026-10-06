@@ -1,6 +1,11 @@
 """Preview/install the durable macOS Repo MCP tunnel service."""
 from __future__ import annotations
 
+from prerequisites import require_python
+require_python()
+
+import fcntl
+import uuid
 import argparse
 import hashlib
 import json
@@ -29,7 +34,7 @@ def private_dir(path: Path) -> None:
 
 def private_file(path: Path, *, nonempty: bool = True) -> bytes:
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError(f'Private file must be a regular owner-only file (0600): {path}')
     data = path.read_bytes()
     if nonempty and not data:
@@ -118,7 +123,7 @@ def desired_plist(client: Path, credentials: Path, tunnel: Path, tunnel_id: str,
 
 
 def launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(['launchctl', *args], check=check, capture_output=True, text=True)
+    return subprocess.run(['launchctl', *args], check=check, capture_output=True, text=True, timeout=10)
 
 
 def bootout(target: Path) -> None:
@@ -155,6 +160,100 @@ def wait_fresh_poll(health_file: Path, started: float, timeout: float = 50.0) ->
     raise RuntimeError(f'Tunnel migration did not verify a fresh control-plane poll ({last_error}).')
 
 
+
+def definition_bytes(target: Path):
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.getuid() or info.st_mode & 0o022):
+        raise ValueError('Installed tunnel service is not an owner-safe regular file.')
+    return target.read_bytes()
+
+
+def install_definition(target: Path, tunnel: Path, expected_existing, desired: bytes,
+                       record: dict, *, migrating: bool = False):
+    """Serialize upgrades and retain the old plist/record until fresh health verifies."""
+    parent_info = target.parent.lstat()
+    if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid()
+            or parent_info.st_mode & 0o022):
+        raise ValueError('Tunnel LaunchAgents parent must be an owner-safe real directory.')
+    lock = target.parent / ('.' + LABEL + '.install.lock')
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise ValueError('Unsafe tunnel installer lock.')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        existing = definition_bytes(target)
+        if existing != expected_existing:
+            raise ValueError('Tunnel definition changed after preflight; preserved.')
+        record_path = tunnel / 'install.json'
+        previous_record = private_file(record_path) if record_path.exists() or record_path.is_symlink() else None
+        if existing is not None and not migrating:
+            previous = json.loads(previous_record) if previous_record is not None else {}
+            if (previous.get('version') != 1 or previous.get('label') != LABEL
+                    or previous.get('plist_sha256') != hashlib.sha256(existing).hexdigest()):
+                raise ValueError('Foreign or modified tunnel definition preserved; recorded installed hash must match exactly.')
+        if existing is not None:
+            backup = tunnel / (LABEL + '.backup-' + uuid.uuid4().hex + '.plist')
+            atomic_write(backup, existing)
+        changed = False
+        stopped = False
+        started = time.time()
+        try:
+            if definition_bytes(target) != existing:
+                raise ValueError('Tunnel definition changed before service control; preserved.')
+            if existing is not None:
+                bootout(target)
+                stopped = True
+            if definition_bytes(target) != existing:
+                raise ValueError('Tunnel definition changed before publication; preserved.')
+            if existing is None:
+                # Publish a new service without overwriting a later occupant.
+                fd_new, temporary = tempfile.mkstemp(prefix='.tunnel-', dir=target.parent)
+                try:
+                    with os.fdopen(fd_new, 'wb') as handle:
+                        handle.write(desired); handle.flush(); os.fsync(handle.fileno())
+                    os.chmod(temporary, 0o600)
+                    os.link(temporary, target)
+                finally:
+                    Path(temporary).unlink(missing_ok=True)
+            else:
+                atomic_write(target, desired)
+            changed = True
+            launchctl('bootstrap', f'gui/{os.getuid()}', str(target))
+            wait_fresh_poll(tunnel / 'health.url', started)
+            if definition_bytes(target) != desired:
+                raise ValueError('Tunnel definition changed during verification; preserved.')
+            atomic_write(record_path, (json.dumps(record, sort_keys=True, indent=2) + '\n').encode())
+        except BaseException:
+            # Never replace a later foreign occupant while rolling back our transaction.
+            current = definition_bytes(target)
+            # A write may publish successfully and then fail while syncing its directory.
+            if not changed and current == desired and current != existing:
+                changed = True
+            if changed and current != desired:
+                raise RuntimeError('Tunnel rollback refused a changed definition; inspect the retained backup.')
+            if changed:
+                bootout(target)
+                if existing is not None:
+                    atomic_write(target, existing)
+                else:
+                    target.unlink(missing_ok=True)
+                if previous_record is not None:
+                    atomic_write(record_path, previous_record)
+                else:
+                    record_path.unlink(missing_ok=True)
+            if stopped and existing is not None and definition_bytes(target) == existing:
+                launchctl('bootstrap', f'gui/{os.getuid()}', str(target))
+            raise
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--install', action='store_true')
@@ -177,7 +276,7 @@ def main() -> int:
 
     target = Path.home() / 'Library/LaunchAgents' / (LABEL + '.plist')
     target.parent.mkdir(parents=True, exist_ok=True)
-    existing = target.read_bytes() if target.exists() else None
+    existing = definition_bytes(target)
     legacy_root = args.legacy_root.expanduser().resolve() if args.legacy_root else None
 
     if args.migrate:
@@ -221,36 +320,17 @@ def main() -> int:
         print(f'Preview written: {preview}. Install with --install after review.')
         return 0
 
-    if existing is not None and not args.migrate and existing != plist_bytes:
-        parser.error('Installed tunnel service differs from the expected durable definition; use explicit migration or inspect it manually.')
-
-    backup = tunnel / (LABEL + '.legacy.plist')
-    started = time.time()
-    try:
-        if existing is not None:
-            atomic_write(backup, existing)
-            bootout(target)
-        atomic_write(target, plist_bytes)
-        launchctl('bootstrap', f'gui/{os.getuid()}', str(target))
-        if args.migrate:
-            wait_fresh_poll(tunnel / 'health.url', started)
-        record = {
-            'version': 1,
-            'label': LABEL,
-            'client': str(selected_client),
-            'port': args.port,
-            'plist_sha256': hashlib.sha256(plist_bytes).hexdigest(),
-            'installed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        }
-        atomic_write(tunnel / 'install.json', (json.dumps(record, sort_keys=True, indent=2) + '\n').encode())
-    except BaseException:
-        bootout(target)
-        if existing is not None:
-            atomic_write(target, existing)
-            launchctl('bootstrap', f'gui/{os.getuid()}', str(target))
-        else:
-            target.unlink(missing_ok=True)
-        raise
+    if not selected_client.is_file() or not os.access(selected_client, os.X_OK):
+        parser.error('Official tunnel client must be an executable regular file.')
+    record = {
+        'version': 1,
+        'label': LABEL,
+        'client': str(selected_client),
+        'port': args.port,
+        'plist_sha256': hashlib.sha256(plist_bytes).hexdigest(),
+        'installed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    }
+    install_definition(target, tunnel, existing, plist_bytes, record, migrating=args.migrate)
 
     if args.migrate:
         assert legacy_root is not None

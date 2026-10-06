@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "read": {
+    "include": [
+      "**"
+    ],
+    "exclude": [
+      "node_modules/**",
+      "dist/**",
+      "build/**",
+      "coverage/**",
+      "vendor/**",
+      ".trial/**",
+      "release/**",
+      "evidence/**",
+      "state/**",
+      "credentials/**",
+      "logs/**",
+      "SOURCE-MANIFEST.json"
+    ]
+  },
+  "write": {
+    "include": [
+      "src/**",
+      "test/**"
+    ],
+    "exclude": [
+      "src/generated/**",
+      "test/snapshots/**"
+    ]
+  },
+  "create": {
+    "paths": [],
+    "directories": [
+      "src",
+      "test"
+    ],
+    "extensions": [
+      ".ts",
+      ".js",
+      ".json",
+      ".md"
+    ]
+  },
+  "dotfiles": [],
+  "checks": []
+}
