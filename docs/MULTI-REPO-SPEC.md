@@ -255,6 +255,10 @@ Existing policy limits continue to cap response pages, source/edit payloads, inv
 
 The authorization ledger is additionally bounded. Current implementation refuses new grants/selections when grants + workspaces + request records reach 4096 rather than silently evicting authority/recovery evidence.
 
+The local `coord gc` maintenance command defaults to a read-only deterministic plan. Apply mode MAY remove expired authorization history, expired capture pairs, and terminal non-publication outcomes only after their tasks are durably completed and the relevant control/admission/task/checkout locks are owned. Defaults are 24 hours for authorization history, zero additional hours after capture expiry, and 30 days after durable task completion for terminal outcomes. Operators may configure these windows and a bounded scan limit.
+
+GC MUST preserve active or unfinished tasks, lifecycle records, intent/publication evidence, policy and token material, audits, locks, and unknown state. It MUST fail closed or report an incomplete run when a candidate is busy, malformed, linked, permission-unsafe, identity-changed, or cannot be journaled. A permanent authorization-use marker MUST retain the migration rollback boundary after historical authorization rows are removed. GC is independent of, and has no authority over, ChatGPT or Claude conversation history.
+
 Future production scaling MAY add global/per-checkout admission quotas, but MUST NOT evict active selections, mutation outcomes, or active capture state merely to satisfy cache pressure.
 
 ## 18. Acceptance criteria

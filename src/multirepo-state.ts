@@ -12,6 +12,7 @@ import { readActiveService, rootDigest } from './service-control.js';
 const CATALOG_PATH = 'control/multirepo-catalog.json';
 const INITIALIZED_PATH = 'control/multirepo-initialized.json';
 const AUTH_PATH = 'control/multirepo-auth.json';
+const AUTH_USED_PATH = 'control/multirepo-auth-used.json';
 const TOKEN_KEY_PATH = 'control/workspace-token-key.json';
 const CONTROL_LOCK = 'multirepo-control-v1';
 const WORKSPACE_TTL_MS = 8 * 60 * 60_000;
@@ -354,11 +355,28 @@ function parseTokenKey(value: unknown): TokenKey {
 }
 
 type MultiRepoInitialization = { initialized_at: string };
+type MultiRepoAuthUsed = { observed_at: string };
 
 function parseInitialization(value: unknown): MultiRepoInitialization {
   const v = object(value, 'multi-repository initialization marker');
   if (!validDate(v.initialized_at)) throw new SafeError('Corrupt multi-repository initialization marker; inspect operator state before continuing.');
   return { initialized_at: v.initialized_at as string };
+}
+
+function parseAuthUsed(value: unknown): MultiRepoAuthUsed {
+  const v = object(value, 'multi-repository authorization-use marker');
+  if (!validDate(v.observed_at)) throw new SafeError('Corrupt multi-repository authorization-use marker; inspect operator state before continuing.');
+  return { observed_at: v.observed_at as string };
+}
+
+async function ensureAuthUsed(store: StateStore) {
+  const existing = await store.read<unknown>(AUTH_USED_PATH, 'multirepo-auth-used');
+  if (existing !== undefined) return parseAuthUsed(existing);
+  const desired: MultiRepoAuthUsed = { observed_at: nowIso() };
+  if (await store.create(AUTH_USED_PATH, 'multirepo-auth-used', desired)) return desired;
+  const raced = await store.read<unknown>(AUTH_USED_PATH, 'multirepo-auth-used');
+  if (raced === undefined) throw new SafeError('Authorization-use marker creation raced and no durable marker is available.');
+  return parseAuthUsed(raced);
 }
 
 async function ensureInitialized(store: StateStore) {
@@ -381,11 +399,13 @@ async function readCatalogStore(store: StateStore) {
 
   const initializedRaw = await store.read<unknown>(INITIALIZED_PATH, 'multirepo-initialized');
   const authRaw = await store.read<unknown>(AUTH_PATH, 'multirepo-auth');
+  const authUsedRaw = await store.read<unknown>(AUTH_USED_PATH, 'multirepo-auth-used');
   const tokenKeyRaw = await store.read<unknown>(TOKEN_KEY_PATH, 'workspace-token-key');
   if (initializedRaw !== undefined) parseInitialization(initializedRaw);
   const auth = authRaw === undefined ? emptyAuth() : parseAuth(authRaw);
+  if (authUsedRaw !== undefined) parseAuthUsed(authUsedRaw);
   if (tokenKeyRaw !== undefined) parseTokenKey(tokenKeyRaw);
-  if (initializedRaw !== undefined || authHasHistory(auth) || tokenKeyRaw !== undefined) {
+  if (initializedRaw !== undefined || authHasHistory(auth) || authUsedRaw !== undefined || tokenKeyRaw !== undefined) {
     throw new SafeError('Multi-repository catalog is missing after durable authorization state was initialized; refusing to reset repository epochs. Restore or explicitly repair operator state.');
   }
   return defaultCatalog();
@@ -403,6 +423,7 @@ async function writeCatalog(store: StateStore, catalog: MultiRepoCatalog) {
 async function writeAuth(store: StateStore, auth: AuthState) {
   const checked = parseAuth(auth);
   await ensureInitialized(store);
+  if (authHasHistory(checked)) await ensureAuthUsed(store);
   await store.write(AUTH_PATH, 'multirepo-auth', checked);
 }
 async function withControlLock<T>(stateDir: string, purpose: string, fn: (store: StateStore) => Promise<T>, forbiddenRoots: string[] = []) {
@@ -436,6 +457,102 @@ async function withRepositoryTaskDrain<T>(
   return active ? withTaskCoordinatorGate(stateDir, active.task_id, apply) : apply();
 }
 const admissionKey = (workspaceId: string) => `workspace-${workspaceId}-admission`;
+
+export type AuthorizationGcResult = {
+  workspaces: number;
+  grants: number;
+  requests: number;
+  skipped_workspaces: string[];
+};
+
+function authorizationGcPlan(auth: AuthState, cutoffMs: number, allowedWorkspaces?: Set<string>) {
+  const requestsByWorkspace = new Map<string, RequestLedgerEntry[]>();
+  for (const request of Object.values(auth.requests)) {
+    const list = requestsByWorkspace.get(request.workspace_id) ?? [];
+    list.push(request);
+    requestsByWorkspace.set(request.workspace_id, list);
+  }
+  const workspaces = Object.values(auth.workspaces)
+    .filter(workspace => {
+      if (allowedWorkspaces && !allowedWorkspaces.has(workspace.workspace_id)) return false;
+      const last = Math.max(
+        Date.parse(workspace.expires_at),
+        ...(requestsByWorkspace.get(workspace.workspace_id) ?? []).map(request => Date.parse(request.at))
+      );
+      return last <= cutoffMs;
+    })
+    .map(workspace => workspace.workspace_id)
+    .sort();
+  const removedWorkspaces = new Set(workspaces);
+  const requests = Object.entries(auth.requests)
+    .filter(([, request]) => removedWorkspaces.has(request.workspace_id))
+    .map(([key]) => key)
+    .sort();
+  const grants = Object.values(auth.grants)
+    .filter(grant => Date.parse(grant.expires_at) <= cutoffMs &&
+      (!grant.consumed_by || removedWorkspaces.has(grant.consumed_by) || !auth.workspaces[grant.consumed_by]))
+    .map(grant => grant.grant_id)
+    .sort();
+  return { workspaces, grants, requests };
+}
+
+/**
+ * Plan or apply bounded authorization cleanup. Applying first drains every candidate
+ * workspace admission lock, then rewrites the authorization ledger once under the
+ * service control lock. A busy workspace is skipped and remains fully referenced.
+ */
+export async function collectExpiredAuthorization(options: {
+  stateDir: string;
+  cutoffMs: number;
+  apply: boolean;
+}): Promise<AuthorizationGcResult> {
+  const inspected = await StateStore.inspect(options.stateDir);
+  if (!inspected) return { workspaces: 0, grants: 0, requests: 0, skipped_workspaces: [] };
+  const snapshot = authorizationGcPlan(await readAuthStore(inspected), options.cutoffMs);
+  if (!options.apply) {
+    return {
+      workspaces: snapshot.workspaces.length,
+      grants: snapshot.grants.length,
+      requests: snapshot.requests.length,
+      skipped_workspaces: []
+    };
+  }
+
+  const store = await StateStore.open(options.stateDir);
+  const locks: Awaited<ReturnType<typeof acquireLock>>[] = [];
+  const allowed = new Set<string>();
+  const skipped: string[] = [];
+  for (const workspaceId of snapshot.workspaces) {
+    try {
+      const lock = await acquireLock(store, admissionKey(workspaceId), `gc workspace ${workspaceId}`);
+      locks.push(lock);
+      allowed.add(workspaceId);
+    } catch {
+      skipped.push(workspaceId);
+    }
+  }
+  try {
+    return await withControlLock(options.stateDir, 'garbage collect authorization state', async controlStore => {
+      const auth = await readAuthStore(controlStore);
+      const plan = authorizationGcPlan(auth, options.cutoffMs, allowed);
+      if (plan.workspaces.length || plan.grants.length || plan.requests.length) {
+        if (authHasHistory(auth)) await ensureAuthUsed(controlStore);
+        for (const id of plan.workspaces) delete auth.workspaces[id];
+        for (const id of plan.grants) delete auth.grants[id];
+        for (const id of plan.requests) delete auth.requests[id];
+        await writeAuth(controlStore, auth);
+      }
+      return {
+        workspaces: plan.workspaces.length,
+        grants: plan.grants.length,
+        requests: plan.requests.length,
+        skipped_workspaces: skipped.sort()
+      };
+    });
+  } finally {
+    for (const lock of locks.reverse()) await lock.release();
+  }
+}
 
 function knownControlPurpose(purpose: string) {
   if (purpose === 'configure multi-repository service' || purpose === 'rollback active-service catalog migration' || purpose === 'explicit multirepo control recovery') return true;
@@ -1346,7 +1463,9 @@ export async function rollbackActiveServiceCatalogMigration(options: { stateDir?
     const migration = catalog.migration;
     if (!migration) throw new SafeError('No active-service catalog migration is recorded.');
     const auth = await readAuthStore(store);
-    if (Object.keys(auth.grants).length || Object.keys(auth.workspaces).length || Object.keys(auth.requests).length) {
+    const authUsedRaw = await store.read<unknown>(AUTH_USED_PATH, 'multirepo-auth-used');
+    if (authUsedRaw !== undefined) parseAuthUsed(authUsedRaw);
+    if (authUsedRaw !== undefined || Object.keys(auth.grants).length || Object.keys(auth.workspaces).length || Object.keys(auth.requests).length) {
       throw new SafeError('Migration rollback is refused after any grant, workspace selection or workspace request was published.');
     }
     if (Object.keys(catalog.repositories).length !== 1 || Object.keys(catalog.tasks).length !== 1 ||

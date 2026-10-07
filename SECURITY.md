@@ -77,6 +77,21 @@ The normative multi-repository requirements are in
 - Login services start only after login. Sleeping/offline machines cannot serve
   remote MCP requests.
 
+## Local garbage collection
+
+`coord gc` is a local operator action and defaults to dry-run. Apply mode serializes
+with service control, workspace admission, task gates, and checkout ownership before
+removing eligible records. It fails closed on malformed state, identity changes, unsafe
+permissions, links, or unfinished deletion journals, and reports partial runs with a
+nonzero exit status.
+
+GC may remove expired workspace/grant/request history, expired capture pairs, and old
+terminal outcomes for durably completed tasks. It never removes active or unfinished
+task authority, intent or publication evidence, lifecycle anchors, policy/token/audit
+material, or unknown files. A permanent create-only authorization-use marker preserves
+the catalog migration rollback boundary even after old authorization records are gone.
+GC does not read or delete ChatGPT or Claude conversation history.
+
 ## Review assurance
 
 The v0.2 review phase is a task-wide mutation/check drain plus read-only phase.

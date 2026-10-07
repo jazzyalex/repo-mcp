@@ -247,6 +247,30 @@ npm run coord -- workspace recover-stale --workspace WORKSPACE_ID
 
 Recovery is deliberately narrow: the lock must have a recognized Repo MCP purpose, the workspace command requires a matching persisted workspace/status/capability, and the exact stale lock token is checked again immediately before recovery. A live lock, a different-host lock, an unexpected purpose, or a replacement lock fails closed. These commands recover only cooperative lock records; they do not change repository/task/workspace authorization. If the separate `.recovery.json` marker itself was left by a crashed recovery process, automatic recovery refuses it; inspect that marker and operator state before manual removal.
 
+## Local state garbage collection
+
+`coord gc` cleans expired local Repo MCP state without touching ChatGPT or Claude
+conversation history. It defaults to a read-only plan:
+
+```sh
+npm run --silent coord -- gc --dry-run
+npm run --silent coord -- gc --apply
+```
+
+The defaults retain authorization records for 24 hours after expiry, retain captures
+until their existing cursor expiry, and retain terminal mutation outcomes for 30 days
+after both task completion and the outcome update. Override them with
+`--auth-retention-hours`, `--capture-retention-hours`, and
+`--task-retention-days`. GC removes expired workspace/grant/request records in one
+authorization rewrite and removes verified expired capture pairs and old
+completed/failed outcomes only for durably completed, idle tasks.
+
+It preserves repository registrations, task binding/phase/protocol/completion records,
+intent or publication-bearing outcomes, audits, policies, model-policy and Oracle
+journals, token keys, locks, unknown files, and unfinished or draining tasks. Busy or
+unsafe units are reported and retained. No separate durable runtime-record or retained
+job-log store exists in v0.2.1, so GC does not invent those deletion targets.
+
 ## Policy and repository safety
 
 Policies define read/write/create scopes, dotfile access, approved fixture tests, exclusions, and resource limits. Denials win. Existing protections remain in force for VCS metadata, secret names, server-owned state, traversal, symlinks, hard links, unsafe paths, stale file hashes, no-overwrite creation, bounded Git captures, and durable mutation request outcomes.

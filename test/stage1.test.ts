@@ -1425,6 +1425,19 @@ test('multi-repository coordinator CLI rejects extra positionals and out-of-comm
   const recoverWorkspaceMissing = run('workspace', 'recover-stale');
   assert.notEqual(recoverWorkspaceMissing.status, 0);
   assert.match(recoverWorkspaceMissing.stderr, /requires --workspace/i);
+
+  const gcPlan = run('gc', '--dry-run', '--json');
+  assert.equal(gcPlan.status, 0, gcPlan.stderr);
+  assert.equal(JSON.parse(gcPlan.stdout).mode, 'dry-run');
+  await assert.rejects(stat(stateDir), { code: 'ENOENT' });
+
+  const contradictoryGc = run('gc', '--dry-run', '--apply');
+  assert.notEqual(contradictoryGc.status, 0);
+  assert.match(contradictoryGc.stderr, /only one of --apply or --dry-run/i);
+
+  const invalidGcRetention = run('gc', '--auth-retention-hours=-1');
+  assert.notEqual(invalidGcRetention.status, 0);
+  assert.match(invalidGcRetention.stderr, /decimal integer/i);
   await rm(base, { recursive: true, force: true });
 });
 

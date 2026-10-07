@@ -325,6 +325,35 @@ export async function withTaskCoordinatorGate<T>(stateDir: string, taskId: strin
   return coordinatorGate(store, taskId, fn);
 }
 
+/**
+ * Hold a completed task's gate and checkout ownership while local GC inspects or
+ * removes task-scoped runtime residue. Existing live, stale or foreign ownership
+ * fails closed; this helper never recovers a lock.
+ */
+export async function withCompletedTaskGcLease<T>(
+  stateDir: string,
+  taskId: string,
+  fn: (material: { store: StateStore; binding: Binding; completion: Completion }) => Promise<T>
+) {
+  const initial = await coordinatorStore(stateDir, taskId, { allowCompleted: true });
+  if (!initial.completion) throw new SafeError(`Task ${taskId} is not durably completed.`);
+  return coordinatorGate(initial.store, taskId, async () => {
+    const current = await coordinatorStore(stateDir, taskId, { allowCompleted: true });
+    if (!current.completion) throw new SafeError(`Task ${taskId} completion record disappeared during garbage collection.`);
+    const checkout = await acquireLock(current.store, checkoutLockKey(current.binding), `gc task ${taskId}`);
+    try {
+      const identity = await resolveIdentity(current.binding.root);
+      const drift = identityDrift(current.binding, identity);
+      if (drift) throw new SafeError(`Task ${taskId} checkout changed before garbage collection: ${drift}`);
+      const completion = await current.store.read<Completion>(current.paths.completion, 'completion');
+      if (!completion) throw new SafeError(`Task ${taskId} completion record disappeared during garbage collection.`);
+      return await fn({ store: current.store, binding: current.binding, completion });
+    } finally {
+      await checkout.release();
+    }
+  });
+}
+
 export async function recoverTaskStaleLocks(stateDir: string, taskId: string) {
   const { store, binding } = await coordinatorStore(stateDir, taskId);
   const identity = await resolveIdentity(binding.root);

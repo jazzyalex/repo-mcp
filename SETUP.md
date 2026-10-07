@@ -743,6 +743,28 @@ task is still active, it reports that concrete blocker rather than freezing anot
 agent's task. Coding grants, task phase, service control, commits and pushes remain
 separate operator/coordinator actions.
 
+## Local state maintenance
+
+Preview garbage collection first; the default is read-only:
+
+```sh
+npm run --silent coord -- gc --dry-run
+npm run --silent coord -- gc --apply
+```
+
+The defaults retain expired authorization history for 24 hours, expired captures until
+their configured expiry, and terminal request outcomes for 30 days after a task is
+durably completed. Override them with `--auth-retention-hours`,
+`--capture-retention-hours`, and `--task-retention-days`. `--max-records` bounds each
+task scan. An incomplete run exits 2 and reports every busy or unsafe unit it skipped.
+
+GC never touches ChatGPT or Claude conversations. It preserves active or unfinished
+tasks, task binding/phase/protocol/completion records, mutation intents, publication
+witnesses, policies, signing keys, audit logs, and unknown files. Capture and outcome
+deletions use a durable pending journal; authorization history is rewritten atomically
+under the existing workspace and control locks. There is currently no separate durable
+runtime-record or retained job-log store to delete.
+
 ## Troubleshooting
 
 | Symptom | Action |

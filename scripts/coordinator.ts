@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util';
 import { coordinatorMigrateLegacy, coordinatorStatus, formatCoordinatorStatusText } from '../src/coordinator.js';
+import { garbageCollect } from '../src/gc.js';
 import {
   bindRegisteredTask,
   configureMultiRepoService,
@@ -42,12 +43,26 @@ const { positionals, values } = parseArgs({
     'state-dir': { type: 'string' },
     'allow-detached': { type: 'boolean' },
     'use-active-task': { type: 'boolean' },
+    'dry-run': { type: 'boolean' },
+    apply: { type: 'boolean' },
+    'auth-retention-hours': { type: 'string' },
+    'capture-retention-hours': { type: 'string' },
+    'task-retention-days': { type: 'string' },
+    'max-records': { type: 'string' },
     json: { type: 'boolean' }
   }
 });
 
 const [area, command] = positionals;
-const stateDir = values['state-dir'] ?? defaultStateDir();
+const stateDir = values['state-dir'] ?? process.env.REPO_MCP_STATE_DIR ?? defaultStateDir();
+const asStrictInteger = (name: 'auth-retention-hours' | 'capture-retention-hours' | 'task-retention-days' | 'max-records') => {
+  const raw = values[name];
+  if (raw === undefined) return undefined;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) throw new Error(`--${name} must be a decimal integer.`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) throw new Error(`--${name} is too large.`);
+  return value;
+};
 const asPort = () => {
   if (values.port === undefined) return undefined;
   const port = Number(values.port);
@@ -73,6 +88,19 @@ try {
     assertOnly('state-dir', 'json');
     const status = await coordinatorStatus({ stateDir });
     console.log(values.json ? JSON.stringify(status, null, 2) : formatCoordinatorStatusText(status));
+  } else if (positionals.length === 1 && area === 'gc') {
+    assertOnly('state-dir', 'dry-run', 'apply', 'auth-retention-hours', 'capture-retention-hours', 'task-retention-days', 'max-records', 'json');
+    if (values.apply && values['dry-run']) throw new Error('coord gc accepts only one of --apply or --dry-run.');
+    const summary = await garbageCollect({
+      stateDir,
+      apply: !!values.apply,
+      authRetentionHours: asStrictInteger('auth-retention-hours'),
+      captureRetentionHours: asStrictInteger('capture-retention-hours'),
+      taskRetentionDays: asStrictInteger('task-retention-days'),
+      maxRecords: asStrictInteger('max-records')
+    });
+    console.log(values.json ? JSON.stringify(summary) : JSON.stringify(summary, null, 2));
+    if (!summary.complete) process.exitCode = 2;
   } else if (positionals.length !== 2) {
     throw new Error('Use: coord <service|repository|task|workspace|migration> <command>. The pre-0.2 single-active CLI no longer selects production repository scope; only read-only `coord status` remains as a compatibility alias.');
   } else if (area === 'service') {

@@ -136,6 +136,13 @@ the requested work through Repo MCP, and page through the complete final `git_di
 Coding retries must reuse the same public request ID and identical arguments after a lost
 response.
 
+## Local state maintenance
+
+When the user asks to clean Repo MCP state, run `coord gc --dry-run` first and explain
+the exact plan. Use `coord gc --apply` only within the requested cleanup scope. Treat
+exit 2 or `complete: false` as a partial cleanup that needs inspection; never recover or
+delete a reported lock automatically. GC does not remove ChatGPT or Claude chats.
+
 ## Handoff and authority
 
 For an explicitly requested handoff, give the target conversation only the repository
