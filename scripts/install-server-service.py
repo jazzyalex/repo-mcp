@@ -71,11 +71,44 @@ if not a.install:
     sys.stdout.buffer.write(bytes_out)
     sys.exit(0)
 
+target = Path.home()/'Library/LaunchAgents'/(label+'.plist')
+
+def installed_working_directory():
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                info.st_uid != os.getuid() or info.st_mode & 0o022 or info.st_size > 1024 * 1024):
+            return None
+        raw = os.read(fd, 1024 * 1024 + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > 1024 * 1024:
+        return None
+    try:
+        existing = plistlib.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(existing, dict) or existing.get('Label') != label:
+        return None
+    return existing.get('WorkingDirectory') if isinstance(existing.get('WorkingDirectory'), str) else None
+
+preflight_base = installed_working_directory()
+if preflight_base is not None and preflight_base != str(base):
+    p.error(
+        f'Existing Repo MCP service is bound to {preflight_base}. '
+        'Run the installer from that control checkout; automatic relocation is refused.'
+    )
+
 state.mkdir(parents=True, exist_ok=True, mode=0o700)
 state.chmod(0o700)
 runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
 runtime.chmod(0o700)
-target = Path.home()/'Library/LaunchAgents'/(label+'.plist')
 target.parent.mkdir(parents=True, exist_ok=True)
 install_path = state/'control/install.json'
 
@@ -94,6 +127,35 @@ def fsync_dir(directory):
     fd = os.open(directory, os.O_RDONLY)
     try: os.fsync(fd)
     finally: os.close(fd)
+
+def cleanup_legacy_preview():
+    preview = runtime/(label+'.preview.plist')
+    try:
+        fd = os.open(preview, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (FileNotFoundError, OSError):
+        return False
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o600 or
+                before.st_size != len(bytes_out)):
+            return False
+        data = os.read(fd, len(bytes_out) + 1)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if data != bytes_out or identity(before) != identity(after):
+        return False
+    try:
+        occupant = preview.lstat()
+    except FileNotFoundError:
+        return False
+    if (occupant.st_dev, occupant.st_ino) != (after.st_dev, after.st_ino):
+        return False
+    preview.unlink()
+    fsync_dir(runtime)
+    return True
 
 claim_prefix = f'.{target.name}.claim-'
 
@@ -288,6 +350,7 @@ try:
     install = read_install()
     current = target.read_bytes() if target.exists() else None
     current_hash = hashlib.sha256(current).hexdigest() if current is not None else None
+    definition_changed = current_hash != desired_hash
     transaction = install.get('plist_transaction') if install else None
 
     if transaction is not None:
@@ -375,6 +438,10 @@ try:
         print('Trusted older Repo MCP definition retained with a prepared exact-claim upgrade transaction. Run npm run coord -- service start; the coordinator will claim, verify, replace, and attest it.')
         sys.exit(0)
 
-    print(f'Installed stable definition: {target}. Bind a task and run npm run coord -- service start to load and attest it.')
+    cleanup_legacy_preview()
+    if definition_changed:
+        print(f'Installed stable definition: {target}. Run npm run coord -- service start to load and attest it.')
+    else:
+        print(f'Current stable definition: {target}. No service restart is needed.')
 finally:
     release_service_plist_lock(lock_token)

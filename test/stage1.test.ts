@@ -1476,6 +1476,29 @@ test('server installer preview is side-effect free and a second checkout cannot 
   assert.equal(installed.status, 0, installed.stderr);
   const target = path.join(home, 'Library/LaunchAgents/local.repo-mcp.server.plist');
   const before = await readFile(target);
+  const legacyPreview = path.join(
+    home, 'Library/Application Support/repo-mcp/server/local.repo-mcp.server.preview.plist'
+  );
+  await writeFile(legacyPreview, before, { mode: 0o600 });
+
+  const current = spawnSync('python3', [installer, '--state-dir', stateDir, '--install'], {
+    cwd: projectRoot, env, encoding: 'utf8'
+  });
+  assert.equal(current.status, 0, current.stderr);
+  assert.match(current.stdout, /Current stable definition/);
+  assert.doesNotMatch(current.stdout, /service start/i);
+  await assert.rejects(stat(legacyPreview), { code: 'ENOENT' });
+
+  await writeFile(legacyPreview, 'foreign preview\n', { mode: 0o600 });
+  const preserveForeign = spawnSync('python3', [installer, '--state-dir', stateDir, '--install'], {
+    cwd: projectRoot, env, encoding: 'utf8'
+  });
+  assert.equal(preserveForeign.status, 0, preserveForeign.stderr);
+  assert.equal(await readFile(legacyPreview, 'utf8'), 'foreign preview\n');
+  await rm(legacyPreview);
+
+  const serviceControl = path.join(home, 'Library/LaunchAgents/.repo-mcp-service-control');
+  await rm(serviceControl, { recursive: true, force: true });
 
   const other = path.join(base, 'other-checkout');
   await mkdir(path.join(other, 'scripts'), { recursive: true });
@@ -1493,6 +1516,7 @@ test('server installer preview is side-effect free and a second checkout cannot 
   assert.notEqual(relocation.status, 0);
   assert.match(relocation.stderr, /bound to .*Run the installer from that control checkout.*relocation is refused/is);
   assert.deepEqual(await readFile(target), before);
+  await assert.rejects(stat(serviceControl), { code: 'ENOENT' });
   const installRecord = JSON.parse(await readFile(path.join(stateDir, 'control/install.json'), 'utf8'));
   assert.equal(installRecord.data.plist_transaction, undefined);
 });
