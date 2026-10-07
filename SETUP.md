@@ -16,7 +16,7 @@ The normative authority/lifecycle contract is
 
 Open the Repo MCP checkout in Codex or Claude Code and ask:
 
-> Use the Repo MCP skill in this repository to install Repo MCP and verify ChatGPT access.
+> Use the Repo MCP skill in this repository to install Repo MCP and verify Claude Code and ChatGPT access.
 
 Codex is routed by `AGENTS.md` to `.codex/skills/repo-mcp/SKILL.md`; Claude is routed by
 `CLAUDE.md` to `.claude/skills/repo-mcp/SKILL.md`. The agent runs the commands in this
@@ -40,7 +40,13 @@ entered through the hidden local prompt, never in chat.
 
 ## 1. Install, migrate, and configure
 
-From the source checkout, validate locally before deploying:
+When Repo MCP is already installed, first inspect
+`~/Library/LaunchAgents/local.repo-mcp.server.plist` and use its `WorkingDirectory` as
+the control checkout. The installer refuses to relocate a permanent service from a second
+clone. Without `--install`, the service installer prints its preview plist to stdout and
+does not create operator state.
+
+From the selected control checkout, validate locally before deploying:
 
 ```sh
 python3 scripts/check-prerequisites.py
@@ -92,8 +98,12 @@ npm run coord -- service start
 npm run coord -- service status
 ```
 
-The broker can start with an empty catalog. Repository registration, selection,
-switching, phase changes and normal task completion do not restart it.
+The broker can start with an empty catalog. `service start` intentionally reloads the
+launchd process so first installation, upgraded code, or recovery takes effect. It can
+interrupt an in-flight request; persisted tasks and workspace records survive, and
+clients can open a fresh workspace. Repository registration, selection, switching, phase
+changes and normal task completion do not restart it, so do not run `service start` for
+those operations.
 
 ### Register approved repositories
 
@@ -717,11 +727,13 @@ python3 scripts/install-agent-skills.py --install
 If a same-name skill is foreign or modified, inspect it and use the documented
 `--replace` option only when replacement is intended; the installer retains a backup.
 
-Freeze the task with `npm run coord -- task phase --task TASK_ID --phase review`,
-then ask Claude to use `$repo-mcp-review` with the registered repository/task IDs.
-The skill opens a new review workspace, verifies scoped `repo_info`, and requires
-repository evidence to come only through Repo MCP. Coding grants, task phase, service
-control, commits and pushes remain separate operator/coordinator actions.
+Open Claude Code in the repository and ask: `Use Repo MCP to review this repository`.
+The review skill resolves or prepares the current checkout, keeps repository/task IDs and
+workspace tokens internal, opens a new review workspace, verifies scoped `repo_info`,
+and requires repository evidence to come only through Repo MCP. If an unfinished coding
+task is still active, it reports that concrete blocker rather than freezing another
+agent's task. Coding grants, task phase, service control, commits and pushes remain
+separate operator/coordinator actions.
 
 ## Troubleshooting
 

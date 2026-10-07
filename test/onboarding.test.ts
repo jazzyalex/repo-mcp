@@ -34,6 +34,16 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(claudeSkill, /When this Claude conversation is doing the requested work/i);
   assert.match(claudeSkill, /immediately consume that grant itself/i);
   assert.match(claudeSkill, /Never make that handoff the default current-session\s+workflow/i);
+  assert.match(claudeSkill, /claude mcp add --scope user --transport http repo-mcp http:\/\/127\.0\.0\.1:8787\/mcp/);
+  assert.match(claudeSkill, /WorkingDirectory.*control checkout/is);
+  const codexSkill = await readFile(path.join(PROJECT_BASE, '.codex/skills/repo-mcp/SKILL.md'), 'utf8');
+  assert.match(codexSkill, /claude mcp get repo-mcp/i);
+  assert.match(codexSkill, /http:\/\/127\.0\.0\.1:8787\/mcp/);
+  assert.match(codexSkill, /WorkingDirectory.*control checkout/is);
+  assert.match(codexSkill, /each configured real client route/i);
+  const setup = await readFile(path.join(PROJECT_BASE, 'SETUP.md'), 'utf8');
+  assert.match(setup, /Use Repo MCP to review this repository/);
+  assert.doesNotMatch(setup, /ask Claude.*registered repository\/task IDs/i);
   assert.equal(await readFile(path.join(PROJECT_BASE, 'README.md'), 'utf8'), await readFile(path.join(PROJECT_BASE, 'docs/PUBLIC-README.md'), 'utf8'));
   const readOnly = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-readonly.json'), 'utf8')))).paths;
   const coding = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-coding.json'), 'utf8')))).paths;

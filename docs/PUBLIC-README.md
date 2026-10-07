@@ -11,12 +11,13 @@ The service makes no model inference API calls. Git commit/push, repository regi
 You do not need to copy setup commands. Clone or open this repository in Codex or
 Claude Code and say:
 
-> Use the Repo MCP skill in this repository to install Repo MCP and verify ChatGPT access.
+> Use the Repo MCP skill in this repository to install Repo MCP and verify Claude Code and ChatGPT access.
 
 The bundled agent instructions lead the agent through dependency checks, tests, broker
-and tunnel installation, durable service startup, ChatGPT tool refresh, and an end-to-end
-smoke test. They also install the Repo MCP skills into the user's Codex and Claude skill
-directories so future sessions in other projects can find them.
+and tunnel installation, durable service startup, Claude MCP registration, ChatGPT tool
+refresh, and an end-to-end smoke test in every configured client. They also install the
+Repo MCP skills into the user's Codex and Claude skill directories so future sessions in
+other projects can find them.
 The installed skill locates the permanent broker's control checkout automatically; the
 user does not need to remember its path or manage repository IDs, task IDs, policies,
 grants, or workspace tokens. The agent resolves the current Git checkout, reuses or
@@ -47,7 +48,12 @@ Codex follows [AGENTS.md](AGENTS.md) and the bundled Repo MCP skill. Claude foll
 
 ## Manual setup and troubleshooting
 
-From the source checkout:
+If Repo MCP is already installed, inspect
+`~/Library/LaunchAgents/local.repo-mcp.server.plist` first and run the upgrade from its
+`WorkingDirectory`. The installer refuses to relocate a permanent service from a second
+clone.
+
+From the selected control checkout:
 
 ```sh
 python3 scripts/check-prerequisites.py
@@ -66,6 +72,17 @@ Configure/start the permanent broker once:
 npm run coord -- service configure --port 8787
 npm run coord -- service start
 npm run coord -- service status
+```
+
+`service start` intentionally reloads launchd so new code takes effect. It can interrupt an
+in-flight request; persisted task and workspace records survive and clients can open a
+fresh workspace. Do not run it merely to switch repositories.
+
+Connect Claude Code once at user scope:
+
+```sh
+claude mcp add --scope user --transport http repo-mcp http://127.0.0.1:8787/mcp
+claude mcp get repo-mcp
 ```
 
 Repository registration and selection do not restart that process. `npm start` runs the same production `service-main` broker in the foreground; installed launchd operation should still be controlled with `npm run coord -- service start`.

@@ -1453,6 +1453,50 @@ test('Python installer uses the shared serialized exact-claim/create-if-absent p
   assert.doesNotMatch(source, /os\.replace\(temporary, path\)/);
 });
 
+test('server installer preview is side-effect free and a second checkout cannot relocate an install', async t => {
+  const base = await realpath(await tmp('repo-mcp-installer-safety-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const home = path.join(base, 'home');
+  const stateDir = path.join(home, 'Library/Application Support/repo-mcp/state');
+  await mkdir(home, { recursive: true });
+  const env = { ...process.env, HOME: home };
+  const installer = path.join(projectRoot, 'scripts/install-server-service.py');
+
+  const previewState = path.join(base, 'preview-state');
+  const preview = spawnSync('python3', [installer, '--state-dir', previewState], {
+    cwd: projectRoot, env, encoding: 'utf8'
+  });
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /^<\?xml version=/);
+  await assert.rejects(stat(previewState), { code: 'ENOENT' });
+
+  const installed = spawnSync('python3', [installer, '--state-dir', stateDir, '--install'], {
+    cwd: projectRoot, env, encoding: 'utf8'
+  });
+  assert.equal(installed.status, 0, installed.stderr);
+  const target = path.join(home, 'Library/LaunchAgents/local.repo-mcp.server.plist');
+  const before = await readFile(target);
+
+  const other = path.join(base, 'other-checkout');
+  await mkdir(path.join(other, 'scripts'), { recursive: true });
+  await mkdir(path.join(other, 'dist/src'), { recursive: true });
+  await writeFile(path.join(other, 'scripts/install-server-service.py'), await readFile(installer));
+  await writeFile(
+    path.join(other, 'scripts/prerequisites.py'),
+    await readFile(path.join(projectRoot, 'scripts/prerequisites.py'))
+  );
+  await writeFile(path.join(other, 'dist/src/service-main.js'), '// alternate checkout\n');
+
+  const relocation = spawnSync('python3', [
+    path.join(other, 'scripts/install-server-service.py'), '--state-dir', stateDir, '--install'
+  ], { cwd: other, env, encoding: 'utf8' });
+  assert.notEqual(relocation.status, 0);
+  assert.match(relocation.stderr, /bound to .*Run the installer from that control checkout.*relocation is refused/is);
+  assert.deepEqual(await readFile(target), before);
+  const installRecord = JSON.parse(await readFile(path.join(stateDir, 'control/install.json'), 'utf8'));
+  assert.equal(installRecord.data.plist_transaction, undefined);
+});
+
 test('service plist writer lock serializes distinct operator state dirs for one launchd target', async () => {
   const base = await realpath(await tmp('repo-mcp-stage1-global-plist-lock-'));
   const project = path.join(base, 'project');

@@ -28,26 +28,35 @@ user-approved development location first.
    Run `python3 scripts/check-prerequisites.py` before installation. pytest is optional
    and used only for the Python fixture runner.
 2. Inspect existing Repo MCP launchd definitions and state before changing them. Never
-   overwrite a foreign or modified service definition. For an existing v0.1 service,
-   follow the documented migration before issuing a v0.2 workspace or grant.
+   overwrite a foreign or modified service definition. If the service already exists,
+   read its `WorkingDirectory` and run upgrades from that control checkout; never move
+   the permanent service merely because setup began in a second clone. For an existing
+   v0.1 service, follow the documented migration before issuing a v0.2 workspace or grant.
 3. Run `npm ci`, `npm run build`, `npm test`, and
    `python3 scripts/install-agent-skills.py --install`. Then install the stable broker
-   with `python3 scripts/install-server-service.py --install`, configure it if needed,
-   start it with `npm run coord -- service start`, and verify `service status`.
+   from the selected control checkout with
+   `python3 scripts/install-server-service.py --install`, configure it if needed, and
+   inspect `service status`. Run `service start` only for first load or an intentional
+   upgrade/recovery: it reloads launchd and can interrupt in-flight calls, although
+   persisted tasks and workspace records survive.
 4. Configure the durable tunnel only if it is missing or unhealthy. Reuse saved
    credentials. If no tunnel ID or runtime credential exists, explain the one-time
    account action and guide the user through creating a private tunnel and a runtime key
    with **Tunnels Read + Use**. Accept the key only through the hidden prompt used by
    `scripts/connect.sh --save-key`; never ask the user to paste it into chat or a command.
    Install the tunnel service and verify `npm run connection:status`.
-5. Help create or refresh the developer-mode ChatGPT MCP app using the private tunnel.
+5. Configure Claude Code for the current user if it is not already connected. Check
+   `claude mcp get repo-mcp`; when missing, run
+   `claude mcp add --scope user --transport http repo-mcp http://127.0.0.1:8787/mcp`,
+   then verify it with `claude mcp list`.
+6. Help create or refresh the developer-mode ChatGPT MCP app using the private tunnel.
    If browser control is available and authorized, do the UI work. Otherwise ask for the
    single required UI action precisely. A schema update requires **Refresh tools** and a
    new ChatGPT conversation; an ordinary repository switch does not.
-6. Prepare the explicit disposable `repo-mcp-onboarding` / `repo-mcp-onboarding-smoke`
-   target below, then prove the real client route with `service_info`, `repository_list`,
-   `workspace_open`, scoped `repo_info`, and `workspace_close`. Local process health is
-   insufficient evidence.
+7. Prepare the explicit disposable `repo-mcp-onboarding` / `repo-mcp-onboarding-smoke`
+   target below, then prove each configured real client route with `service_info`,
+   `repository_list`, `workspace_open`, scoped `repo_info`, and `workspace_close`.
+   Local process health is insufficient evidence.
 
 Global skills are hash-owned through private state at
 `~/Library/Application Support/repo-mcp/agent-skills/installed.json` (or
@@ -76,9 +85,10 @@ npm run coord -- repository add --repository repo-mcp-onboarding \
 npm run coord -- task bind --repository repo-mcp-onboarding --task repo-mcp-onboarding-smoke
 ```
 
-In the actual ChatGPT client, call `service_info`, `repository_list`,
-open an `inspect` workspace for repository `repo-mcp-onboarding` and task
-`repo-mcp-onboarding-smoke` with a fresh request ID, then call scoped `repo_info`.
+In every configured client (Claude Code and/or ChatGPT), call `service_info` and
+`repository_list`, open an `inspect` workspace for repository
+`repo-mcp-onboarding` and task `repo-mcp-onboarding-smoke` with a fresh request ID,
+then call scoped `repo_info`.
 Verify the fixture root/branch/HEAD and read its complete `AGENTS.md` and `README.md`;
 inspect the complete diff and close the workspace. No write grant is needed.
 The fixture contains an intentionally failing clamp test; that is unrelated to this

@@ -23,7 +23,7 @@ import uuid
 
 p = argparse.ArgumentParser()
 p.add_argument('--state-dir', help='Operator state directory; defaults to Application Support/repo-mcp/state')
-p.add_argument('--install', action='store_true', help='Install/upgrade the stable definition; otherwise write a preview only')
+p.add_argument('--install', action='store_true', help='Install/upgrade the stable definition; otherwise print the preview plist to stdout')
 a = p.parse_args()
 if sys.platform != 'darwin':
     p.error('This service installer supports macOS only.')
@@ -32,11 +32,7 @@ node = shutil.which('node')
 if not node or not Path(node).is_absolute() or not os.access(node, os.X_OK) or not (base/'dist/src/service-main.js').is_file():
     p.error('Absolute Node executable and built stable server required; run npm ci and npm run build first.')
 state = Path(a.state_dir).expanduser().resolve() if a.state_dir else Path.home()/'Library/Application Support/repo-mcp/state'
-state.mkdir(parents=True, exist_ok=True, mode=0o700)
-state.chmod(0o700)
 runtime = state.parent/'server'
-runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
-runtime.chmod(0o700)
 label = 'local.repo-mcp.server'
 plist = {
     'Label': label,
@@ -71,12 +67,14 @@ def stable_plist_bytes(value):
     return text.encode('utf-8')
 
 bytes_out = stable_plist_bytes(plist)
-preview = runtime/(label+'.preview.plist')
-preview.write_bytes(bytes_out); preview.chmod(0o600)
 if not a.install:
-    print(f'Preview written: {preview}. Add --install to install the stable definition; use npm run coord -- service start to load it.')
+    sys.stdout.buffer.write(bytes_out)
     sys.exit(0)
 
+state.mkdir(parents=True, exist_ok=True, mode=0o700)
+state.chmod(0o700)
+runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
+runtime.chmod(0o700)
 target = Path.home()/'Library/LaunchAgents'/(label+'.plist')
 target.parent.mkdir(parents=True, exist_ok=True)
 install_path = state/'control/install.json'
@@ -358,6 +356,12 @@ try:
         exact = parsed_bytes(current)
         if install is None or install.get('target') != str(target) or install.get('installed_plist_sha256') != current_hash:
             p.error('Unexpected or modified pre-existing server plist; refusing to overwrite it.')
+        installed_base = exact.get('WorkingDirectory')
+        if installed_base != str(base):
+            p.error(
+                f'Existing Repo MCP service is bound to {installed_base or "an unknown checkout"}. '
+                'Run the installer from that control checkout; automatic relocation is refused.'
+            )
         if exact == plist:
             p.error('Stable plist bytes differ from the canonical desired serialization; refusing implicit rewrite.')
         claim = target.parent/f'{claim_prefix}{uuid.uuid4()}'

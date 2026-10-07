@@ -189,6 +189,14 @@ def main():
             directory(target.parent)
             if regular_bytes(target) != current:
                 raise RuntimeError(f"Skill changed after preflight; preserved: {target}")
+            if current == data and digest(current) in (record.get("sha256"), record.get("pending_sha256")):
+                final_record = {**{key: value for key, value in record.items() if key != "pending_sha256"},
+                                "sha256": digest(data)}
+                if final_record != record:
+                    state["skills"][str(target)] = final_record
+                    save()
+                print(f"current: {target}")
+                continue
             if args.replace and current is not None:
                 backups = directory(state_dir / "backups", private=True)
                 backup = backups / (uuid.uuid4().hex + ".md")

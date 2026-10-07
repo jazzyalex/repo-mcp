@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -38,6 +38,14 @@ test('agent skill installer installs, checks and detects stale copies', async t 
     );
   }
   assert.equal(run(['--check'], home).status, 0);
+  const installedTarget = path.join(home, pairs[0][1]);
+  const beforeNoop = await stat(installedTarget);
+  const noop = run(['--install'], home);
+  const afterNoop = await stat(installedTarget);
+  assert.equal(noop.status, 0, noop.stderr);
+  assert.match(noop.stdout, /current:/);
+  assert.equal(afterNoop.ino, beforeNoop.ino, 'a current owned skill must not be rewritten');
+  assert.equal(afterNoop.mtimeMs, beforeNoop.mtimeMs, 'a current owned skill must keep its timestamp');
 
   await writeFile(path.join(home, pairs[0][1]), 'stale\n');
   assert.equal(run(['--check'], home).status, 1);

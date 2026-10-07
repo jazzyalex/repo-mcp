@@ -35,6 +35,10 @@
     "tsx": "4.23.15",
     "typescript": "7.0.2"
   },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents": false
+  },
   "license": "MIT",
   "description": "A multi-repository MCP broker for controlled local coding and code review",
   "repository": {
