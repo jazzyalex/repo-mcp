@@ -100,8 +100,10 @@ backups outside every served checkout; never copy them into a release.
 
 Remove only installer-owned copies with `python3 scripts/install-agent-skills.py
 --uninstall`. Add `--client claude` or `--client codex` to remove one client's skills
-without touching the other. Uninstall refuses modified or foreign files and removes the
-matching ownership records. Newly created skill directories are owner-only (`0700`);
+without touching the other. Uninstall preflights every selected skill: if any selected
+file is modified or foreign, it removes none of them. Otherwise it removes all selected
+owned files and their matching ownership records. Newly created skill directories are
+owner-only (`0700`);
 existing safe directories are preserved at their current mode.
 
 ## Register repositories and tasks
