@@ -28,6 +28,12 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(reviewSkill, /user does not need to know or supply repository IDs/i);
   assert.match(reviewSkill, /repository resolve --repo CURRENT_ROOT/);
   assert.match(reviewSkill, /Do not ask the user to invent an ID/i);
+  assert.match(reviewSkill, /base_ref: "HEAD\^"/);
+  assert.match(reviewSkill, /Never\s+return `SHIP`.*working tree is clean/is);
+  const claudeSkill = await readFile(path.join(PROJECT_BASE, '.claude/skills/repo-mcp/SKILL.md'), 'utf8');
+  assert.match(claudeSkill, /When this Claude conversation is doing the requested work/i);
+  assert.match(claudeSkill, /immediately consume that grant itself/i);
+  assert.match(claudeSkill, /Never make that handoff the default current-session\s+workflow/i);
   assert.equal(await readFile(path.join(PROJECT_BASE, 'README.md'), 'utf8'), await readFile(path.join(PROJECT_BASE, 'docs/PUBLIC-README.md'), 'utf8'));
   const readOnly = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-readonly.json'), 'utf8')))).paths;
   const coding = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-coding.json'), 'utf8')))).paths;

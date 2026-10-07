@@ -526,12 +526,12 @@ function registerWorkspaceTools(
   }));
 
   server.registerTool('git_diff', {
-    description: 'Inspect the bounded diff for the selected workspace. In review phase this is still a phase freeze, not a content-verified candidate unless future candidate fields say otherwise.',
-    inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, prefix: z.string().max(256).optional(), cursor: deps.cursor }),
+    description: 'Inspect the bounded diff for the selected workspace. Optional base_ref compares the working tree to that commit, branch, tag, or relative commit (for example HEAD^) so committed changes remain reviewable. Continue every page with the same base_ref. In review phase this is still a phase freeze, not a content-verified candidate unless future candidate fields say otherwise.',
+    inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, prefix: z.string().max(256).optional(), base_ref: z.string().min(1).max(128).optional(), cursor: deps.cursor }),
     annotations: readOnly
   }, scoped('git_diff', 'read', 'git_diff', async (repo, args, authorized) => {
     const inner = await unwrapWorkspaceCursor(stateDir, authorized.selection.workspace_id, 'git_diff', args.cursor);
-    return wrapResult(stateDir, authorized, 'git_diff', await repo.diff(args.prefix, inner));
+    return wrapResult(stateDir, authorized, 'git_diff', await repo.diff(args.prefix, inner, args.base_ref));
   }));
 
   server.registerTool('edit', {

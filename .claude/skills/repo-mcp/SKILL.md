@@ -104,19 +104,25 @@ After successful smoke, the operator may finish this disposable task with
    silently replace an unfinished task. One unfinished task owns one registered checkout;
    concurrent coding uses separately registered Git worktrees.
 4. For inspection or planning, use a read-only workspace. For coding, issue one
-   short-lived write grant and give the target conversation only the repository ID, task
-   ID, and grant. For review, freeze the task in `review` and open a fresh review
-   workspace without a write grant.
+   short-lived write grant. When this Claude conversation is doing the requested work,
+   immediately consume that grant itself; hand it to another conversation only when the
+   user explicitly requested a handoff. For review, freeze the task in `review` and open
+   a fresh review workspace without a write grant.
 
 The normal user prompt is simply `Use Repo MCP to review this repository` or `Use Repo
 MCP to code this task: ...`. Do not turn that into a request for coordinator identifiers.
+In the current conversation, keep the repository ID, task ID, grant, and workspace token
+internal. Call `service_info`, confirm the selection with `repository_list`, open the
+workspace in the requested mode, inspect scoped `repo_info`, read all instructions, do
+the requested work through Repo MCP, and page through the complete final `git_diff`.
+Coding retries must reuse the same public request ID and identical arguments after a lost
+response.
 
 ## Handoff and authority
 
-Tell the target conversation to verify `service_info`, select the exact registered
-repository/task, inspect `repo_info`, read all instructions, and page through the entire
-diff. Coding retries must reuse the same public request ID and identical arguments after
-a lost response.
+For an explicitly requested handoff, give the target conversation only the repository
+ID, task ID, and short-lived grant. Never make that handoff the default current-session
+workflow.
 
 Repository registration, policy changes, task phases, grants, service control, Git
 branch/worktree changes, commit, push, dependency installation, and arbitrary shell

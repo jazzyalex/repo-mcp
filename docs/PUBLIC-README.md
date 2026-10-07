@@ -4,7 +4,7 @@ Repo MCP is a local MCP service for policy-bounded coding and review across mult
 
 The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and unrestricted shell commands stay outside MCP.
 
-**Status:** v0.2.0 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
+**Status:** v0.2.1 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
 
 ## Set up with Codex or Claude
 
@@ -26,7 +26,14 @@ To connect a project later, open that project in Codex or Claude and say one of:
 
 > Use the Repo MCP skill to connect this repository for read-only review.
 
+> Use Repo MCP to review my latest committed change.
+
 > Use the Repo MCP skill to prepare this repository for coding task NAME.
+
+The reviewer uses the working-tree diff when changes are uncommitted and automatically
+compares `HEAD^` to the current checkout when the requested changes are already committed.
+The response identifies the resolved base commit, so a clean checkout is never mistaken
+for an empty review.
 
 The agent creates a policy for the requested scope, registers the checkout, binds a task,
 and verifies the workspace. It should ask the user only for account-bound steps it cannot

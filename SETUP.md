@@ -1,6 +1,6 @@
 # Setup and operation
 
-Repo MCP v0.2.0 uses one permanent multi-repository broker for trusted single-user
+Repo MCP v0.2.1 uses one permanent multi-repository broker for trusted single-user
 macOS operation. Normal installation requires Python 3.9+, Node 26+, Git at /usr/bin/git,
 npm, and the official OpenAI tunnel client. Install a supported Python on PATH before
 onboarding; `python3 scripts/check-prerequisites.py` checks normal dependencies without
@@ -243,6 +243,14 @@ included, fits `page_bytes`. `list_files` and `search` return an explicit error
 (naming `page_bytes`) when the metadata plus one entry or match cannot fit, instead of
 an oversized response or a cursor that does not advance. `run_tests` output keeps its
 documented exception until milestone 3.
+
+`git_diff` normally compares the index and working tree to `HEAD`. Its optional
+`base_ref` accepts a conservative commit, branch, tag, or relative commit such as
+`HEAD^`; the server resolves it to an immutable commit ID, returns that `base_commit`,
+and binds it into every continuation cursor. This keeps the latest committed change
+reviewable from a clean checkout. Pass the same `base_ref` on every page. Adding this
+argument changes the MCP tool schema, so deploy the rebuilt service and refresh tools in
+ChatGPT after upgrading.
 
 Git status and diff run once. Their output is streamed to a retained capture on disk
 and later pages are read from it by byte offset; Git is not run again. A capture is

@@ -993,12 +993,26 @@ export class RepoWorkspace {
   }
 
   // --- Diff ----------------------------------------------------------------------------------
-  /** Permitted paths that Git reports as different from HEAD (working tree or index), deletions included. */
-  private async changedPaths(ctx: CaptureContext, prefix: string) {
+  /** Resolve a conservative revision expression once, then use only its immutable commit ID. */
+  private async resolveDiffBase(baseRef?: string) {
+    const requested = baseRef ?? 'HEAD';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/^~-]{0,127}$/.test(requested) || requested.includes('..')) {
+      throw new SafeError('Invalid base_ref. Use a commit, branch, tag, or relative commit such as HEAD^.');
+    }
+    const result = await this.git(['rev-parse', '--verify', `${requested}^{commit}`]).catch(error => {
+      if (error instanceof SafeError && error.message === 'Git inspection failed.') throw new SafeError(`Unknown or non-commit base_ref: ${requested}.`);
+      throw error;
+    });
+    const commit = result.stdout.trim();
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new SafeError('Git returned an invalid commit ID for base_ref.');
+    return { requested, commit };
+  }
+  /** Permitted paths that Git reports as different from the resolved base (working tree or index), deletions included. */
+  private async changedPaths(ctx: CaptureContext, prefix: string, baseCommit: string) {
     // Porcelain diff refreshes the index and compares content, so these lists hold real differences only.
-    const base = ['--no-ext-diff', '--no-textconv', '--no-renames', '-z', '--name-only'];
-    const worktree = await ctx.names(['diff', ...base, 'HEAD']);
-    const staged = await ctx.names(['diff', '--cached', ...base, 'HEAD']);
+    const options = ['--no-ext-diff', '--no-textconv', '--no-renames', '-z', '--name-only'];
+    const worktree = await ctx.names(['diff', ...options, baseCommit]);
+    const staged = await ctx.names(['diff', '--cached', ...options, baseCommit]);
     const permitted = (name: string) => !pathProblem(name) && name.startsWith(prefix) && this.paths.decide(name, 'read').ok;
     const inWorktree = new Set(worktree.filter(permitted));
     const all = new Set([...inWorktree, ...staged.filter(permitted)]);
@@ -1022,10 +1036,11 @@ export class RepoWorkspace {
       refused: refused.map(name => ({ name, reason: (inputs.get(name) as { reason: string }).reason })), unchanged
     };
   }
-  async diff(prefix = '', cursor?: string) {
+  async diff(prefix = '', cursor?: string, baseRef?: string) {
     await this.guard();
     if (prefix.length > 256) throw new SafeError('Prefix is limited to 256 characters.');
-    const argsKey = sha256(JSON.stringify(['diff', prefix]));
+    const base = await this.resolveDiffBase(baseRef);
+    const argsKey = sha256(JSON.stringify(['diff', prefix, base.requested, base.commit]));
     let meta: CaptureMeta, offset = 0;
     if (cursor) ({ meta, offset } = await this.openCapture(cursor, 'diff', argsKey, prefix));
     else {
@@ -1035,12 +1050,12 @@ export class RepoWorkspace {
         await this.requireEditableTracked(this.legacy.editable.filter(f => selected.includes(f)));
       }
       meta = await this.capture('diff', argsKey, prefix, async ctx => {
-        const { changed, stagedOnly, refused, unchanged } = await this.changedPaths(ctx, prefix);
+        const { changed, stagedOnly, refused, unchanged } = await this.changedPaths(ctx, prefix, base.commit);
         // Patches in bounded batches of literal paths; renames are reported as a deletion plus an addition.
         await writeFile(ctx.out, '', { flag: 'wx', mode: 0o600 });
-        for (const batch of batchPaths(changed)) await ctx.run(['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', 'HEAD', '--', ...batch], true);
+        for (const batch of batchPaths(changed)) await ctx.run(['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', base.commit, '--', ...batch], true);
         // A permitted path whose only difference is in the index has no working-tree patch; say so instead of omitting it.
-        if (stagedOnly.length) await ctx.append(stagedOnly.map(name => `# no working-tree patch for ${name} (index differs from HEAD)\n`).join(''));
+        if (stagedOnly.length) await ctx.append(stagedOnly.map(name => `# no working-tree patch for ${name} (index differs from ${base.requested})\n`).join(''));
         // A changed path whose working file fails the read rules (link, symlink, unsafe component, limits) is never given to Git.
         if (refused.length) await ctx.append(refused.map(r => `# no patch for ${r.name} (${r.reason}; git_diff reads only files that read and list_files would expose)\n`).join(''));
         // Approved new files are not in HEAD or the index yet; they are shown as additions.
@@ -1059,9 +1074,10 @@ export class RepoWorkspace {
       if (!this.legacy && meta.bytes === 0 && !(await this.current()).under(prefix).length) { await this.captures.discard(meta.id); throw new SafeError('No exposed paths match prefix.'); }
     }
     const captured_at = new Date(meta.created_at).toISOString();
-    const shell = { diff: '', offset: meta.bytes, total_bytes: meta.bytes, next_cursor: this.captureCursorReserve('diff'), complete: false, truncated: true, captured_at };
+    const baseFields = { base_ref: base.requested, base_commit: base.commit };
+    const shell = { ...baseFields, diff: '', offset: meta.bytes, total_bytes: meta.bytes, next_cursor: this.captureCursorReserve('diff'), complete: false, truncated: true, captured_at };
     const page = await this.pageCapture(meta, offset, this.room(shell));
-    return { diff: page.content, offset, total_bytes: meta.bytes, next_cursor: page.next === null ? null : this.captureCursor('diff', meta, page.next), complete: page.next === null, truncated: page.next !== null, captured_at };
+    return { ...baseFields, diff: page.content, offset, total_bytes: meta.bytes, next_cursor: page.next === null ? null : this.captureCursor('diff', meta, page.next), complete: page.next === null, truncated: page.next !== null, captured_at };
   }
 
   // --- Tests -----------------------------------------------------------------------------------

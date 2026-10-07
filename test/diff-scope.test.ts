@@ -8,10 +8,10 @@ import { makeRepo, openGlob, policyDoc, git } from './helpers.js';
 
 // Milestone 2b: Git diff scope. Real Git throughout; Git 2.50's `diff` and `ls-files` take no --pathspec-from-file.
 
-async function fullDiff(repo: RepoWorkspace, prefix = '') {
-  let page = await repo.diff(prefix);
+async function fullDiff(repo: RepoWorkspace, prefix = '', baseRef?: string) {
+  let page = await repo.diff(prefix, undefined, baseRef);
   let text = page.diff;
-  while (page.next_cursor) { page = await repo.diff(prefix, page.next_cursor); text += page.diff; }
+  while (page.next_cursor) { page = await repo.diff(prefix, page.next_cursor, baseRef); text += page.diff; }
   return text;
 }
 
@@ -31,6 +31,23 @@ test('git itself still rejects --pathspec-from-file for diff and ls-files (why b
   for (const args of [['diff', '--pathspec-from-file=-', 'HEAD'], ['ls-files', '--pathspec-from-file=-']]) {
     await assert.rejects(git(m.root, ...args), /./, args.join(' '));
   }
+});
+
+test('an explicit base_ref exposes committed changes from an otherwise clean checkout', async t => {
+  const m = await makeRepo(t, { 'src/value.js': 'export const value = 1;\n' });
+  await writeFile(path.join(m.root, 'src/value.js'), 'export const value = 2;\n');
+  await git(m.root, 'add', 'src/value.js');
+  await git(m.root, 'commit', '-m', 'change value');
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+
+  assert.equal((await repo.diff()).diff, '', 'the default working-tree diff stays empty');
+  const first = await repo.diff('', undefined, 'HEAD^');
+  assert.equal(first.base_ref, 'HEAD^');
+  assert.match(first.base_commit, /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+  assert.match(first.diff, /-export const value = 1;[\s\S]*\+export const value = 2;/);
+  assert.equal(await fullDiff(repo, '', 'HEAD^'), await git(m.root, 'diff', 'HEAD^'));
+  await assert.rejects(repo.diff('', undefined, '--output=/tmp/no'), /invalid base_ref/i);
+  await assert.rejects(repo.diff('', undefined, 'missing-ref'), /unknown or non-commit base_ref/i);
 });
 
 test('thousands of changed and unchanged permitted paths produce the same patch as one Git command', async t => {

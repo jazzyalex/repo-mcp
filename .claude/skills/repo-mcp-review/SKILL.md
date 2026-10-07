@@ -48,9 +48,17 @@ repository content only through MCP.
    explicitly present; do not call a phase-only freeze an immutable candidate.
 5. Read the exposed root instruction file completely with the same token and every
    returned continuation cursor. Its instructions apply within the user's review scope.
-6. Page through the complete `git_diff` with the same token. Use scoped `list_files`,
-   `search`, and bounded `read` to inspect surrounding implementation and tests.
-   Workspace-wrapped cursors must remain in this workspace/tool.
+6. Select and page through the complete `git_diff` with the same token:
+   - For uncommitted changes, omit `base_ref`.
+   - For the latest committed change, or when a request to review "my changes" finds an
+     empty default diff, use `base_ref: "HEAD^"` and require the response to identify its
+     resolved `base_commit`.
+   - If the user names a base branch, tag, or commit, pass it as `base_ref`.
+   - An empty default diff is valid only for an explicit whole-repository audit. Never
+     return `SHIP` for a requested change review merely because the working tree is clean.
+   Continue every page with the same `base_ref`. Use scoped `list_files`, `search`, and
+   bounded `read` to inspect surrounding implementation and tests. Workspace-wrapped
+   cursors must remain in this workspace/tool. Report the selected base and resolved commit.
 7. Do not call `edit`, `create_file`, or `run_tests`. Review mode is read-only.
    Coordinator-supplied test/typecheck evidence may be reported as supplied evidence,
    never as something this review executed.

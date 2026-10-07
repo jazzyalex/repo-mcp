@@ -189,7 +189,12 @@ older workspace for that task becomes stale. A separate reviewer opens a fresh
 
 When the reviewer runs in the target checkout, it must resolve/register that checkout
 and create or reuse the review task itself. The normal user prompt is simply `Use Repo
-MCP to review this repository`; do not send the user elsewhere to obtain IDs.
+MCP to review this repository`; do not send the user elsewhere to obtain IDs. Review
+uncommitted changes with the default `git_diff`. For the latest committed change, or when
+"review my changes" produces an empty default diff, call `git_diff` with
+`base_ref: "HEAD^"`, continue every page with the same base, and report the returned
+resolved `base_commit`. Never treat a clean working tree as proof that requested changes
+were reviewed. A user-named base branch, tag, or commit takes precedence.
 
 Current review assurance is `phase_only`: it is a task-wide write freeze, not a
 content-verified candidate manifest. Do not present it as stronger evidence.

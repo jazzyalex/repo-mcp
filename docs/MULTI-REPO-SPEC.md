@@ -113,12 +113,18 @@ Repository tools:
 - list_files
 - read
 - search
-- git_diff
+- git_diff { workspace_token, prefix?, base_ref?, cursor? }
 - edit
 - create_file
 - run_tests
 
 Every repository tool schema MUST require workspace_token.
+
+`git_diff.base_ref` is optional. When present, the service MUST accept only a bounded,
+conservative revision expression, resolve it to a commit before capture, return the
+resolved `base_commit`, and bind both the requested and resolved base into continuation
+authority. This permits review of committed changes from a clean checkout without making
+a branch or tag movement silently change later pages.
 
 Old unscoped production calls MUST fail closed. The service MUST NOT choose the sole registered repository, most-recent repository, active task, or another ambient default.
 

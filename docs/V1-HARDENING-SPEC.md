@@ -7,7 +7,7 @@ Status: forward hardening specification for the eventual v1.0 scope, 2026-10-02.
 Repo MCP v0.1.0 was intentionally narrower: trusted single-user macOS operation,
 repository/task switching, bounded policy-controlled tools, durable tunnel state and
 coordinator-run local validation. The acceptance criteria in sections 23-26 are the
-roadmap gate for a future v1.0 release; they are not claims made by v0.2.0. Current
+roadmap gate for a future v1.0 release; they are not claims made by v0.2.x. Current
 public support and behavior are stated in README.md, SETUP.md, SECURITY.md and MULTI-REPO-SPEC.md.
 
 This document is normative for the future v1.0 hardening work described here. “MUST”, “MUST NOT”, “SHOULD”, and “MAY” are used in their usual requirements sense. Requirement IDs are stable and should be referenced from implementation PRs and tests.

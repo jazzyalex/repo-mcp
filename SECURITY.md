@@ -1,6 +1,6 @@
 # Security model
 
-Repo MCP v0.2.0 is designed for trusted single-user macOS operation. Path policy,
+Repo MCP v0.2.1 is designed for trusted single-user macOS operation. Path policy,
 current hashes, bounded output, timeouts, durable request outcomes, explicit
 repository registration, and authenticated workspace capabilities reduce accidental
 scope expansion. They do **not** establish a hostile-code sandbox or multi-tenant

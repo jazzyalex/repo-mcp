@@ -658,6 +658,8 @@ test('multi-repository broker isolates workspaces, writers, cursors, requests an
       assert.ok(schema?.properties?.workspace_token, `${name} must expose workspace_token`);
       assert.ok(schema.required?.includes('workspace_token'), `${name} must require workspace_token`);
     }
+    const diffSchema = tools.tools.find(tool => tool.name === 'git_diff')?.inputSchema as { properties?: Record<string, unknown> };
+    assert.ok(diffSchema?.properties?.base_ref, 'git_diff must expose the committed-change base_ref selector');
 
     const firstService = await call(client, 'service_info');
     assert.equal(firstService.error, false, String(firstService.data));
