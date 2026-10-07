@@ -65,6 +65,12 @@ using `python3 scripts/install-agent-skills.py --install --replace` (alias
 ledger require this explicit backup-and-replace adoption. Keep ownership state and
 backups outside every served checkout; never copy them into a release.
 
+Remove only installer-owned copies with `python3 scripts/install-agent-skills.py
+--uninstall`. Add `--client claude` or `--client codex` to remove one client's skills
+without touching the other. Uninstall refuses modified or foreign files and removes the
+matching ownership records. Newly created skill directories are owner-only (`0700`);
+existing safe directories are preserved at their current mode.
+
 Install the repository-agnostic launchd definition:
 
 ```sh

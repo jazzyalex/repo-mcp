@@ -58,6 +58,43 @@ test('agent skill installer installs, checks and detects stale copies', async t 
   assert.equal(run(['--check'], home).status, 0);
 });
 
+test('agent skill uninstall is selective, ownership-aware and preserves other clients', async t => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-agent-skills-uninstall-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  assert.equal(run(['--install'], home).status, 0);
+
+  const codex = path.join(home, 'codex/skills/repo-mcp/SKILL.md');
+  const claudeSetup = path.join(home, 'claude/skills/repo-mcp/SKILL.md');
+  const claudeReview = path.join(home, 'claude/skills/repo-mcp-review/SKILL.md');
+  const codexBefore = await stat(codex);
+  assert.equal((await stat(path.dirname(claudeSetup))).mode & 0o777, 0o700);
+
+  const removed = run(['--uninstall', '--client', 'claude'], home);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.match(removed.stdout, /removed:.*claude\/skills\/repo-mcp\/SKILL\.md/);
+  assert.match(removed.stdout, /removed:.*claude\/skills\/repo-mcp-review\/SKILL\.md/);
+  await assert.rejects(stat(claudeSetup), { code: 'ENOENT' });
+  await assert.rejects(stat(claudeReview), { code: 'ENOENT' });
+  const codexAfter = await stat(codex);
+  assert.equal(codexAfter.ino, codexBefore.ino);
+  assert.equal(codexAfter.mtimeMs, codexBefore.mtimeMs);
+  assert.equal(run(['--check', '--client', 'claude'], home).status, 1);
+  assert.equal(run(['--check', '--client', 'codex'], home).status, 0);
+  const state = JSON.parse(await readFile(path.join(home, 'app-support/agent-skills/installed.json'), 'utf8'));
+  assert.deepEqual(Object.keys(state.skills), [codex]);
+
+  assert.equal(run(['--install', '--client', 'claude'], home).status, 0);
+  await writeFile(claudeSetup, 'user modification\n');
+  const refused = run(['--uninstall', '--client', 'claude'], home);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /Foreign or user-modified skill preserved/);
+  assert.equal(await readFile(claudeSetup, 'utf8'), 'user modification\n');
+  assert.equal(
+    await readFile(claudeReview, 'utf8'),
+    await readFile(path.join(PROJECT_BASE, '.claude/skills/repo-mcp-review/SKILL.md'), 'utf8')
+  );
+});
+
 test('agent skill installer refuses a symlink destination', async t => {
   const home = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-agent-skills-link-')));
   t.after(() => rm(home, { recursive: true, force: true }));

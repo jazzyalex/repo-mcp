@@ -104,14 +104,15 @@ def atomic_write(path, data, mode=0o600, exclusive=False):
             pass
 
 
-def destinations():
+def destinations(client="all"):
     codex = normalized(os.environ.get("CODEX_HOME", HOME / ".codex"))
     claude = normalized(os.environ.get("CLAUDE_HOME", HOME / ".claude"))
-    return [
-        (ROOT / ".codex/skills/repo-mcp/SKILL.md", codex / "skills/repo-mcp/SKILL.md"),
-        (ROOT / ".claude/skills/repo-mcp/SKILL.md", claude / "skills/repo-mcp/SKILL.md"),
-        (ROOT / ".claude/skills/repo-mcp-review/SKILL.md", claude / "skills/repo-mcp-review/SKILL.md"),
+    items = [
+        ("codex", ROOT / ".codex/skills/repo-mcp/SKILL.md", codex / "skills/repo-mcp/SKILL.md"),
+        ("claude", ROOT / ".claude/skills/repo-mcp/SKILL.md", claude / "skills/repo-mcp/SKILL.md"),
+        ("claude", ROOT / ".claude/skills/repo-mcp-review/SKILL.md", claude / "skills/repo-mcp-review/SKILL.md"),
     ]
+    return [(source, target) for owner, source, target in items if client in ("all", owner)]
 
 
 def state_directory():
@@ -142,6 +143,9 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--install", action="store_true")
     action.add_argument("--check", action="store_true")
+    action.add_argument("--uninstall", action="store_true")
+    parser.add_argument("--client", choices=("all", "codex", "claude"), default="all",
+                        help="Limit the action to one client (default: all)")
     parser.add_argument("--replace", "--force", dest="replace", action="store_true",
                         help="Explicitly replace foreign/modified copies after making an owner-only backup")
     args = parser.parse_args()
@@ -162,10 +166,40 @@ def main():
             raise RuntimeError("Unrecognized skill ownership state.")
         def save():
             atomic_write(state_path, (json.dumps(state, indent=2) + "\n").encode())
+        if args.uninstall:
+            removals = []
+            # Refuse the whole operation before removing any foreign or modified file.
+            for _, target in destinations(args.client):
+                current = regular_bytes(target)
+                record = state["skills"].get(str(target), {})
+                if not isinstance(record, dict):
+                    raise RuntimeError(f"Invalid skill ownership record: {target}")
+                owned_hashes = (record.get("sha256"), record.get("pending_sha256"))
+                if current is not None and digest(current) not in owned_hashes:
+                    raise RuntimeError(f"Foreign or user-modified skill preserved: {target}.")
+                removals.append((target, current))
+            for target, current in removals:
+                if regular_bytes(target) != current:
+                    raise RuntimeError(f"Skill changed after uninstall preflight; preserved: {target}")
+                if current is not None:
+                    target.unlink()
+                    directory_fd = os.open(target.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                state["skills"].pop(str(target), None)
+                save()
+                print(f"removed: {target}" if current is not None else f"absent: {target}")
+                try:
+                    target.parent.rmdir()
+                except OSError:
+                    pass
+            return 0
         plans = []
         stale = []
         # Preflight every destination before replacing any skill.
-        for source, target in destinations():
+        for source, target in destinations(args.client):
             data = regular_bytes(source)
             if data is None:
                 raise RuntimeError(f"Bundled skill is missing: {source}")
