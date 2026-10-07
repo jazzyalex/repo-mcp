@@ -29,6 +29,10 @@ repository for review or prepare it for a named coding task. The installed skill
 agent to create a bounded external policy, register the exact checkout, bind a task, and
 verify the workspace without restarting the permanent service.
 
+The user never needs to discover or copy repository IDs, task IDs, policy paths, grants,
+or workspace tokens. The agent resolves the current checkout and keeps those coordinator
+details internal. Asking `Use Repo MCP to review this repository` is a complete request.
+
 The agent may still need the user for an account-bound action: creating the private
 OpenAI tunnel/runtime credential, or connecting/refreshing the developer-mode app in the
 signed-in ChatGPT UI when browser control is unavailable. Runtime credentials must be
@@ -101,6 +105,8 @@ Both templates grant no MCP test execution; dotfiles are opt-in and built-in sec
 and VCS denials remain in force.
 
 ```sh
+npm run coord -- repository resolve --repo /absolute/path/to/checkout
+
 npm run coord -- repository add \
   --repository PROJECT_ID \
   --repo /absolute/path/to/checkout \

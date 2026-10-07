@@ -10,6 +10,7 @@ import {
   migrateActiveServiceToCatalog,
   readMultiRepoCatalog,
   rebindRegisteredTask,
+  resolveRegisteredRepository,
   recoverMultiRepoControlLock,
   recoverWorkspaceAdmissionLock,
   registerRepository,
@@ -116,6 +117,10 @@ try {
     } else if (command === 'list') {
       assertOnly('state-dir');
       print(await listRegisteredRepositories(stateDir));
+    } else if (command === 'resolve') {
+      assertOnly('state-dir', 'repo');
+      if (!values.repo) throw new Error('repository resolve requires --repo.');
+      print(await resolveRegisteredRepository(values.repo, stateDir));
     } else if (command === 'enable' || command === 'disable') {
       assertOnly('state-dir', 'repository');
       if (!values.repository) throw new Error(`repository ${command} requires --repository.`);
@@ -124,7 +129,7 @@ try {
       assertOnly('state-dir', 'repository');
       if (!values.repository) throw new Error('repository remove requires --repository.');
       print(await removeRepository({ stateDir, repositoryId: values.repository }));
-    } else throw new Error('repository command must be add, list, enable, disable or remove.');
+    } else throw new Error('repository command must be add, list, resolve, enable, disable or remove.');
   } else if (area === 'task') {
     if (command === 'bind') {
       assertOnly('state-dir', 'repository', 'task', 'allow-detached');

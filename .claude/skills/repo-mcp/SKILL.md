@@ -9,6 +9,11 @@ Use this skill when the user asks to set up Repo MCP, connect a local repository
 prepare a Repo MCP coding or review task. The user should describe the outcome; run the
 coordinator and installation commands yourself.
 
+Never ask the user to provide `REPOSITORY_ID`, `TASK_ID`, policy paths, or workspace
+tokens for the current checkout. Resolve existing registration with
+`npm run --silent coord -- repository resolve --repo CURRENT_ROOT`; create missing local
+state yourself. Keep generated identifiers internal unless reporting them helps recovery.
+
 When invoked from another project, locate the installed Repo MCP control checkout from
 the `WorkingDirectory` in `~/Library/LaunchAgents/local.repo-mcp.server.plist` and verify
 its `package.json` and coordinator before running control commands there. The user's
@@ -94,13 +99,17 @@ After successful smoke, the operator may finish this disposable task with
    checkout and tailor them. Expose only files needed for the requested task. Exclude credentials, generated caches, dependencies, build products,
    private operator state, and unrelated large data. Grant write and creation only when
    coding is requested.
-3. Register the checkout once with a stable repository ID. Bind a fresh task ID. Never
+3. Resolve the checkout through `repository resolve`; register it once if missing with a
+   stable collision-resistant repository ID. Bind a fresh internal task ID. Never
    silently replace an unfinished task. One unfinished task owns one registered checkout;
    concurrent coding uses separately registered Git worktrees.
 4. For inspection or planning, use a read-only workspace. For coding, issue one
    short-lived write grant and give the target conversation only the repository ID, task
    ID, and grant. For review, freeze the task in `review` and open a fresh review
    workspace without a write grant.
+
+The normal user prompt is simply `Use Repo MCP to review this repository` or `Use Repo
+MCP to code this task: ...`. Do not turn that into a request for coordinator identifiers.
 
 ## Handoff and authority
 

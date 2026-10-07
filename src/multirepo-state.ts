@@ -955,6 +955,32 @@ export async function listRegisteredRepositories(stateDir = defaultStateDir()) {
   };
 }
 
+/** Local coordinator lookup for agent workflows. Never exposed through MCP. */
+export async function resolveRegisteredRepository(root: string, stateDir = defaultStateDir()) {
+  const canonicalRoot = await realpath(root).catch(() => undefined);
+  if (!canonicalRoot) throw new SafeError('Repository checkout does not exist or cannot be resolved.');
+  const catalog = await readMultiRepoCatalog(stateDir);
+  const repository = Object.values(catalog.repositories).find(candidate => candidate.root === canonicalRoot);
+  if (!repository) return { catalog_revision: catalog.revision, repository: null };
+  return {
+    catalog_revision: catalog.revision,
+    repository: {
+      repository_id: repository.repository_id,
+      name: repository.name,
+      enabled: repository.enabled,
+      registration_epoch: repository.registration_epoch,
+      policy_digest: repository.policy_digest,
+      tasks: Object.values(catalog.tasks).filter(task => task.repository_id === repository.repository_id).map(task => ({
+        task_id: task.task_id,
+        phase: task.phase,
+        binding_epoch: task.binding_epoch,
+        phase_epoch: task.phase_epoch,
+        completed: task.completed
+      }))
+    }
+  };
+}
+
 export async function issueWorkspaceGrant(options: { stateDir?: string; taskId: string; ttlMs?: number }) {
   const stateDir = options.stateDir ?? defaultStateDir();
   const taskId = assertId(options.taskId, 'task ID');

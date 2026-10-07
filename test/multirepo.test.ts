@@ -21,6 +21,7 @@ import {
   migrateActiveServiceToCatalog,
   openWorkspace,
   readMultiRepoCatalog,
+  resolveRegisteredRepository,
   rebindRegisteredTask,
   recoverMultiRepoControlLock,
   recoverWorkspaceAdmissionLock,
@@ -163,6 +164,26 @@ test('repository registration rejects empty display names before catalog publica
       /repository name must contain at least one non-whitespace character/i
     );
     assert.deepEqual((await readMultiRepoCatalog(stateDir)).repositories, {});
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('local coordinator resolves the current checkout without exposing roots through MCP', async () => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-resolve-checkout-')));
+  const stateDir = path.join(base, 'state');
+  const root = await fixture(base, 'repo');
+  const other = await fixture(base, 'other');
+  const policyPath = await writePolicy(base, 'policy.json');
+  try {
+    assert.equal((await resolveRegisteredRepository(root, stateDir)).repository, null);
+    await registerRepository({ stateDir, repositoryId: 'friendly-name', name: 'Friendly name', root, policyPath });
+    await bindRegisteredTask({ stateDir, repositoryId: 'friendly-name', taskId: 'review-task' });
+    const resolved = await resolveRegisteredRepository(path.join(root, '.'), stateDir);
+    assert.equal(resolved.repository?.repository_id, 'friendly-name');
+    assert.equal(resolved.repository?.tasks[0]?.task_id, 'review-task');
+    assert.equal((resolved.repository as Record<string, unknown>).root, undefined);
+    assert.equal((await resolveRegisteredRepository(other, stateDir)).repository, null);
   } finally {
     await rm(base, { recursive: true, force: true });
   }

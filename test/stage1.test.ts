@@ -1406,6 +1406,10 @@ test('multi-repository coordinator CLI rejects extra positionals and out-of-comm
   assert.notEqual(repositoryPort.status, 0);
   assert.match(repositoryPort.stderr, /--port.*not valid.*repository list/i);
 
+  const resolveMissing = run('repository', 'resolve');
+  assert.notEqual(resolveMissing.status, 0);
+  assert.match(resolveMissing.stderr, /resolve requires --repo/i);
+
   const legacyStatusTask = run('status', '--task', 'not-valid-here');
   assert.notEqual(legacyStatusTask.status, 0);
   assert.match(legacyStatusTask.stderr, /--task.*not valid.*status/i);

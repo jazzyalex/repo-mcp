@@ -5,15 +5,40 @@ description: Review one operator-registered local Git task read-only through the
 
 # Repo MCP review
 
-Use Repo MCP as the sole repository evidence source. The server/tool prefix may vary by
-Claude Code configuration. The review target must provide or unambiguously identify the
-registered REPOSITORY_ID and TASK_ID; never accept a filesystem root or policy path as an
-MCP selection argument.
+Use Repo MCP as the sole source-code evidence source. The server/tool prefix may vary by
+Claude Code configuration. The user does not need to know or supply repository IDs, task
+IDs, policies, grants, or workspace tokens. When the user says "review this repository",
+the current Claude Code Git checkout is the unambiguous target. Resolve and prepare its
+Repo MCP selection yourself, then keep the identifiers internal.
+
+## Resolve or prepare the current checkout
+
+This bootstrap is local coordinator work, not review evidence. It may use the shell only
+to identify the current Git root and operate Repo MCP; after the workspace opens, inspect
+repository content only through MCP.
+
+1. Resolve `git rev-parse --show-toplevel` in the current session. Do not search sibling
+   repositories or infer another checkout from conversation history. If the user names a
+   different repository, follow the host's repository-mismatch rule.
+2. Locate the Repo MCP control checkout from the installed server plist as described by
+   the global `repo-mcp` skill.
+3. Run `npm run --silent coord -- repository resolve --repo CURRENT_ROOT` there. Reuse
+   the returned registration. If none exists, copy the bundled read-only policy to an
+   owner-only external policy file and register this exact checkout. Generate the internal
+   repository ID from a sanitized/truncated checkout basename plus the first 12 hex digits
+   of SHA-256(canonical root); generate a fresh bounded review task ID from that ID, UTC
+   time, and random hex. Do not ask the user to invent an ID or paste a path.
+4. Reuse the one unfinished task for that registration when it is already in `review`.
+   Otherwise bind a fresh internal task ID and set it to `review`. Never freeze an
+   unfinished `coding` task that may still have an active coding agent; if that is the
+   only task, report the single concrete blocker instead of presenting IDs as user work.
+5. Do not echo bearer tokens. Repository/task IDs may be included in the final report for
+   recovery, but they are not inputs the user must manage.
 
 1. Call `service_info`. Require the multi-repository explicit-token contract and the
    expected server version/schema. Stop with `NOT TESTABLE` if the broker is unavailable.
-2. Call `repository_list`. Confirm the requested REPOSITORY_ID/TASK_ID exists and the
-   task is in `review`. Do not guess between multiple repositories/tasks.
+2. Call `repository_list`. Confirm the internally resolved REPOSITORY_ID/TASK_ID exists
+   and the task is in `review`. Do not guess between unrelated registrations.
 3. Call `workspace_open` with that repository/task, mode `review`, and a fresh
    `request_id`. Do not request or use a coding write grant. Treat the returned
    `workspace_token` as a bearer secret: use it for tool calls but do not quote or log it.
@@ -41,6 +66,7 @@ MCP selection argument.
 If repairs are needed, return findings to the coding workflow. The operator must change the
 task back to coding and issue a new coding grant; the review token must never be upgraded.
 
-Do not register repositories, alter policy/task phase, issue/revoke grants, restart service,
-commit, push, change branches/worktrees, rotate credentials, or modify the checkout.
-Those remain operator/coordinator actions.
+Do not issue/revoke grants, restart service, commit, push, change branches/worktrees,
+rotate credentials, or modify the checkout. Registration and creation/freezing of a new
+review task are allowed only during the local bootstrap above; they never count as review
+evidence.

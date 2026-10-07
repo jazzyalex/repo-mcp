@@ -11,6 +11,11 @@ per workspace and does not restart or retarget the service. Filesystem roots, po
 task phases and write grants remain local operator decisions; the model selects only
 registered repository/task IDs.
 
+Never ask the user to provide `REPOSITORY_ID`, `TASK_ID`, policy paths, or workspace
+tokens for the current checkout. Resolve existing registration with
+`npm run --silent coord -- repository resolve --repo CURRENT_ROOT`; create missing local
+state yourself. Keep generated identifiers internal unless reporting them helps recovery.
+
 Common requests are:
 
 - "Use the Repo MCP skill to install Repo MCP and verify ChatGPT access."
@@ -113,7 +118,13 @@ After successful smoke, the operator may finish this disposable task with
 
    Start/rebuild the service only for deployment/recovery, never merely to select a
    repository.
-4. Register the checkout once if it is not already in `repository list`:
+4. Resolve the current checkout first:
+
+   ```sh
+   npm run --silent coord -- repository resolve --repo /absolute/path/to/checkout
+   ```
+
+   Reuse the returned registration. Register the checkout only when no match exists:
 
    ```sh
    npm run --silent coord -- repository add \
@@ -160,6 +171,10 @@ They are bearer capabilities, not proof of conversation identity.
 Run real project builds/integration tests locally through the trusted coordinator.
 MCP `run_tests` is only for policy-approved fixture suites.
 
+When the current Codex conversation is doing the coding, keep the repository ID, task
+ID, grant, and workspace token internal and perform these steps directly. The normal
+user prompt is simply `Use Repo MCP to code this task: ...`.
+
 ## Review handoff
 
 Freeze the whole task:
@@ -171,6 +186,10 @@ npm run --silent coord -- task phase --task TASK_ID --phase review
 The transition drains admitted mutations/checks and advances the phase epoch, so every
 older workspace for that task becomes stale. A separate reviewer opens a fresh
 `review` workspace; no write grant is needed.
+
+When the reviewer runs in the target checkout, it must resolve/register that checkout
+and create or reuse the review task itself. The normal user prompt is simply `Use Repo
+MCP to review this repository`; do not send the user elsewhere to obtain IDs.
 
 Current review assurance is `phase_only`: it is a task-wide write freeze, not a
 content-verified candidate manifest. Do not present it as stronger evidence.

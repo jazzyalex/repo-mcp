@@ -18,7 +18,9 @@ and tunnel installation, durable service startup, ChatGPT tool refresh, and an e
 smoke test. They also install the Repo MCP skills into the user's Codex and Claude skill
 directories so future sessions in other projects can find them.
 The installed skill locates the permanent broker's control checkout automatically; the
-user does not need to remember its path.
+user does not need to remember its path or manage repository IDs, task IDs, policies,
+grants, or workspace tokens. The agent resolves the current Git checkout, reuses or
+creates its registration and task, and keeps the coordinator details internal.
 
 To connect a project later, open that project in Codex or Claude and say one of:
 
@@ -76,9 +78,15 @@ backups outside every served checkout; never copy them into a release.
 
 Policies remain operator-owned files outside every served checkout. Registration validates the checkout and copies the normalized policy into owner-only, content-addressed Repo MCP state.
 
+Agents resolve an existing registration for the current checkout locally with
+`repository resolve`; users should not have to look through `repository list` or paste
+identifiers between sessions.
+
 Copy [the read-only v2 template](docs/policy-readonly.json) or [the bounded coding v2 template](docs/policy-coding.json) to an external owner-only policy file. Tailor it to the target: the coding example permits only `src`/`test` edits and creation under existing directories; it grants no dependency installation, package-file edits, or test execution. Dotfiles require explicit opt-in. Review exclusions for private project-specific data.
 
 ```sh
+npm run coord -- repository resolve --repo /absolute/path/to/checkout
+
 npm run coord -- repository add \
   --repository agent-sessions \
   --repo /absolute/path/to/checkout \

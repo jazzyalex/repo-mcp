@@ -22,7 +22,12 @@ test('onboarding documents, skills and safe policies agree', async () => {
     assert.match(text, /check-prerequisites\.py/);
     assert.match(text, /repo-mcp-onboarding/);
     assert.match(text, /repo-mcp-onboarding-smoke/);
+    assert.match(text, /repository resolve/);
   }
+  const reviewSkill = await readFile(path.join(PROJECT_BASE, '.claude/skills/repo-mcp-review/SKILL.md'), 'utf8');
+  assert.match(reviewSkill, /user does not need to know or supply repository IDs/i);
+  assert.match(reviewSkill, /repository resolve --repo CURRENT_ROOT/);
+  assert.match(reviewSkill, /Do not ask the user to invent an ID/i);
   assert.equal(await readFile(path.join(PROJECT_BASE, 'README.md'), 'utf8'), await readFile(path.join(PROJECT_BASE, 'docs/PUBLIC-README.md'), 'utf8'));
   const readOnly = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-readonly.json'), 'utf8')))).paths;
   const coding = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-coding.json'), 'utf8')))).paths;
