@@ -30,6 +30,8 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(reviewSkill, /Do not ask the user to invent an ID/i);
   assert.match(reviewSkill, /base_ref: "HEAD\^"/);
   assert.match(reviewSkill, /Never\s+return `SHIP`.*working tree is clean/is);
+  assert.match(reviewSkill, /Execution surface: Claude Code/);
+  assert.match(reviewSkill, /does not launch\s+ChatGPT or choose a ChatGPT model/is);
   const claudeSkill = await readFile(path.join(PROJECT_BASE, '.claude/skills/repo-mcp/SKILL.md'), 'utf8');
   assert.match(claudeSkill, /When this Claude conversation is doing the requested work/i);
   assert.match(claudeSkill, /immediately consume that grant itself/i);
@@ -41,8 +43,18 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(codexSkill, /http:\/\/127\.0\.0\.1:8787\/mcp/);
   assert.match(codexSkill, /WorkingDirectory.*control checkout/is);
   assert.match(codexSkill, /each configured real client route/i);
+  assert.match(codexSkill, /unqualified request to "use Repo MCP review".*ChatGPT web/is);
+  assert.match(codexSkill, /Do not satisfy that request with a Codex\s+subagent/is);
+  assert.match(codexSkill, /model profile `review`.*Sol Extra High/is);
+  assert.match(codexSkill, /never silently substitute a Codex subagent/is);
+  assert.match(codexSkill, /execution surface \(`ChatGPT web`,\s+`Codex`, or `Claude Code`\)/is);
+  assert.match(codexSkill, /Codex operator must resolve\/register the target\s+checkout/is);
+  assert.match(codexSkill, /include the exact repository and task IDs in the submitted browser\s+prompt/is);
   const setup = await readFile(path.join(PROJECT_BASE, 'SETUP.md'), 'utf8');
   assert.match(setup, /Use Repo MCP to review this repository/);
+  assert.match(setup, /Repo MCP supplies repository tools to the client that is already running/i);
+  assert.match(setup, /Codex subagent with Repo MCP is a Codex review/i);
+  assert.match(setup, /defaults to the token-saving route.*ChatGPT web/is);
   assert.doesNotMatch(setup, /ask Claude.*registered repository\/task IDs/i);
   assert.equal(await readFile(path.join(PROJECT_BASE, 'README.md'), 'utf8'), await readFile(path.join(PROJECT_BASE, 'docs/PUBLIC-README.md'), 'utf8'));
   const readOnly = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-readonly.json'), 'utf8')))).paths;

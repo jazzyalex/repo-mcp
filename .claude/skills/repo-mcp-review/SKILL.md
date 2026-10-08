@@ -11,6 +11,13 @@ IDs, policies, grants, or workspace tokens. When the user says "review this repo
 the current Claude Code Git checkout is the unambiguous target. Resolve and prepare its
 Repo MCP selection yourself, then keep the identifiers internal.
 
+This skill performs the review in the current **Claude Code** process and therefore uses
+the user's Claude allowance. Repo MCP supplies repository evidence; it does not launch
+ChatGPT or choose a ChatGPT model. If the user explicitly asks for a ChatGPT web review
+or for Codex-token savings through ChatGPT, stop and return that request to the local
+operator workflow instead of claiming that this Claude review satisfies it. The final
+report must say `Execution surface: Claude Code` and `Repository evidence: Repo MCP`.
+
 ## Resolve or prepare the current checkout
 
 This bootstrap is local coordinator work, not review evidence. It may use the shell only

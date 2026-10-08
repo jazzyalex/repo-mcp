@@ -317,6 +317,21 @@ A local ready process or healthy tunnel is not by itself an end-to-end ChatGPT r
 
 ChatGPT plan limits still apply. Repo MCP itself does not make model inference API calls.
 
+### Review execution surface
+
+Repo MCP gives an already-running model bounded access to a repository. It does not by
+itself launch ChatGPT, Claude, Codex, or a browser, and it does not select a model. A
+Codex subagent using Repo MCP is still a Codex review and consumes Codex usage; a Claude
+Code process using Repo MCP is a Claude review.
+
+The installed Codex operator skill gives `Use Repo MCP to review this repository` a
+specific token-saving meaning: prepare a frozen review task, launch an independent
+ChatGPT web review through the verified browser adapter, and use the `review` profile
+(Sol Extra High). Sol Pro is reserved for an explicitly requested critical review. The
+review must report its execution surface, verified model/profile, Repo MCP as the
+repository evidence source, and the selected diff base. If the ChatGPT route cannot be
+verified, it fails as `NOT TESTABLE` instead of falling back to a Codex subagent.
+
 ## Release archive
 
 Build the deterministic allowlisted source archive with:

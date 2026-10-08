@@ -537,6 +537,27 @@ A local ready flag or healthy tunnel alone is not end-to-end proof. A valid
 workspace token is also not proof of a unique ChatGPT conversation; it is a bearer
 capability.
 
+### Review execution-surface contract
+
+Repo MCP supplies repository tools to the client that is already running. It does not
+launch a model or browser. Therefore a Codex subagent with Repo MCP is a Codex review,
+and a Claude Code process with Repo MCP is a Claude review. Neither may be reported as
+a ChatGPT web review.
+
+For the installed Codex operator skill, `Use Repo MCP to review this repository`
+defaults to the token-saving route: freeze the task, run a separate ChatGPT web
+conversation through the verified browser adapter, and select the `review` profile
+(Sol Extra High). Use `review-critical` (Sol Pro) only for an explicit Pro or critical
+review. A failure to verify the browser model selection, submitted prompt, Repo MCP
+attachment, repository identity, or completed response is `NOT TESTABLE`; it is never
+permission to fall back to a Codex subagent. Recover a submitted browser run by its
+existing run/tab rather than submitting it again.
+
+Every result must state the execution surface, verified model/profile when available,
+repository evidence source, selected diff base, and resolved commit. This makes usage
+and independence claims auditable instead of inferring them from the phrase "Repo MCP
+review."
+
 ### ChatGPT model-profile authorization helper
 
 `npm run model-policy` has two deliberately separate paths. `resolve` / `verify`

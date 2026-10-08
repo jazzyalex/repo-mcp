@@ -195,6 +195,30 @@ user prompt is simply `Use Repo MCP to code this task: ...`.
 
 ## Review handoff
 
+Repo MCP is the repository-access layer; it does not choose or launch the reviewing
+model. In this Codex operator skill, an unqualified request to "use Repo MCP review"
+means an independent **ChatGPT web** review. Do not satisfy that request with a Codex
+subagent that merely calls Repo MCP. That is still a Codex review and consumes Codex
+usage. A review in the current Codex
+conversation is allowed only when the user explicitly asks for Codex/current-session
+review.
+
+For the independent route, prepare and freeze the repository task locally, then use the
+verified ChatGPT browser adapter described in `SETUP.md`. Use model profile `review`
+(Sol Extra High) by default. Use `review-critical` (Sol Pro) only when the user asks for
+Pro or the review is explicitly classified as critical/architectural. The selected
+browser tab must already have Repo MCP attached; the submitted prompt must make the
+ChatGPT conversation call `service_info` and open the review workspace itself. If the
+browser route or Repo MCP attachment cannot be verified, report the review as
+`NOT TESTABLE`; never silently substitute a Codex subagent, Claude, or a local source
+review. If a submitted browser run stalls or disconnects, recover that same run/tab
+instead of submitting a duplicate.
+
+Every review report must identify all four facts: execution surface (`ChatGPT web`,
+`Codex`, or `Claude Code`), verified model/profile when available, repository evidence
+source (`Repo MCP`), and selected diff base/resolved commit. Never label a Codex or
+Claude review as a ChatGPT Repo MCP review.
+
 Freeze the whole task:
 
 ```sh
@@ -205,10 +229,13 @@ The transition drains admitted mutations/checks and advances the phase epoch, so
 older workspace for that task becomes stale. A separate reviewer opens a fresh
 `review` workspace; no write grant is needed.
 
-When the reviewer runs in the target checkout, it must resolve/register that checkout
-and create or reuse the review task itself. The normal user prompt is simply `Use Repo
-MCP to review this repository`; do not send the user elsewhere to obtain IDs. Review
-uncommitted changes with the default `git_diff`. For the latest committed change, or when
+Before the ChatGPT browser launch, the Codex operator must resolve/register the target
+checkout and create or reuse its review task. Keep those identifiers internal to the
+user interaction, but include the exact repository and task IDs in the submitted browser
+prompt so ChatGPT can call `repository_list` and `workspace_open`; no write grant is
+needed. The normal user prompt remains `Use Repo MCP to review this repository`; do not
+send the user elsewhere to obtain IDs. Review uncommitted changes with the default
+`git_diff`. For the latest committed change, or when
 "review my changes" produces an empty default diff, call `git_diff` with
 `base_ref: "HEAD^"`, continue every page with the same base, and report the returned
 resolved `base_commit`. Never treat a clean working tree as proof that requested changes

@@ -10,6 +10,12 @@ Status: proposed implementation contract, 2026-09-30; updated 2026-10-05.
 
 For the next real task, Codex coordinates execution without semantic code review. The first pilot included a substantive Codex finding; it proves the tools work, not zero Codex review or measured usage savings.
 
+“ChatGPT review through Repo MCP” names two independent facts: ChatGPT web is the
+execution surface, and Repo MCP is the repository evidence source. Repo MCP alone does
+not launch ChatGPT or select a model. A Codex subagent that calls the same tools remains
+a Codex review and cannot satisfy a token-saving ChatGPT handoff. The coordinator must
+record the actual execution surface and verified model/profile with the verdict.
+
 1. Record canonical root, branch, HEAD, baseline status, protected-file hashes, task-owned paths, fixed check commands and coding/review chat references. Use existing checkout; branch/worktree changes require separate authorization.
 2. Confirm local MCP, tunnel health and a real ChatGPT `repo_info` call. Verify eight tools, `cursor` on paged tools and, in task mode, `request_id` on mutations. Read instructions at the returned `instructions_path`. If schemas differ, refresh the existing plugin before coding.
 3. Codex runs prescribed baseline checks and records command, cwd, exit code, output and collected test names/counts. ChatGPT writes regressions through MCP; Codex runs them and returns the actual RED result.
