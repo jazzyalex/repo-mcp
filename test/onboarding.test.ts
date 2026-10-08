@@ -56,6 +56,10 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(setup, /Codex subagent with Repo MCP is a Codex review/i);
   assert.match(setup, /defaults to the token-saving route.*ChatGPT web/is);
   assert.doesNotMatch(setup, /ask Claude.*registered repository\/task IDs/i);
+  const workflow = await readFile(path.join(PROJECT_BASE, 'docs/WORKFLOW-SPEC.md'), 'utf8');
+  assert.match(workflow, /verified Oracle browser adapter is the supported transport/i);
+  assert.doesNotMatch(workflow, /browser mode is an optional future transport/i);
+  assert.doesNotMatch(workflow, /automatic browser orchestration/);
   assert.equal(await readFile(path.join(PROJECT_BASE, 'README.md'), 'utf8'), await readFile(path.join(PROJECT_BASE, 'docs/PUBLIC-README.md'), 'utf8'));
   const readOnly = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-readonly.json'), 'utf8')))).paths;
   const coding = compilePolicy(loadPolicy(JSON.parse(await readFile(path.join(PROJECT_BASE, 'docs/policy-coding.json'), 'utf8')))).paths;

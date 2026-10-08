@@ -1,6 +1,6 @@
 # ChatGPT local coding workflow
 
-Status: proposed implementation contract, 2026-09-30; updated 2026-10-05.
+Status: proposed implementation contract, 2026-09-30; updated 2026-10-07.
 
 **v0.2 lifecycle note:** [MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md) is normative for the current permanent broker, twelve-tool production schema, explicit workspace tokens and concurrent approved repositories. The single-active/sequential workflow below records the v0.1 pilot and older design context; follow it only where it does not conflict with MULTI-REPO-SPEC.md. Real-project check jobs, verified candidate/commit evidence and sandbox hardening remain separate future work.
 
@@ -60,7 +60,7 @@ Review independence is procedural: coding and review conversations share the tun
 
 Version one uses GitHub for reads. Git writes stay with Codex, even if a connector exposes write operations. A remote-writing workflow requires a separate explicit handoff and local synchronization before editing resumes. Never allow concurrent local and remote writers on the task branch.
 
-Oracle is an existing CLI/skill for submitting prompts to a second model, including through a browser. Its browser mode is an optional future transport, not a prerequisite. Do not assume an Oracle run automatically has both connectors or the right conversation settings. Manual prompt/result handoff is the initial supported transport; later browser automation must verify the selected model, attached tools, submitted request, and recover the same conversation after interruption rather than submit duplicates.
+Oracle is an existing CLI/skill for submitting prompts to a second model, including through a browser. The verified Oracle browser adapter is the supported transport for the Codex operator skill's token-saving ChatGPT review route. It requires an operator-selected tab with Repo MCP already attached, exact model/profile evidence, a submitted request, and recovery of the same conversation after interruption rather than duplicate submission. A manual prompt/result handoff remains a fallback only when the user explicitly chooses it; it must not be reported as an adapter-verified run.
 
 ## Task identity and ownership
 
@@ -152,6 +152,6 @@ Prove coding plus separate read-only review, then, only when authorized, a commi
 
 ## Scope excluded from version one
 
-Parallel task scheduling, automatic worktree creation/cleanup, MCP commit/push tools, arbitrary shell, guaranteed hostile-code isolation, automatic browser orchestration, universal OS certification, and subscription-limit claims. Also not in the accepted source and deferred: asynchronous MCP check jobs, evidence manifests, shared job storage, macOS sandbox profiles and the automatic handoff utility (see the status note at the top and the checkpoint it links).
+Parallel task scheduling, automatic worktree creation/cleanup, MCP commit/push tools, arbitrary shell, guaranteed hostile-code isolation, automatic browser setup or Repo MCP attachment, universal OS certification, and subscription-limit claims. Also not in the accepted source and deferred: asynchronous MCP check jobs, evidence manifests, shared job storage, macOS sandbox profiles and the automatic coding/review state handoff utility (see the status note at the top and the checkpoint it links). The existing verified browser adapter submits and recovers a review only after the operator supplies a safe preattached tab; it does not create or configure that tab.
 
 Official transport reference: [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels). Connector operations remain capability-checked in the actual conversation rather than inferred from a product name.
