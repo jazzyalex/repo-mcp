@@ -28,8 +28,10 @@ test('agent skill installer installs, checks and detects stale copies', async t 
 
   const pairs = [
     ['.codex/skills/repo-mcp/SKILL.md', 'codex/skills/repo-mcp/SKILL.md'],
+    ['.codex/skills/repo-mcp-architect/SKILL.md', 'codex/skills/repo-mcp-architect/SKILL.md'],
     ['.claude/skills/repo-mcp/SKILL.md', 'claude/skills/repo-mcp/SKILL.md'],
-    ['.claude/skills/repo-mcp-review/SKILL.md', 'claude/skills/repo-mcp-review/SKILL.md']
+    ['.claude/skills/repo-mcp-review/SKILL.md', 'claude/skills/repo-mcp-review/SKILL.md'],
+    ['.claude/skills/repo-mcp-architect/SKILL.md', 'claude/skills/repo-mcp-architect/SKILL.md']
   ];
   for (const [source, target] of pairs) {
     assert.equal(
@@ -64,8 +66,10 @@ test('agent skill uninstall is selective, ownership-aware and preserves other cl
   assert.equal(run(['--install'], home).status, 0);
 
   const codex = path.join(home, 'codex/skills/repo-mcp/SKILL.md');
+  const codexArchitect = path.join(home, 'codex/skills/repo-mcp-architect/SKILL.md');
   const claudeSetup = path.join(home, 'claude/skills/repo-mcp/SKILL.md');
   const claudeReview = path.join(home, 'claude/skills/repo-mcp-review/SKILL.md');
+  const claudeArchitect = path.join(home, 'claude/skills/repo-mcp-architect/SKILL.md');
   const codexBefore = await stat(codex);
   assert.equal((await stat(path.dirname(claudeSetup))).mode & 0o777, 0o700);
 
@@ -73,15 +77,17 @@ test('agent skill uninstall is selective, ownership-aware and preserves other cl
   assert.equal(removed.status, 0, removed.stderr);
   assert.match(removed.stdout, /removed:.*claude\/skills\/repo-mcp\/SKILL\.md/);
   assert.match(removed.stdout, /removed:.*claude\/skills\/repo-mcp-review\/SKILL\.md/);
+  assert.match(removed.stdout, /removed:.*claude\/skills\/repo-mcp-architect\/SKILL\.md/);
   await assert.rejects(stat(claudeSetup), { code: 'ENOENT' });
   await assert.rejects(stat(claudeReview), { code: 'ENOENT' });
+  await assert.rejects(stat(claudeArchitect), { code: 'ENOENT' });
   const codexAfter = await stat(codex);
   assert.equal(codexAfter.ino, codexBefore.ino);
   assert.equal(codexAfter.mtimeMs, codexBefore.mtimeMs);
   assert.equal(run(['--check', '--client', 'claude'], home).status, 1);
   assert.equal(run(['--check', '--client', 'codex'], home).status, 0);
   const state = JSON.parse(await readFile(path.join(home, 'app-support/agent-skills/installed.json'), 'utf8'));
-  assert.deepEqual(Object.keys(state.skills), [codex]);
+  assert.deepEqual(Object.keys(state.skills).sort(), [codex, codexArchitect].sort());
 
   assert.equal(run(['--install', '--client', 'claude'], home).status, 0);
   await writeFile(claudeSetup, 'user modification\n');

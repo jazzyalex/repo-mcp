@@ -1,87 +1,91 @@
 ---
 name: repo-mcp-review
-description: Review one operator-registered local Git task read-only through the permanent Repo MCP multi-repository broker.
+description: Coordinate an independent ChatGPT web review of one local Git task through the permanent Repo MCP broker.
 ---
 
-# Repo MCP review
+# Repo MCP ChatGPT review coordinator
 
-Use Repo MCP as the sole source-code evidence source. The server/tool prefix may vary by
-Claude Code configuration. The user does not need to know or supply repository IDs, task
-IDs, policies, grants, or workspace tokens. When the user says "review this repository",
-the current Claude Code Git checkout is the unambiguous target. Resolve and prepare its
-Repo MCP selection yourself, then keep the identifiers internal.
+Repo MCP review means **ChatGPT web performs the semantic review** and Repo MCP is its
+only source-code evidence source. Claude is the local coordinator. Do not review the
+source in Claude and do not identify Claude as the execution surface.
 
-This skill performs the review in the current **Claude Code** process and therefore uses
-the user's Claude allowance. Repo MCP supplies repository evidence; it does not launch
-ChatGPT or choose a ChatGPT model. If the user explicitly asks for a ChatGPT web review
-or for Codex-token savings through ChatGPT, stop and return that request to the local
-operator workflow instead of claiming that this Claude review satisfies it. The final
-report must say `Execution surface: Claude Code` and `Repository evidence: Repo MCP`.
+The user does not need to know or supply repository IDs, task IDs, policies, grants,
+workspace tokens, browser-tab references, or model-policy files. Resolve and prepare the
+current checkout, use Claude's host-native browser controls to launch or recover the
+signed-in ChatGPT conversation, and keep internal identifiers out of the user workflow.
 
-## Resolve or prepare the current checkout
+## Prepare the current checkout
 
-This bootstrap is local coordinator work, not review evidence. It may use the shell only
-to identify the current Git root and operate Repo MCP; after the workspace opens, inspect
-repository content only through MCP.
+This bootstrap is local coordinator work, not review evidence.
 
 1. Resolve `git rev-parse --show-toplevel` in the current session. Do not search sibling
-   repositories or infer another checkout from conversation history. If the user names a
-   different repository, follow the host's repository-mismatch rule.
+   repositories or infer another checkout from conversation history.
 2. Locate the Repo MCP control checkout from the installed server plist as described by
    the global `repo-mcp` skill.
-3. Run `npm run --silent coord -- repository resolve --repo CURRENT_ROOT` there. Reuse
-   the returned registration. If none exists, copy the bundled read-only policy to an
-   owner-only external policy file and register this exact checkout. Generate the internal
-   repository ID from a sanitized/truncated checkout basename plus the first 12 hex digits
-   of SHA-256(canonical root); generate a fresh bounded review task ID from that ID, UTC
-   time, and random hex. Do not ask the user to invent an ID or paste a path.
-4. Reuse the one unfinished task for that registration when it is already in `review`.
-   Otherwise bind a fresh internal task ID and set it to `review`. Never freeze an
-   unfinished `coding` task that may still have an active coding agent; if that is the
-   only task, report the single concrete blocker instead of presenting IDs as user work.
-5. Do not echo bearer tokens. Repository/task IDs may be included in the final report for
-   recovery, but they are not inputs the user must manage.
+3. Run `npm run --silent coord -- repository resolve --repo CURRENT_ROOT`. Reuse the
+   registration. If none exists, create an owner-only external read-only policy and
+   register this exact checkout. Do not ask the user to invent an ID.
+4. Reuse one unfinished review task when it is safe. Otherwise bind a fresh internal task
+   and set it to `review`. Never freeze an unfinished coding task owned by another agent.
+5. Record repository ID, task ID, root, branch, HEAD, policy digest, and intended diff
+   base for the ChatGPT prompt. No write grant is needed.
 
-1. Call `service_info`. Require the multi-repository explicit-token contract and the
-   expected server version/schema. Stop with `NOT TESTABLE` if the broker is unavailable.
-2. Call `repository_list`. Confirm the internally resolved REPOSITORY_ID/TASK_ID exists
-   and the task is in `review`. Do not guess between unrelated registrations.
-3. Call `workspace_open` with that repository/task, mode `review`, and a fresh
-   `request_id`. Do not request or use a coding write grant. Treat the returned
-   `workspace_token` as a bearer secret: use it for tool calls but do not quote or log it.
-4. Call scoped `repo_info` with the token. Verify canonical root, branch, HEAD, task ID,
-   phase, policy digest and response scope against the review target. Require
-   `review_assurance=phase_only` unless a future content-verified candidate contract is
-   explicitly present; do not call a phase-only freeze an immutable candidate.
-5. Read the exposed root instruction file completely with the same token and every
-   returned continuation cursor. Its instructions apply within the user's review scope.
-6. Select and page through the complete `git_diff` with the same token:
-   - For uncommitted changes, omit `base_ref`.
-   - For the latest committed change, or when a request to review "my changes" finds an
-     empty default diff, use `base_ref: "HEAD^"` and require the response to identify its
-     resolved `base_commit`.
-   - If the user names a base branch, tag, or commit, pass it as `base_ref`.
-   - An empty default diff is valid only for an explicit whole-repository audit. Never
-     return `SHIP` for a requested change review merely because the working tree is clean.
-   Continue every page with the same `base_ref`. Use scoped `list_files`, `search`, and
-   bounded `read` to inspect surrounding implementation and tests. Workspace-wrapped
-   cursors must remain in this workspace/tool. Report the selected base and resolved commit.
-7. Do not call `edit`, `create_file`, or `run_tests`. Review mode is read-only.
-   Coordinator-supplied test/typecheck evidence may be reported as supplied evidence,
-   never as something this review executed.
-8. Use no Claude filesystem, Git, shell, GitHub, or another repository connector as a
-   fallback for repository evidence. A workspace failure/stale token is not permission to
-   infer state from another source.
-9. Treat the MCP policy as the review scope boundary. State whether the complete paginated
-   diff and needed surrounding files were available. Never infer cleanliness outside it.
-10. Report confirmed defects first, ordered by severity. Give file/line, concrete trigger,
-    expected versus actual behavior, impact, and smallest safe fix. Separate hypotheses.
-    End with `SHIP`, `NO-SHIP`, or `NOT TESTABLE` and exact validation performed.
+## Run ChatGPT web through Repo MCP
 
-If repairs are needed, return findings to the coding workflow. The operator must change the
-task back to coding and issue a new coding grant; the review token must never be upgraded.
+1. Use Claude's host-native browser controls with the user's existing signed-in ChatGPT
+   session. The selected conversation must have Repo MCP attached.
+2. Prepare a durable `chatgpt-run` for kind `review`. Profile `review` requires Sol Extra
+   High. Use `review-critical` / Sol Pro only when the user explicitly requests Pro or a
+   critical review. After selecting the live ChatGPT control, record the trusted browser
+   observation, reserve the run immediately before the one prompt submission, submit only when
+   `submission_authorized` is `true`, and record submitted/completed state. Do not invoke `model-policy run` or Oracle unless the user
+   explicitly names Oracle.
+3. Submit one prompt containing the exact internal repository/task IDs and requiring
+   ChatGPT to:
+   - call `service_info` and `repository_list`;
+   - open a fresh `review` workspace and keep its token private;
+   - call `repo_info` and verify root, branch, HEAD, task, phase, and policy;
+   - read the complete root instructions;
+   - read every page of the selected `git_diff` and needed surrounding files;
+   - use the exact immutable resolved base commit recorded by `chatgpt-run`; never
+     reinterpret a movable name or choose `HEAD^` after preparation;
+   - make no edits and run no unapproved tools;
+   - report confirmed findings first, validation limits, and `SHIP`, `NO-SHIP`, or
+     `NOT TESTABLE`.
+   Never return `SHIP` merely because the working tree is clean; use the requested
+   committed diff base and verify the complete diff.
+4. If the browser controller stalls after submission, recover the same conversation/run.
+   Never submit a duplicate merely because the response is slow or the controller lost
+   completion state.
+5. If model selection, Repo MCP attachment, repository identity, complete diff, or final
+   response cannot be verified, return `NOT TESTABLE`. Do not substitute Claude's own
+   review or silently invoke Oracle.
 
-Do not issue/revoke grants, restart service, commit, push, change branches/worktrees,
-rotate credentials, or modify the checkout. Registration and creation/freezing of a new
-review task are allowed only during the local bootstrap above; they never count as review
-evidence.
+For every work kind, completion must use a trusted finished-response receipt with
+`kind: "completion"`, `responseState: "completed"`, the submitted event hash, and
+the observed output digest. Never reuse the submission event or derive browser proof
+from supplied output text. The `complete` CLI requires `--response-state completed`,
+`--submission-event-sha256`, and `--output-sha256`.
+After a crash during initialization or terminal cleanup, use explicit
+`chatgpt-run recover-request --request-key REQUEST_KEY` as documented in `SETUP.md`;
+unresolved runs must still be recovered by their existing run identity. Reclaim an
+orphan only after the helper proves its initializer is dead on this host.
+
+## Report contract
+
+Every result must state:
+
+- `Execution surface: ChatGPT web`
+- `Coordinator: Claude Code`
+- verified model/profile when available
+- `Repository evidence: Repo MCP`
+- repository/task IDs for recovery
+- selected diff base and resolved commit
+- exact validation limits
+
+Repo MCP currently provides a task-wide phase freeze (`phase_only`), not a
+content-verified candidate manifest. Do not claim stronger assurance.
+
+If repairs are needed, return the findings to the Codex coding coordinator. Claude does
+not issue coding grants, edit through Repo MCP, commit, push, restart services, or change
+branches/worktrees in this review workflow.

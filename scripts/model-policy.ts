@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readRegularFile, BOUNDED_JSON_MAX_BYTES } from '../src/bounded-file.js';
 import { parseArgs } from 'node:util';
 import {
   ModelPolicyError,
@@ -25,9 +25,10 @@ function fail(error: unknown) {
 
 async function readJson(path: string, kind: string) {
   try {
-    return JSON.parse(await readFile(path, 'utf8')) as unknown;
-  } catch {
-    throw new ModelPolicyError('INVALID_JSON', kind + ' file must contain valid JSON.');
+    return JSON.parse(await readRegularFile(path, BOUNDED_JSON_MAX_BYTES, kind + ' file')) as unknown;
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new ModelPolicyError('INVALID_JSON', kind + ' file must contain valid JSON.');
+    throw new ModelPolicyError('JSON_FILE_UNSAFE', error instanceof Error ? error.message : kind + ' file cannot be read safely.');
   }
 }
 
@@ -94,6 +95,7 @@ async function main() {
       allowPositionals: false,
       strict: true,
       options: {
+        backend: { type: 'string' },
         profile: { type: 'string' },
         repo: { type: 'string' },
         prompt: { type: 'string' },
@@ -107,6 +109,12 @@ async function main() {
     });
     if (positionals.length !== 0 || !values.profile || !values.repo) {
       throw new ModelPolicyError('CLI_USAGE', 'run requires --profile and --repo.');
+    }
+    if (values.backend === undefined) {
+      throw new ModelPolicyError('BACKEND_REQUIRED', 'run requires an explicit --backend. Use --backend oracle only for an explicitly requested legacy Oracle run.');
+    }
+    if (values.backend !== 'oracle') {
+      throw new ModelPolicyError('UNSUPPORTED_BACKEND', 'Unsupported run backend. This release exposes only the optional legacy oracle backend; host-native adapters use resolve and verify.');
     }
     if ((values.prompt === undefined) === (values['prompt-file'] === undefined)) {
       throw new ModelPolicyError('CLI_USAGE', 'run requires exactly one of --prompt or --prompt-file.');
@@ -133,7 +141,7 @@ async function main() {
     return;
   }
 
-  throw new ModelPolicyError('CLI_USAGE', 'Command must be resolve, verify, or run.');
+  throw new ModelPolicyError('CLI_USAGE', 'Command must be resolve, verify, or run. The run command also requires an explicit backend.');
 }
 
 main().catch(fail);

@@ -12,6 +12,7 @@ import { DEFAULT_LIMITS, OPERATION_BUDGET_MS, GIT_CAPTURE_BYTES, GIT_BUFFERED_BY
 import { pageText, countNewlines, jsonBytes, encodeCursor, decodeCursor, staleCursor, formatBytes } from './paging.js';
 import { Deadline } from './deadline.js';
 import { resolveIdentity, identityDrift, type RepoIdentity } from './identity.js';
+import { resolveGitCommit } from './git-ref.js';
 import { TaskContext, type TaskOptions, type MutationResult, type Publication, type Outcome } from './task.js';
 import { PathPolicy } from './path-policy.js';
 import { Inventory, walk, fingerprint, emptySkipped, type Entry, type WalkContext } from './inventory.js';
@@ -995,17 +996,7 @@ export class RepoWorkspace {
   // --- Diff ----------------------------------------------------------------------------------
   /** Resolve a conservative revision expression once, then use only its immutable commit ID. */
   private async resolveDiffBase(baseRef?: string) {
-    const requested = baseRef ?? 'HEAD';
-    if (!/^[A-Za-z0-9][A-Za-z0-9._/^~-]{0,127}$/.test(requested) || requested.includes('..')) {
-      throw new SafeError('Invalid base_ref. Use a commit, branch, tag, or relative commit such as HEAD^.');
-    }
-    const result = await this.git(['rev-parse', '--verify', `${requested}^{commit}`]).catch(error => {
-      if (error instanceof SafeError && error.message === 'Git inspection failed.') throw new SafeError(`Unknown or non-commit base_ref: ${requested}.`);
-      throw error;
-    });
-    const commit = result.stdout.trim();
-    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new SafeError('Git returned an invalid commit ID for base_ref.');
-    return { requested, commit };
+    return resolveGitCommit(this.root, baseRef, args => this.git(args));
   }
   /** Permitted paths that Git reports as different from the resolved base (working tree or index), deletions included. */
   private async changedPaths(ctx: CaptureContext, prefix: string, baseCommit: string) {

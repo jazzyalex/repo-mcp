@@ -1,6 +1,6 @@
 ---
 name: repo-mcp
-description: Install, configure, upgrade, or operate the permanent Repo MCP broker and connect approved local Git repositories for ChatGPT or Claude coding, planning, and review.
+description: Operate Repo MCP from Claude as the local coordinator for ChatGPT web review and architecture; coding/write coordination stays with Codex.
 ---
 
 # Repo MCP operator
@@ -121,20 +121,21 @@ After successful smoke, the operator may finish this disposable task with
    stable collision-resistant repository ID. Bind a fresh internal task ID. Never
    silently replace an unfinished task. One unfinished task owns one registered checkout;
    concurrent coding uses separately registered Git worktrees.
-4. For inspection or planning, use a read-only workspace. For coding, issue one
-   short-lived write grant. When this Claude conversation is doing the requested work,
-   immediately consume that grant itself; hand it to another conversation only when the
-   user explicitly requested a handoff. For review, freeze the task in `review` and open
-   a fresh review workspace without a write grant.
+4. For inspection, planning, and architecture, use a read-only workspace. For review,
+   freeze the task in `review` and open a fresh review workspace without a write grant.
+   Claude's maintained Repo MCP paths are read-only; do not issue or consume a coding
+   write grant. Return coding/write work to the Codex Repo MCP operator.
 
 The normal user prompt is simply `Use Repo MCP to review this repository` or `Use Repo
-MCP to code this task: ...`. Do not turn that into a request for coordinator identifiers.
-In the current conversation, keep the repository ID, task ID, grant, and workspace token
-internal. Call `service_info`, confirm the selection with `repository_list`, open the
-workspace in the requested mode, inspect scoped `repo_info`, read all instructions, do
-the requested work through Repo MCP, and page through the complete final `git_diff`.
-Coding retries must reuse the same public request ID and identical arguments after a lost
-response.
+MCP to architect this repository`. Both mean that ChatGPT web performs the semantic
+work through Repo MCP while Claude coordinates local setup and browser control. Do not
+turn them into a request for coordinator identifiers. Keep repository/task IDs internal,
+prepare the read-only task, and use Claude's host-native browser controls plus the
+durable `chatgpt-run` contract to drive the user's signed-in ChatGPT conversation.
+ChatGPT must open the exact Repo MCP workspace and perform the work. Never substitute
+Claude's own analysis or invoke Oracle implicitly. Recover the same submitted browser
+conversation after interruption, and report `Execution surface: ChatGPT web`,
+`Coordinator: Claude Code`, and `Repository evidence: Repo MCP`.
 
 ## Local state maintenance
 
@@ -145,14 +146,15 @@ delete a reported lock automatically. GC does not remove ChatGPT or Claude chats
 
 ## Handoff and authority
 
-For an explicitly requested handoff, give the target conversation only the repository
-ID, task ID, and short-lived grant. Never make that handoff the default current-session
-workflow.
+For an explicitly requested read-only handoff, give the target conversation only the
+repository and task IDs. Claude does not issue coding grants. Never make a handoff the
+default current-session workflow.
 
 Repository registration, policy changes, task phases, grants, service control, Git
 branch/worktree changes, commit, push, dependency installation, and arbitrary shell
 remain trusted local coordinator actions. Repo MCP exposes none of them. Use the
-separate `repo-mcp-review` skill for an evidence-only review.
+separate `repo-mcp-review` and `repo-mcp-architect` skills for ChatGPT web review and
+architecture coordination.
 
 See `SETUP.md` and `docs/MULTI-REPO-SPEC.md` in the Repo MCP source checkout for exact
 recovery and migration rules.

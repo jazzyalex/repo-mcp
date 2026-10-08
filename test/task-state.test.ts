@@ -1,12 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, stat, mkdir, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, stat, mkdir, readdir, lstat, readlink, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { StateStore, acquireLock, withShortLock } from '../src/task-state.js';
 
 const tmp = () => mkdtemp(path.join(os.tmpdir(), 'repo-mcp-state-'));
+
+test('state reads distinguish an absent pathname from a dangling symlink and preserve it', async () => {
+  const base = await tmp();
+  try {
+    const store = await StateStore.open(base);
+    assert.equal(await store.read('missing-parent/absent.json', 'phase'), undefined);
+    await mkdir(path.join(base, 'r'));
+    assert.equal(await store.read('r/absent.json', 'phase'), undefined);
+    const rel = 'r/dangling.json';
+    const target = path.join(base, 'r', 'absent.json');
+    await symlink(target, path.join(base, rel));
+    const before = await lstat(path.join(base, rel));
+    await assert.rejects(store.read(rel, 'phase'), /unsafe task state pathname r\/dangling\.json/i);
+    const after = await lstat(path.join(base, rel));
+    assert.equal(after.isSymbolicLink(), true);
+    assert.equal(after.dev, before.dev);
+    assert.equal(after.ino, before.ino);
+    assert.equal(await readlink(path.join(base, rel)), target);
+    assert.equal(await store.read('r/absent.json', 'phase'), undefined);
+  } finally { await rm(base, { recursive: true, force: true }); }
+});
 
 test('records are versioned, owner-only and atomically replaced', async () => {
   const base = await tmp();
@@ -31,6 +52,13 @@ test('corrupt, unknown-version and wrong-kind records fail closed', async () => 
     await mkdir(path.join(base, 'r'), { recursive: true });
     await writeFile(path.join(base, 'r/corrupt.json'), '{not json');
     await assert.rejects(store.read('r/corrupt.json', 'phase'), /corrupt/i);
+    const malformed = JSON.stringify({ version: 1, kind: 'phase' });
+    await writeFile(path.join(base, 'r/missing-data.json'), malformed);
+    await assert.rejects(store.read('r/missing-data.json', 'phase'), /corrupt/i);
+    assert.equal(await readFile(path.join(base, 'r/missing-data.json'), 'utf8'), malformed);
+    assert.equal(await store.read('r/absent.json', 'phase'), undefined);
+    await store.write('r/null-data.json', 'phase', null);
+    assert.equal(await store.read('r/null-data.json', 'phase'), null);
     await writeFile(path.join(base, 'r/future.json'), JSON.stringify({ version: 99, kind: 'phase', data: {} }));
     await assert.rejects(store.read('r/future.json', 'phase'), /version/i);
     await store.write('r/kind.json', 'binding', {});

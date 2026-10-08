@@ -161,6 +161,11 @@ function hashBrowserContext(
   };
 }
 
+/** Sanitized binding for a browser adapter that directly observed this context. */
+export function trustedBrowserContextBinding(input: { conversationId?: string; sessionId?: string }) {
+  return hashBrowserContext(input.conversationId, input.sessionId);
+}
+
 function parseBrowserContext(value: unknown, kind: 'contract' | 'evidence'): BrowserContextBinding {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     fail('INVALID_' + kind.toUpperCase(), 'browser_context must be a JSON object.');

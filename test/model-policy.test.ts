@@ -922,10 +922,25 @@ test('Oracle adapter pins exact v0.21.1 argv, strips unsafe environment, require
   }
 });
 
-test('Oracle CLI run rejects protected overrides and requires both acknowledgement and browser tab before launch', () => {
-  const override = spawnSync(process.execPath, [
+test('Oracle CLI run is never an implicit backend', () => {
+  const common = [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
     'run', '--profile', 'code', '--repo', oracleRepoRoot,
+    '--prompt', 'safe prompt', '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01'
+  ];
+  const missing = spawnSync(process.execPath, common, { cwd: projectRoot, encoding: 'utf8' });
+  assert.notEqual(missing.status, 0);
+  assert.equal((JSON.parse(missing.stdout) as { error: { code: string } }).error.code, 'BACKEND_REQUIRED');
+
+  const unsupported = spawnSync(process.execPath, [...common, '--backend', 'chatgpt-web'], { cwd: projectRoot, encoding: 'utf8' });
+  assert.notEqual(unsupported.status, 0);
+  assert.equal((JSON.parse(unsupported.stdout) as { error: { code: string } }).error.code, 'UNSUPPORTED_BACKEND');
+});
+
+test('explicit Oracle CLI backend rejects protected overrides and requires both acknowledgement and browser tab before launch', () => {
+  const override = spawnSync(process.execPath, [
+    '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
+    'run', '--backend', 'oracle', '--profile', 'code', '--repo', oracleRepoRoot,
     '--prompt', 'safe prompt', '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01',
     '--engine', 'api'
   ], { cwd: projectRoot, encoding: 'utf8' });
@@ -937,7 +952,7 @@ test('Oracle CLI run rejects protected overrides and requires both acknowledgeme
 
   const missingTab = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
-    'run', '--profile', 'code', '--repo', oracleRepoRoot,
+    'run', '--backend', 'oracle', '--profile', 'code', '--repo', oracleRepoRoot,
     '--prompt', 'safe prompt', '--repo-mcp-preattached-tab'
   ], { cwd: projectRoot, encoding: 'utf8' });
   assert.notEqual(missingTab.status, 0);
@@ -1555,7 +1570,7 @@ test('CLI prompt-file path uses the bounded safe reader before any Oracle launch
   await symlink(target, linked);
   const processResult = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'),
-    'run', '--profile', 'code', '--repo', oracleRepoRoot,
+    'run', '--backend', 'oracle', '--profile', 'code', '--repo', oracleRepoRoot,
     '--prompt-file', linked,
     '--repo-mcp-preattached-tab',
     '--browser-tab', 'tab-test-01'
@@ -1568,6 +1583,7 @@ test('CLI prompt-file path uses the bounded safe reader before any Oracle launch
 test('package exposes the production model-policy adapter entry point', async () => {
   const packageJson = JSON.parse(await readFile(path.join(projectRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
   assert.equal(packageJson.scripts?.['model-policy'], 'tsx scripts/model-policy.ts');
+  assert.equal(packageJson.scripts?.['chatgpt-run'], 'tsx scripts/chatgpt-run.ts');
 });
 
 test('Oracle executable resolution uses PATH or an explicit path and rejects unsafe files', async t => {
@@ -1589,7 +1605,7 @@ test('public Oracle CLI supports PATH discovery and explicit executable override
   for (const [index, explicit] of [false, true].entries()) {
     const result = spawnSync(process.execPath, [
       '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'), 'run',
-      '--profile', 'code', '--repo', oracleRepoRoot, '--prompt', 'portable fake run',
+      '--backend', 'oracle', '--profile', 'code', '--repo', oracleRepoRoot, '--prompt', 'portable fake run',
       '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01', '--slug', 'oracle-portable-cli-' + index,
       ...(explicit ? ['--oracle-path', fixture.executable] : [])
     ], {
@@ -1604,7 +1620,7 @@ test('public Oracle CLI supports PATH discovery and explicit executable override
   await fixture.configure({ mode: 'bad-version' });
   const failed = spawnSync(process.execPath, [
     '--import', 'tsx', path.join(projectRoot, 'scripts/model-policy.ts'), 'run',
-    '--profile', 'code', '--repo', oracleRepoRoot, '--prompt', 'must not submit',
+    '--backend', 'oracle', '--profile', 'code', '--repo', oracleRepoRoot, '--prompt', 'must not submit',
     '--repo-mcp-preattached-tab', '--browser-tab', 'tab-test-01',
     '--oracle-path', fixture.executable, '--slug', 'oracle-portable-bad-version'
   ], { cwd: projectRoot, encoding: 'utf8', timeout: 15000, env: fakeEnvironment(fixture.home, { NODE_OPTIONS: '' }) });

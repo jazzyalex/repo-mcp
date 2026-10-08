@@ -539,26 +539,86 @@ capability.
 
 ### Review execution-surface contract
 
-Repo MCP supplies repository tools to the client that is already running. It does not
-launch a model or browser. Therefore a Codex subagent with Repo MCP is a Codex review,
-and a Claude Code process with Repo MCP is a Claude review. Neither may be reported as
-a ChatGPT web review.
+Repo MCP supplies repository tools to ChatGPT web. Codex and Claude are supported local
+coordinators: they prepare repository authority and control the browser, while ChatGPT
+performs the semantic work. A Codex subagent or Claude process that reads and judges the
+code itself is outside the Repo MCP review/architecture contract and must never be
+reported as a Repo MCP ChatGPT review.
 
 For the installed Codex operator skill, `Use Repo MCP to review this repository`
-defaults to the token-saving route: freeze the task, run a separate ChatGPT web
-conversation through the verified browser adapter, and select the `review` profile
-(Sol Extra High). Use `review-critical` (Sol Pro) only for an explicit Pro or critical
-review. A failure to verify the browser model selection, submitted prompt, Repo MCP
-attachment, repository identity, or completed response is `NOT TESTABLE`; it is never
-permission to fall back to a Codex subagent. Recover a submitted browser run by its
-existing run/tab rather than submitting it again.
+defaults to the token-saving route: freeze the task, use host-native browser control for
+a separate ChatGPT web conversation, and select the `review` profile (Sol Extra High).
+Use `review-critical` (Sol Pro) only for an explicit Pro or critical review. Oracle is
+not part of this default path. A failure to verify the browser model selection, submitted
+prompt, Repo MCP attachment, repository identity, or completed response is
+`NOT TESTABLE`; it is never permission to fall back to a Codex subagent or Oracle.
+Recover a submitted browser run by its existing run/tab rather than submitting it again.
 
 Every result must state the execution surface, verified model/profile when available,
 repository evidence source, selected diff base, and resolved commit. This makes usage
 and independence claims auditable instead of inferring them from the phrase "Repo MCP
 review."
 
-### ChatGPT model-profile authorization helper
+### Durable ChatGPT run and model authorization
+
+`npm run chatgpt-run` is the provider-neutral run journal used by both Codex and Claude
+coordinators. `prepare` validates the registered repository/task, task phase, HEAD and
+immutable diff base; hashes the bounded prompt and browser-context identity; requests
+the exact model profile; and creates an owner-only run record outside every repository.
+It never stores the prompt or raw browser identity.
+
+After the coordinator selects the requested model in the live ChatGPT composer, its
+browser adapter calls `chatgpt-run observe` with the live control label, browser-context
+identity and observation times. This is an operator-only trust boundary, not an MCP
+tool. `reserve` verifies and consumes that observation exactly once and changes the run
+to `submission-reserved` immediately before the adapter submits the prompt. The adapter
+must submit only when the returned `submission_authorized` field is `true`. A replay
+returns `submission_authorized: false` and `recovery_required: true`; it never authorizes
+a second browser submission. The adapter then records `submitted` and eventually
+`complete` with fresh trusted browser receipts binding the repository/task, prompt hash,
+immutable base commit, browser context, event identity, and observation time. Submission
+and completion events are stored separately. Only their hashes, the output digest, and
+bounded outcome are retained. A disconnect after reservation is marked `uncertain` and
+recovered through the same run and browser conversation. Uncertainty from
+`submission-reserved` forbids all submission evidence. Every new state is validated
+before durable publication or release of the exact-request claim.
+
+Completion has its own `TrustedChatGptCompletionReceipt`: `kind: "completion"`,
+`responseState: "completed"`, `submissionEventSha256`, and `outputSha256`, in addition
+to the common browser-context/repository/task/prompt/base/time binding. The trusted
+adapter must observe the finished response to that submitted event and hash the observed
+output; supplied output text alone is not evidence. Its completion event must differ
+from the submission event. The CLI requires `--response-state completed`,
+`--submission-event-sha256`, and `--output-sha256` with `complete`. The journal retains
+`completion_submission_event_sha256` and rejects legacy completed records missing
+that binding; do not fabricate evidence to upgrade them.
+
+An exact unresolved request also owns a durable request claim, so concurrent prepare calls
+cannot create replacement runs. Initialization, terminal cleanup, and claim recovery are
+serialized by the same request lock. New claims record the initializer's PID, hostname,
+token, purpose, and creation time. Terminal completion or confirmed pre-submit failure
+releases that claim for a later legitimate run.
+
+After an interrupted initialization or terminal cleanup, explicitly run
+`chatgpt-run recover-request --request-key REQUEST_KEY`. It removes only a claim tied
+to a validated terminal run, or an orphan with no run record after proving its initializer
+is dead on this host. Live, foreign-host, corrupt, mismatched, and unresolved claims fail
+closed. Legacy orphan claims without initializer ownership proof require manual inspection.
+The command also recovers stale initialization/cleanup/recovery request locks and is
+idempotent after cleanup; it never creates or submits a replacement run.
+
+A stale per-run coordinator lock is recovered only by an explicit
+`chatgpt-run recover-lock --run RUN_ID` operation. A dead recovery operation's own
+replacement lock is also recognized, so recovery can be repeated after a crash. Live,
+corrupt, foreign-host, changed-token, or unexpected-purpose locks fail closed. Separate
+stale `.recovery.json` markers retain the existing manual-inspection rule.
+
+The run record binds coordinator (`codex` or `claude`), actual execution surface
+(`ChatGPT web`), work kind, model profile, repository/task epochs, policy digest, branch,
+HEAD, requested/resolved diff base, prompt digest and hashed browser context. Claude may
+prepare `review` and `architecture`; `code` is refused unless Codex is the coordinator.
+
+The lower-level `npm run model-policy` commands remain available for adapter development.
 
 `npm run model-policy` has two deliberately separate paths. `resolve` / `verify`
 remain the private model-selection authorization helper for adapters that have a
@@ -598,12 +658,11 @@ differs from private state fails the corresponding state-mismatch check.
 
 After selecting `picker_target`, the **trusted browser adapter** must re-query the
 live composer control after any React replacement, obtain the same browser-context
-identity from the browser, and call the exported
-`recordTrustedBrowserObservation` library function. That function is deliberately
-not exposed as an untrusted CLI command. It writes one private observation and
-returns a sanitized receipt for `/tmp/model-evidence.json`. Hand-written JSON is
-not browser proof; `verify` rejects a receipt when the matching private trusted
-observation does not exist or differs.
+identity from the browser, and call the exported `recordTrustedBrowserObservation`
+library function or the local `chatgpt-run observe` adapter boundary. It writes one
+private observation and returns a sanitized receipt. Hand-written receipt JSON is not
+browser proof; `verify` rejects it when the matching private trusted observation does
+not exist or differs.
 
 Current Chat observations may expose only effort labels such as `High` and
 `Extra High`. In that case the helper records the model family as absent and
@@ -622,6 +681,12 @@ npm run --silent model-policy -- verify --contract-file /tmp/model-contract.json
   --evidence-file /tmp/model-evidence.json
 ```
 
+Contract and evidence JSON files share the bounded regular-file reader used by
+`chatgpt-run`: each is limited to 256 KiB, opened nonblocking without following a final
+symlink, checked for identity/metadata changes and growth, and decoded with fatal UTF-8.
+FIFOs, devices, symlinks, oversized/changing files, and invalid UTF-8 fail before
+verification. The Oracle prompt reader retains its separate 1 MiB limit and protections.
+
 A successful verify atomically creates a one-use consumed-selection record, then
 takes a fresh clock reading and re-checks contract expiry and observation age before
 returning `ok: true`. An identical second verification fails, including concurrent
@@ -638,10 +703,11 @@ are in the same trusted OS-user boundary. It does not defend against arbitrary c
 already running as that owner and intentionally makes no claim that the library
 itself prevents adapter bypass or post-verification UI changes.
 
-### Oracle browser model-profile runner
+### Optional legacy Oracle browser backend
 
 The installed Oracle browser controller is integrated through the same CLI with a
-narrow `run` command. The supported Oracle contract is pinned to the verified local
+narrow `run --backend oracle` command. It is used only when the user explicitly requests
+Oracle; `run` without a backend fails before launching anything. The supported Oracle contract is pinned to the verified local
 Oracle v0.21.1 interface. Resolve the executable from absolute PATH entries by default,
 or pass `--oracle-path /absolute/path/to/oracle`. The executable must be a regular,
 executable file owned by the current user or root, without group/world write access;
@@ -676,6 +742,7 @@ Oracle is launched. Supply prompt text directly or from one file:
 
 ```sh
 npm run --silent model-policy -- run \
+  --backend oracle \
   --profile code-hard \
   --repo "$PWD" \
   --repo-mcp-preattached-tab \
@@ -747,7 +814,7 @@ claude mcp add --scope user --transport http repo-mcp http://127.0.0.1:8787/mcp
 claude mcp get repo-mcp
 ```
 
-Install the bundled setup and review skills through the ownership-aware installer:
+Install the bundled setup, review, and architecture skills through the ownership-aware installer:
 
 ```sh
 python3 scripts/install-agent-skills.py --install

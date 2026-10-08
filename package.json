@@ -17,7 +17,8 @@
     "release:pack": "python3 scripts/package-release.py",
     "task": "tsx scripts/task.ts",
     "coord": "tsx scripts/coordinator.ts",
-    "model-policy": "tsx scripts/model-policy.ts"
+    "model-policy": "tsx scripts/model-policy.ts",
+    "chatgpt-run": "tsx scripts/chatgpt-run.ts"
   },
   "engines": {
     "node": ">=26.0.0"

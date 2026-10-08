@@ -8,3 +8,6 @@ For first-time setup, install the bundled global skills with
 `python3 scripts/install-agent-skills.py --install`. Ask the user only for account-bound
 steps that the agent cannot complete, such as creating the OpenAI tunnel/runtime
 credential or connecting/refreshing the ChatGPT app.
+
+For a ChatGPT web architecture pass through Repo MCP, use
+`.codex/skills/repo-mcp-architect/SKILL.md`; Codex remains the local coordinator.

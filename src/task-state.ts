@@ -115,12 +115,23 @@ export class StateStore {
     const target = this.resolve(rel);
     let text: string;
     try { text = await readFile(target, 'utf8'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // readFile follows symlinks, so ENOENT may mean a missing referent.
+      // Only an absent pathname is safe to treat as an absent state record.
+      try { await lstat(target); }
+      catch (inspectionError) {
+        if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw inspectionError;
+      }
+      throw new StateError(`Unsafe task state pathname ${rel}; inspect it before continuing.`);
+    }
     let record: { version?: unknown; kind?: unknown; data?: unknown };
     try { record = JSON.parse(text); } catch { throw new StateError(`Corrupt task state record ${rel}; inspect it before continuing.`); }
     if (!record || typeof record !== 'object') throw new StateError(`Corrupt task state record ${rel}; inspect it before continuing.`);
     if (record.version !== STATE_VERSION) throw new StateError(`Unsupported task state version in ${rel}.`);
     if (record.kind !== kind) throw new StateError(`Unexpected task state kind in ${rel}.`);
+    if (!Object.hasOwn(record, 'data')) throw new StateError(`Corrupt task state record ${rel}; inspect it before continuing.`);
     return record.data as T;
   }
 

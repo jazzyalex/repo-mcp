@@ -44,7 +44,7 @@ app in ChatGPT. The credential is entered through a hidden local prompt and is n
 pasted into chat.
 
 Codex follows [AGENTS.md](AGENTS.md) and the bundled Repo MCP skill. Claude follows
-[CLAUDE.md](CLAUDE.md) and its bundled setup/review skills.
+[CLAUDE.md](CLAUDE.md) and its bundled setup, review, and architecture skills.
 
 ## Manual setup and troubleshooting
 
@@ -319,18 +319,40 @@ ChatGPT plan limits still apply. Repo MCP itself does not make model inference A
 
 ### Review execution surface
 
-Repo MCP gives an already-running model bounded access to a repository. It does not by
-itself launch ChatGPT, Claude, Codex, or a browser, and it does not select a model. A
-Codex subagent using Repo MCP is still a Codex review and consumes Codex usage; a Claude
-Code process using Repo MCP is a Claude review.
+Repo MCP gives ChatGPT web bounded access to a repository. Codex and Claude are local
+coordinators: they prepare authority and drive their browser controls, while ChatGPT
+performs review and architecture through Repo MCP. A Codex subagent or Claude process
+that judges the code itself is outside this product contract and must not be labeled a
+Repo MCP review.
 
 The installed Codex operator skill gives `Use Repo MCP to review this repository` a
-specific token-saving meaning: prepare a frozen review task, launch an independent
-ChatGPT web review through the verified browser adapter, and use the `review` profile
-(Sol Extra High). Sol Pro is reserved for an explicitly requested critical review. The
-review must report its execution surface, verified model/profile, Repo MCP as the
-repository evidence source, and the selected diff base. If the ChatGPT route cannot be
-verified, it fails as `NOT TESTABLE` instead of falling back to a Codex subagent.
+specific token-saving meaning: prepare a frozen review task, use host-native browser
+control for an independent ChatGPT web review, and request the `review` profile (Sol
+Extra High). Sol Pro is reserved for an explicitly requested critical review. Oracle is
+an optional legacy backend and is never selected implicitly. The review must report its
+execution surface, verified model/profile, Repo MCP as the repository evidence source,
+and the selected diff base. If the ChatGPT route cannot be verified, it fails as
+`NOT TESTABLE` instead of falling back to a Codex subagent or Oracle.
+
+Claude supports Repo MCP review and architecture as a coordinator: it uses its own
+host-native browser controls to make ChatGPT web perform the XHigh/Pro work through Repo
+MCP. Claude does not perform the semantic Repo MCP review itself. Coding/write access is
+coordinated only through the Codex operator path.
+
+Both coordinator paths use the durable `chatgpt-run` journal. It binds the repository,
+task epochs, HEAD, diff base, prompt digest, hashed browser context and verified model
+selection before one submission. Only a reservation response with
+`submission_authorized: true` permits that submission; replay returns recovery-only state.
+Fresh browser receipts bind separate submission and completion events to the exact prompt,
+immutable base, task, and hashed browser context. Completion requires an observed finished
+response, the submitted event hash, and the observed output digest; the submission event
+cannot double as completion evidence. Submitted or uncertain runs are recovered by the
+same run identity; they are never silently resubmitted. Prompts and full responses are not
+stored in the journal. Explicit `chatgpt-run recover-request --request-key REQUEST_KEY`
+recovers terminal claim cleanup or an orphan claim whose same-host initializer is proven
+dead. It preserves every unresolved run. `recover-lock` also accepts a dead recovery
+operation's own replacement lock; live, corrupt, foreign-host, changed-token, and
+unrelated-purpose locks fail closed.
 
 ## Release archive
 

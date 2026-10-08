@@ -109,8 +109,10 @@ def destinations(client="all"):
     claude = normalized(os.environ.get("CLAUDE_HOME", HOME / ".claude"))
     items = [
         ("codex", ROOT / ".codex/skills/repo-mcp/SKILL.md", codex / "skills/repo-mcp/SKILL.md"),
+        ("codex", ROOT / ".codex/skills/repo-mcp-architect/SKILL.md", codex / "skills/repo-mcp-architect/SKILL.md"),
         ("claude", ROOT / ".claude/skills/repo-mcp/SKILL.md", claude / "skills/repo-mcp/SKILL.md"),
         ("claude", ROOT / ".claude/skills/repo-mcp-review/SKILL.md", claude / "skills/repo-mcp-review/SKILL.md"),
+        ("claude", ROOT / ".claude/skills/repo-mcp-architect/SKILL.md", claude / "skills/repo-mcp-architect/SKILL.md"),
     ]
     return [(source, target) for owner, source, target in items if client in ("all", owner)]
 
