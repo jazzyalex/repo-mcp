@@ -47,15 +47,14 @@ export async function openVerified(root: string, rel: string, hook?: PathHook): 
   } catch (error) { await handle.close().catch(() => {}); throw error; }
 }
 
-export type DiffInput = { state: 'absent' } | { state: 'refused'; reason: string } | { state: 'file'; stat: BigIntStats };
+export type SafeStatInput = { state: 'absent' } | { state: 'refused'; reason: string } | { state: 'file'; stat: BigIntStats };
+export type DiffInput = SafeStatInput;
 
 /**
- * Judge an existing Git diff input by the same rules as read and discovery before Git opens it: no symlink in any
- * component, a regular file with one hard link, on the root's device, within the size limit. A missing file or
- * parent directory is `absent` (a genuine deletion). Git opens the path itself afterwards, so callers compare the
- * returned stat with a second lstat after Git has run; that detects a swap, it does not prevent one.
+ * Safely stat root/rel without opening file contents: reject symlinked components, other devices,
+ * non-regular files and multiply-linked files. Missing paths are represented explicitly.
  */
-export async function diffInput(root: string, rel: string, maxBytes: number): Promise<DiffInput> {
+export async function safeStatInput(root: string, rel: string): Promise<SafeStatInput> {
   try {
     const rootStat = await lstat(root, { bigint: true });
     const parts = rel.split('/');
@@ -68,7 +67,6 @@ export async function diffInput(root: string, rel: string, maxBytes: number): Pr
       if (i < parts.length - 1) { if (!stat.isDirectory()) return { state: 'refused', reason: 'a path component is not a directory' }; continue; }
       if (!stat.isFile()) return { state: 'refused', reason: 'it is not a regular file' };
       if (stat.nlink > 1n) return { state: 'refused', reason: 'it has more than one hard link' };
-      if (Number(stat.size) > maxBytes) return { state: 'refused', reason: 'it exceeds the file size limit' };
       return { state: 'file', stat };
     }
   } catch (error) {
@@ -77,6 +75,19 @@ export async function diffInput(root: string, rel: string, maxBytes: number): Pr
     return { state: 'refused', reason: 'it cannot be inspected' };
   }
   return { state: 'refused', reason: 'it is not a regular file' };
+}
+
+/**
+ * Judge an existing Git diff input by the same rules as read and discovery before Git opens it, then
+ * apply the configured content-size cap. Git opens the path itself afterwards, so callers compare the
+ * returned stat with a second lstat after Git has run; that detects a swap, it does not prevent one.
+ */
+export async function diffInput(root: string, rel: string, maxBytes: number): Promise<DiffInput> {
+  const input = await safeStatInput(root, rel);
+  if (input.state === 'file' && Number(input.stat.size) > maxBytes) {
+    return { state: 'refused', reason: 'it exceeds the file size limit' };
+  }
+  return input;
 }
 
 /** Identity of a real, non-symlink directory that is exactly where it claims to be. */

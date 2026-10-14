@@ -565,7 +565,16 @@ review."
 coordinators. `prepare` validates the registered repository/task, task phase, HEAD and
 immutable diff base; hashes the bounded prompt and browser-context identity; requests
 the exact model profile; and creates an owner-only run record outside every repository.
-It never stores the prompt or raw browser identity.
+New preparations default to Chat when `--surface` is omitted. On repositories with the
+legacy/default surface policy, explicit Work requires `--surface work` plus a bounded,
+nonempty, control-free `--surface-override-reason`; that reason is persisted only in
+owner authorization metadata and is omitted from public/sanitized run output. Set a
+durable repository rule with
+`npm run --silent coord -- repository surface-policy --repository ID --mode default|chat-only`.
+A real mode change drains the existing task gate, increments `registration_epoch`, and
+invalidates older authorization; repeating the current mode is a true no-op. `chat-only`
+rejects Work before model-selection, request-claim, or run state is created. Historical
+run records are not rewritten. `prepare` never stores the prompt or raw browser identity.
 
 After the coordinator selects the requested model in the live ChatGPT composer, its
 browser adapter calls `chatgpt-run observe` with the live control label, browser-context
@@ -618,6 +627,9 @@ The run record binds coordinator (`codex` or `claude`), actual execution surface
 HEAD, requested/resolved diff base, prompt digest and hashed browser context. Claude may
 prepare `review` and `architecture`; `code` is refused unless Codex is the coordinator.
 
+`npm run --silent coord -- --help` and `npm run --silent chatgpt-run -- --help` print
+complete static command/flag help, exit successfully, and do not initialize operator state.
+
 The lower-level `npm run model-policy` commands remain available for adapter development.
 
 `npm run model-policy` has two deliberately separate paths. `resolve` / `verify`
@@ -664,15 +676,20 @@ private observation and returns a sanitized receipt. Hand-written receipt JSON i
 browser proof; `verify` rejects it when the matching private trusted observation does
 not exist or differs.
 
-Current Chat observations may expose only effort labels such as `High` and
-`Extra High`. In that case the helper records the model family as absent and
-fails closed with `MODEL_UNPROVEN`; it does not invent `Sol`. Where the trusted
-adapter actually exposes model text, the allowlist is intentionally narrow:
-`Sol`, `GPT-5.6 Sol`, `GPT-6.1 Sol`, and corresponding `Sol Pro` forms.
-Work combined controls may use those Sol labels with `High`, `Extra High` /
-`XHigh`, or `Light`. `Light` never satisfies any required profile, and Astra
-labels such as `GPT-6 Astra Extra High` are rejected. Unknown, localized, and
-future labels remain fail-closed until explicitly added with tests.
+Chat observations may expose only effort labels such as `High` and `Extra High`. In
+that case the helper records the model family as absent and fails closed with
+`MODEL_UNPROVEN`; a version prefix in the control is auxiliary evidence and never invents
+`Sol`. Trusted Chat picker model text accepts only `Sol`, `Sol Pro`, `GPT-VERSION Sol`,
+or `GPT-VERSION Sol Pro`. VERSION has one to three ASCII numeric components; each
+component is `0` or 1-3 digits without a leading zero, with an overall maximum of 11
+characters. Chat controls accept the matching bare effort or VERSION-prefixed effort.
+The normalized `observed_control_label` retains a valid version prefix. When both picker
+and control are versioned they must match exactly or verification fails with
+`MODEL_VERSION_MISMATCH`; a versioned picker with a bare control and a bare Sol picker
+with a versioned control remain valid. Plain `GPT-6`, Astra, Light, localized labels,
+Unicode-lookalike digits, control characters, and malformed/overlong versions fail
+closed. Work combined controls retain the shipped finite Sol allowlist for legacy
+receipt compatibility; `Light` still never satisfies a required profile.
 
 Immediately before the trusted adapter submits one prompt:
 

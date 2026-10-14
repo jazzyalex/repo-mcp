@@ -339,6 +339,28 @@ host-native browser controls to make ChatGPT web perform the XHigh/Pro work thro
 MCP. Claude does not perform the semantic Repo MCP review itself. Coding/write access is
 coordinated only through the Codex operator path.
 
+New `chatgpt-run prepare` authorizations default to Chat when `--surface` is omitted:
+code -> Sol High, code-hard/review -> Sol Extra High, and review-critical/architecture ->
+Sol Pro. A repository may durably forbid Work with
+`npm run --silent coord -- repository surface-policy --repository ID --mode chat-only`;
+`default` restores the generic policy. A real surface-policy change increments the
+repository registration epoch and invalidates older grants/workspaces/run currentness;
+setting the same mode is an idempotent no-op. On a `default` repository, explicit Work
+requires `--surface work --surface-override-reason REASON`; the bounded control-free
+reason is retained only in owner authorization state and is not returned in run/status
+output. `chat-only` rejects Work before model-selection, request-claim, or run state is
+created.
+
+Chat picker evidence accepts bare `Sol` / `Sol Pro` or `GPT-VERSION Sol` /
+`GPT-VERSION Sol Pro`, where VERSION is one to three ASCII numeric components with
+1-3 digits per component and no leading zeroes in multi-digit components. A versioned
+Chat effort control retains its normalized version prefix, and if both picker and control
+carry a version they must match. Missing picker model evidence still fails
+`MODEL_UNPROVEN`. Existing Work combined-control evidence keeps its shipped legacy
+allowlist. `npm run --silent coord -- --help` and
+`npm run --silent chatgpt-run -- --help` print complete static help without initializing
+operator state.
+
 Both coordinator paths use the durable `chatgpt-run` journal. It binds the repository,
 task epochs, HEAD, diff base, prompt digest, hashed browser context and verified model
 selection before one submission. Only a reservation response with

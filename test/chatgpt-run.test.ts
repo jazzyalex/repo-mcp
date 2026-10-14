@@ -7,14 +7,24 @@ import path from 'node:path';
 import { prepareFixture } from '../src/fixture.js';
 import { migrateV1 } from '../src/policy.js';
 import { defaultPolicy } from '../src/repo.js';
-import { bindRegisteredTask, rebindRegisteredTask, registerRepository, setRegisteredTaskPhase } from '../src/multirepo-state.js';
+import {
+  authorizeWorkspace,
+  bindRegisteredTask,
+  issueWorkspaceGrant,
+  openWorkspace,
+  readMultiRepoCatalog,
+  rebindRegisteredTask,
+  registerRepository,
+  setRegisteredTaskPhase,
+  setRepositorySurfacePolicy
+} from '../src/multirepo-state.js';
 import {
   chatGptRunStatus,
   completeChatGptRun,
   failChatGptRunBeforeSubmit,
   markChatGptRunSubmitted,
   markChatGptRunUncertain,
-  prepareChatGptRun,
+  prepareChatGptRun as prepareChatGptRunImpl,
   recoverChatGptRunLock,
   recoverChatGptRequestClaim,
   recoverChatGptRun,
@@ -27,9 +37,51 @@ import { git } from './helpers.js';
 import { PROJECT_BASE } from '../src/version.js';
 import { sha256 } from '../src/errors.js';
 import { StateStore } from '../src/task-state.js';
+import { recoverTaskStaleLocks } from '../src/task.js';
 
 const NOW = new Date('2026-10-07T20:00:00.000Z');
 const OBSERVED = new Date('2026-10-07T20:00:03.000Z');
+
+// Stage 1 contract inventory: existing tests that intentionally exercise Work remain
+// explicit Work coverage. Supply the now-required test-only override reason without changing
+// their original assertions.
+type PrepareChatGptRunOptions = Parameters<typeof prepareChatGptRunImpl>[0] & {
+  surfaceOverrideReason?: string;
+};
+function prepareChatGptRun(options: PrepareChatGptRunOptions) {
+  const explicit = options.surface === 'work' && options.surfaceOverrideReason === undefined
+    ? { ...options, surfaceOverrideReason: 'existing explicit Work regression coverage' }
+    : options;
+  return prepareChatGptRunImpl(explicit as Parameters<typeof prepareChatGptRunImpl>[0]);
+}
+
+function runNpm(script: 'coord' | 'chatgpt-run', args: string[], stateDir?: string) {
+  return spawnSync('npm', ['run', '--silent', script, '--', ...args], {
+    cwd: PROJECT_BASE,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, ...(stateDir ? { REPO_MCP_STATE_DIR: stateDir } : {}) }
+  });
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+async function chatGptArtifactInventory(stateDir: string) {
+  const store = await StateStore.open(stateDir);
+  return {
+    runs: (await store.list('chatgpt-runs')).sort(),
+    requests: (await store.list('chatgpt-run-requests')).sort(),
+    authorizations: (await store.list('chatgpt-run-authorizations')).sort(),
+    selections: (await store.list('model-policy/requests')).sort(),
+    observations: (await store.list('model-policy/observations')).sort(),
+    consumed: (await store.list('model-policy/consumed')).sort()
+  };
+}
 
 async function fixture(t: { after(fn: () => Promise<void>): void }, phase: 'coding' | 'review' = 'review') {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-chatgpt-run-')));
@@ -171,7 +223,8 @@ test('public ChatGPT run CLI prepares from a regular prompt and refuses a symlin
   await symlink(prompt, linked);
   const args = (file: string) => ['run', '--silent', 'chatgpt-run', '--', 'prepare',
     '--state-dir', stateDir, '--repository', 'repo', '--task', 'task', '--coordinator', 'claude',
-    '--kind', 'review', '--surface', 'work', '--conversation-id', 'conversation-cli', '--prompt-file', file];
+    '--kind', 'review', '--surface', 'work', '--surface-override-reason', 'existing explicit Work CLI regression',
+    '--conversation-id', 'conversation-cli', '--prompt-file', file];
   const ok = spawnSync('npm', args(prompt), { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 30_000 });
   assert.equal(ok.status, 0, ok.stderr);
   const prepared = JSON.parse(ok.stdout);
@@ -223,6 +276,322 @@ test('public ChatGPT run CLI prepares from a regular prompt and refuses a symlin
   const invalidRefused = spawnSync('npm', args(invalid), { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 5_000 });
   assert.equal(invalidRefused.status, 1);
   assert.match(invalidRefused.stderr, /valid UTF-8/i);
+});
+
+test('Stage 1 new ChatGPT preparations default code, code-hard, review and architecture to Chat', async t => {
+  const cases = [
+    { name: 'code', kind: 'code', profile: undefined, phase: 'coding' as const, expectedTarget: 'High' },
+    { name: 'code-hard', kind: 'code', profile: 'code-hard', phase: 'coding' as const, expectedTarget: 'Extra High' },
+    { name: 'review', kind: 'review', profile: undefined, phase: 'review' as const, expectedTarget: 'Extra High' },
+    { name: 'architecture', kind: 'architecture', profile: undefined, phase: 'coding' as const, expectedTarget: 'Pro' }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async st => {
+      const { base, stateDir } = await fixture(st, item.phase);
+      const prompt = path.join(base, `${item.name}-prompt.txt`);
+      await writeFile(prompt, `${item.name} through Chat.\n`);
+      const args = [
+        'prepare', '--state-dir', stateDir, '--repository', 'repo', '--task', 'task',
+        '--coordinator', 'codex', '--kind', item.kind,
+        '--session-id', `session-${item.name}`, '--prompt-file', prompt
+      ];
+      if (item.profile) args.push('--profile', item.profile);
+      const result = runNpm('chatgpt-run', args, stateDir);
+      assert.equal(result.status, 0, result.stderr);
+      const prepared = JSON.parse(result.stdout);
+      assert.equal(prepared.selection.surface, 'chat');
+      assert.equal(prepared.selection.expected_target_label, item.expectedTarget);
+    });
+  }
+});
+
+test('Stage 1 repository surface-policy is epoch-bound, idempotent, and invalidates older authority', async t => {
+  const { stateDir } = await fixture(t, 'coding');
+  const before = await readMultiRepoCatalog(stateDir);
+  const beforeRepository = before.repositories.repo as typeof before.repositories.repo & { surface_policy?: string };
+  assert.equal(beforeRepository.surface_policy ?? 'default', 'default');
+
+  const oldGrant = await issueWorkspaceGrant({ stateDir, taskId: 'task' });
+  const oldInspect = await openWorkspace({
+    stateDir, repositoryId: 'repo', taskId: 'task', mode: 'inspect', requestId: 'surface-policy-old-inspect'
+  });
+
+  const changed = runNpm('coord', [
+    'repository', 'surface-policy', '--state-dir', stateDir,
+    '--repository', 'repo', '--mode', 'chat-only'
+  ], stateDir);
+  assert.equal(changed.status, 0, changed.stderr);
+  assert.equal(JSON.parse(changed.stdout).unchanged, false);
+
+  const after = await readMultiRepoCatalog(stateDir);
+  const afterRepository = after.repositories.repo as typeof after.repositories.repo & { surface_policy?: string };
+  assert.equal(afterRepository.surface_policy, 'chat-only');
+  assert.equal(afterRepository.registration_epoch, beforeRepository.registration_epoch + 1);
+
+  await assert.rejects(
+    authorizeWorkspace(stateDir, oldInspect.workspace_token, 'read'),
+    /stale|authorization changed|registration/i
+  );
+  await assert.rejects(
+    openWorkspace({
+      stateDir, repositoryId: 'repo', taskId: 'task', mode: 'code',
+      requestId: 'surface-policy-stale-grant', writeGrant: oldGrant.write_grant
+    }),
+    /grant|stale|authorization/i
+  );
+
+  const same = runNpm('coord', [
+    'repository', 'surface-policy', '--state-dir', stateDir,
+    '--repository', 'repo', '--mode', 'chat-only'
+  ], stateDir);
+  assert.equal(same.status, 0, same.stderr);
+  assert.equal(JSON.parse(same.stdout).unchanged, true);
+  const unchanged = await readMultiRepoCatalog(stateDir);
+  const unchangedRepository = unchanged.repositories.repo as typeof unchanged.repositories.repo & { surface_policy?: string };
+  assert.equal(unchangedRepository.surface_policy, 'chat-only');
+  assert.equal(unchangedRepository.registration_epoch, afterRepository.registration_epoch);
+});
+
+test('Stage 1 legacy repository registrations normalize missing surface policy to default', async t => {
+  const { stateDir } = await fixture(t, 'coding');
+  const store = await StateStore.open(stateDir);
+  const raw = await store.read<any>('control/multirepo-catalog.json', 'multirepo-catalog');
+  assert.ok(raw?.repositories?.repo);
+  delete raw.repositories.repo.surface_policy;
+  await store.write('control/multirepo-catalog.json', 'multirepo-catalog', raw);
+
+  const normalized = await readMultiRepoCatalog(stateDir);
+  const repository = normalized.repositories.repo as typeof normalized.repositories.repo & { surface_policy?: string };
+  assert.equal(repository.surface_policy, 'default');
+});
+
+test('Stage 1 default repositories reject Work without an override reason before run state exists', async t => {
+  const { base, stateDir } = await fixture(t, 'review');
+  const prompt = path.join(base, 'work-without-reason.txt');
+  await writeFile(prompt, 'Review on Work without a reason.\n');
+  const before = await chatGptArtifactInventory(stateDir);
+
+  const result = runNpm('chatgpt-run', [
+    'prepare', '--state-dir', stateDir, '--repository', 'repo', '--task', 'task',
+    '--coordinator', 'codex', '--kind', 'review', '--surface', 'work',
+    '--session-id', 'session-work-no-reason', '--prompt-file', prompt
+  ], stateDir);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /surface.*override.*reason|override reason/i);
+  assert.deepEqual(await chatGptArtifactInventory(stateDir), before);
+});
+
+test('Stage 1 Work override reason and surface-policy enum fail closed on invalid input', async t => {
+  const { base, stateDir } = await fixture(t, 'review');
+  const prompt = path.join(base, 'invalid-work-reason.txt');
+  await writeFile(prompt, 'Invalid Work override.\n');
+  const before = await chatGptArtifactInventory(stateDir);
+
+  for (const reason of ['bad\nreason', 'x'.repeat(513)]) {
+    const result = runNpm('chatgpt-run', [
+      'prepare', '--state-dir', stateDir, '--repository', 'repo', '--task', 'task',
+      '--coordinator', 'codex', '--kind', 'review', '--surface', 'work',
+      '--surface-override-reason', reason,
+      '--session-id', 'session-invalid-work-reason', '--prompt-file', prompt
+    ], stateDir);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /override reason|control-free|512/i);
+    assert.deepEqual(await chatGptArtifactInventory(stateDir), before);
+  }
+
+  const badMode = runNpm('coord', [
+    'repository', 'surface-policy', '--state-dir', stateDir,
+    '--repository', 'repo', '--mode', 'work'
+  ], stateDir);
+  assert.equal(badMode.status, 1);
+  assert.match(badMode.stderr, /default\|chat-only|surface-policy/i);
+  const repository = (await readMultiRepoCatalog(stateDir)).repositories.repo as { surface_policy?: string };
+  assert.equal(repository.surface_policy ?? 'default', 'default');
+});
+
+test('Stage 1 default repositories accept an explicit bounded Work override reason', async t => {
+  const { base, stateDir } = await fixture(t, 'review');
+  const prompt = path.join(base, 'work-with-reason.txt');
+  await writeFile(prompt, 'Review on Work with a reason.\n');
+
+  const reason = 'explicit compatibility regression';
+  const result = runNpm('chatgpt-run', [
+    'prepare', '--state-dir', stateDir, '--repository', 'repo', '--task', 'task',
+    '--coordinator', 'codex', '--kind', 'review', '--surface', 'work',
+    '--surface-override-reason', reason,
+    '--session-id', 'session-work-reason', '--prompt-file', prompt
+  ], stateDir);
+  assert.equal(result.status, 0, result.stderr);
+  const prepared = JSON.parse(result.stdout);
+  assert.equal(prepared.selection.surface, 'work');
+  assert.equal(result.stdout.includes(reason), false, 'override reason must not be public run output');
+  const store = await StateStore.open(stateDir);
+  const authorization = await store.read<any>(
+    `chatgpt-run-authorizations/${prepared.run_id}.json`,
+    'chatgpt-run-surface-override-v1'
+  );
+  assert.equal(authorization?.override_reason, reason);
+  assert.equal(JSON.stringify(await chatGptRunStatus(prepared.run_id, stateDir)).includes(reason), false);
+});
+
+test('Stage 1 chat-only rejects Work before selection, request, or run publication', async t => {
+  const { base, stateDir } = await fixture(t, 'review');
+  const policy = runNpm('coord', [
+    'repository', 'surface-policy', '--state-dir', stateDir,
+    '--repository', 'repo', '--mode', 'chat-only'
+  ], stateDir);
+  assert.equal(policy.status, 0, policy.stderr);
+
+  const prompt = path.join(base, 'chat-only-work.txt');
+  await writeFile(prompt, 'Try forbidden Work.\n');
+  const before = await chatGptArtifactInventory(stateDir);
+  const result = runNpm('chatgpt-run', [
+    'prepare', '--state-dir', stateDir, '--repository', 'repo', '--task', 'task',
+    '--coordinator', 'codex', '--kind', 'review', '--surface', 'work',
+    '--surface-override-reason', 'must not override owner policy',
+    '--session-id', 'session-chat-only-work', '--prompt-file', prompt
+  ], stateDir);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /OWNER_SURFACE_POLICY|chat-only/i);
+  assert.deepEqual(await chatGptArtifactInventory(stateDir), before);
+});
+
+test('Stage 1 Work prepare rechecks a racing default-to-chat-only policy before publication', async t => {
+  const { stateDir } = await fixture(t, 'review');
+  const before = await chatGptArtifactInventory(stateDir);
+  const snapshotCaptured = deferred();
+  const releaseSnapshot = deferred();
+  const originalRead = StateStore.prototype.read;
+  let heldFirstCatalogRead = false;
+  let capturedSurfacePolicy: unknown;
+
+  StateStore.prototype.read = (async function<T = unknown>(this: StateStore, rel: string, kind: string) {
+    const value = await originalRead.call(this, rel, kind) as T | undefined;
+    if (!heldFirstCatalogRead && rel === 'control/multirepo-catalog.json' && kind === 'multirepo-catalog') {
+      heldFirstCatalogRead = true;
+      capturedSurfacePolicy = (value as any)?.repositories?.repo?.surface_policy;
+      snapshotCaptured.resolve(undefined);
+      await releaseSnapshot.promise;
+    }
+    return value;
+  }) as typeof StateStore.prototype.read;
+
+  let preparePromise: ReturnType<typeof prepareChatGptRunImpl> | undefined;
+  let outcome: { run?: Awaited<ReturnType<typeof prepareChatGptRunImpl>>; error?: unknown } | undefined;
+  try {
+    preparePromise = prepareChatGptRunImpl({
+      stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'review',
+      surface: 'work', surfaceOverrideReason: 'deterministic policy-race regression',
+      conversationId: 'surface-policy-race', prompt: 'Race Work authorization.', now: NOW,
+      runId: '33333333-3333-4333-8333-333333333333',
+      selectionId: '44444444-4444-4444-8444-444444444444'
+    });
+    await snapshotCaptured.promise;
+    assert.equal(capturedSurfacePolicy, 'default');
+
+    const changed = await setRepositorySurfacePolicy({
+      stateDir, repositoryId: 'repo', mode: 'chat-only'
+    });
+    assert.equal(changed.unchanged, false);
+    assert.equal(changed.repository.surface_policy, 'chat-only');
+
+    releaseSnapshot.resolve(undefined);
+    outcome = await preparePromise.then(
+      run => ({ run }),
+      error => ({ error })
+    );
+  } finally {
+    releaseSnapshot.resolve(undefined);
+    StateStore.prototype.read = originalRead;
+    if (preparePromise && !outcome) await preparePromise.catch(() => {});
+  }
+
+  const observedError = outcome?.error;
+  assert.ok(observedError, 'racing Work preparation must fail after chat-only wins');
+  assert.match(String((observedError as Error).message), /OWNER_SURFACE_POLICY|chat-only/i);
+  assert.deepEqual(
+    await chatGptArtifactInventory(stateDir),
+    before,
+    'no Work selection, request, run, or owner authorization may publish from the stale snapshot'
+  );
+});
+
+test('Stage 1 surface-policy changes do not rewrite historical explicit Work runs', async t => {
+  const { stateDir } = await fixture(t, 'review');
+  const legacy = await prepareChatGptRun({
+    stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'review',
+    surface: 'work', surfaceOverrideReason: 'historical explicit Work regression',
+    conversationId: 'legacy-work-conversation', prompt: 'Historical Work review.', now: NOW
+  });
+  const runPath = path.join(stateDir, 'chatgpt-runs', `${legacy.run_id}.json`);
+  const before = await readFile(runPath, 'utf8');
+  // Simulate a pre-Stage-1 Work run: historical records have no surface-override sidecar,
+  // and readability must not depend on silently manufacturing one.
+  const store = await StateStore.open(stateDir);
+  await store.remove(`chatgpt-run-authorizations/${legacy.run_id}.json`);
+  assert.equal((await chatGptRunStatus(legacy.run_id, stateDir)).selection.surface, 'work');
+
+  const policy = runNpm('coord', [
+    'repository', 'surface-policy', '--state-dir', stateDir,
+    '--repository', 'repo', '--mode', 'chat-only'
+  ], stateDir);
+  assert.equal(policy.status, 0, policy.stderr);
+
+  assert.equal(await readFile(runPath, 'utf8'), before);
+  const after = await chatGptRunStatus(legacy.run_id, stateDir);
+  assert.equal(after.selection.surface, 'work');
+});
+
+test('Stage 1 CLI --help is complete, exits zero, and does not initialize absent state', async t => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-stage1-help-')));
+  t.after(() => rm(base, { recursive: true, force: true }));
+
+  const cases = [
+    {
+      script: 'chatgpt-run' as const,
+      markers: [
+        'prepare', 'status', 'observe', 'reserve', 'submitted', 'complete', 'uncertain',
+        'recover', 'recover-lock', 'recover-request', 'fail-pre-submit',
+        '--surface', '--surface-override-reason'
+      ]
+    },
+    {
+      script: 'coord' as const,
+      markers: [
+        'service', 'repository', 'surface-policy', 'task', 'workspace', 'migration', 'gc',
+        '--mode', 'default', 'chat-only'
+      ]
+    }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.script, async () => {
+      const stateDir = path.join(base, `${item.script}-absent-state`);
+      const result = runNpm(item.script, ['--help'], stateDir);
+      assert.equal(result.status, 0, result.stderr);
+      for (const marker of item.markers) {
+        assert.ok(result.stdout.includes(marker), `${item.script} help is missing ${marker}\n${result.stdout}`);
+      }
+      await assert.rejects(lstat(stateDir), error => (error as NodeJS.ErrnoException).code === 'ENOENT');
+    });
+  }
+});
+
+test('Stage 1 chatgpt-run rejects recognized global options on the wrong command without state change', async t => {
+  const { stateDir } = await fixture(t, 'review');
+  const run = await prepareChatGptRun({
+    stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'review',
+    surface: 'chat', conversationId: 'wrong-command-option', prompt: 'Prepare valid status target.', now: NOW
+  });
+  const before = await chatGptArtifactInventory(stateDir);
+
+  const result = runNpm('chatgpt-run', [
+    'status', '--state-dir', stateDir, '--run', run.run_id, '--surface', 'work'
+  ], stateDir);
+  assert.notEqual(result.status, 0, 'recognized --surface must not be silently ignored by status');
+  assert.match(result.stderr, /--surface.*not valid|status.*surface|wrong command/i);
+  assert.deepEqual(await chatGptArtifactInventory(stateDir), before);
 });
 
 test('corrupt run records fail closed and cannot expose injected fields through status', async t => {
@@ -514,6 +883,11 @@ test('real process death during initialization and terminal cleanup permits only
         prompt: 'Crash request.', now: NOW };
       await assert.rejects(prepareChatGptRun(options), /stale lock/i);
       assert.equal((await recoverChatGptRequestClaim(claim.request_key, stateDir)).recovered, true);
+      if (mode === 'initializer') {
+        // process.exit(91) occurs while prepare holds the task coordinator gate;
+        // recovery stays explicit and test-scoped rather than becoming production auto-recovery.
+        await recoverTaskStaleLocks(stateDir, 'task');
+      }
       if (mode === 'terminal') {
         assert.equal((await recoverChatGptRunLock(claim.run_id, stateDir)).recovered, true);
         assert.equal((await chatGptRunStatus(claim.run_id, stateDir)).state, 'failed-pre-submit');

@@ -22,6 +22,40 @@ import type { ChatSurface, ModelProfile, SanitizedModelSelectionEvidence } from 
 import { recordTrustedBrowserObservation } from '../src/model-policy.js';
 import { defaultStateDir } from '../src/task-state.js';
 
+const HELP = `Repo MCP ChatGPT run journal
+
+Usage:
+  chatgpt-run --help
+  chatgpt-run prepare [--state-dir PATH] --repository ID --task ID
+    --coordinator codex|claude --kind code|review|architecture [--profile PROFILE]
+    [--surface chat|work] [--surface-override-reason REASON]
+    (--session-id ID|--conversation-id ID) --prompt-file FILE [--base-ref REF]
+  chatgpt-run status [--state-dir PATH] --run RUN_ID
+  chatgpt-run observe [--state-dir PATH] --selection-id ID --surface chat|work
+    --control-label LABEL [--model-label LABEL] --selected-at ISO --observed-at ISO
+    (--session-id ID|--conversation-id ID)
+  chatgpt-run reserve [--state-dir PATH] --run RUN_ID
+    --contract-file FILE --evidence-file FILE
+  chatgpt-run submitted [--state-dir PATH] --run RUN_ID RECEIPT_FLAGS
+  chatgpt-run complete [--state-dir PATH] --run RUN_ID --output-file FILE
+    --outcome ship|no-ship|completed --response-state completed
+    --submission-event-sha256 SHA256 --output-sha256 SHA256 RECEIPT_FLAGS
+  chatgpt-run uncertain [--state-dir PATH] --run RUN_ID --failure-code CODE
+  chatgpt-run recover [--state-dir PATH] --run RUN_ID
+    --resolution submitted|not-submitted RECEIPT_FLAGS
+  chatgpt-run recover-lock [--state-dir PATH] --run RUN_ID
+  chatgpt-run recover-request [--state-dir PATH] --request-key SHA256
+  chatgpt-run fail-pre-submit [--state-dir PATH] --run RUN_ID --failure-code CODE
+
+Profiles:
+  code | code-hard | review | review-critical | architecture
+  (profile must match the selected work kind; omitted profile uses that kind's default)
+
+RECEIPT_FLAGS:
+  --repository ID --task ID --prompt-sha256 SHA256 --base-commit COMMIT
+  --browser-event-id ID --observed-at ISO (--session-id ID|--conversation-id ID)
+`;
+
 async function jsonFile(file: string, label: string) {
   try { return JSON.parse(await readRegularFile(file, BOUNDED_JSON_MAX_BYTES, label)) as unknown; }
   catch (error) {
@@ -43,7 +77,8 @@ const { positionals, values } = parseArgs({
   options: {
     'state-dir': { type: 'string' }, run: { type: 'string' }, repository: { type: 'string' },
     task: { type: 'string' }, coordinator: { type: 'string' }, kind: { type: 'string' },
-    profile: { type: 'string' }, surface: { type: 'string' }, 'conversation-id': { type: 'string' },
+    profile: { type: 'string' }, surface: { type: 'string' }, 'surface-override-reason': { type: 'string' },
+    help: { type: 'boolean' }, 'conversation-id': { type: 'string' },
     'session-id': { type: 'string' }, 'prompt-file': { type: 'string' }, 'base-ref': { type: 'string' },
     'contract-file': { type: 'string' }, 'evidence-file': { type: 'string' },
     'output-file': { type: 'string' }, outcome: { type: 'string' }, 'failure-code': { type: 'string' },
@@ -63,6 +98,47 @@ const need = (name: keyof typeof values) => {
   if (!value || typeof value !== 'string') throw new Error(`${command} requires --${name}.`);
   return value;
 };
+const receiptOptions = [
+  'state-dir', 'run', 'repository', 'task', 'prompt-sha256', 'base-commit',
+  'browser-event-id', 'observed-at', 'conversation-id', 'session-id'
+] as const;
+const assertOnly = (...allowed: string[]) => {
+  const allow = new Set(allowed);
+  for (const [name, value] of Object.entries(values)) {
+    if (value !== undefined && !allow.has(name)) {
+      throw new Error(`--${name} is not valid for chatgpt-run ${command ?? ''}.`);
+    }
+  }
+};
+const validateCommandOptions = () => {
+  if (command === 'prepare') {
+    return assertOnly(
+      'state-dir', 'repository', 'task', 'coordinator', 'kind', 'profile', 'surface',
+      'surface-override-reason', 'conversation-id', 'session-id', 'prompt-file', 'base-ref'
+    );
+  }
+  if (command === 'status') return assertOnly('state-dir', 'run');
+  if (command === 'observe') {
+    return assertOnly(
+      'state-dir', 'selection-id', 'surface', 'control-label', 'model-label',
+      'selected-at', 'observed-at', 'conversation-id', 'session-id'
+    );
+  }
+  if (command === 'reserve') return assertOnly('state-dir', 'run', 'contract-file', 'evidence-file');
+  if (command === 'submitted') return assertOnly(...receiptOptions);
+  if (command === 'complete') {
+    return assertOnly(
+      ...receiptOptions, 'output-file', 'outcome', 'response-state',
+      'submission-event-sha256', 'output-sha256'
+    );
+  }
+  if (command === 'uncertain') return assertOnly('state-dir', 'run', 'failure-code');
+  if (command === 'recover') return assertOnly(...receiptOptions, 'resolution');
+  if (command === 'recover-lock') return assertOnly('state-dir', 'run');
+  if (command === 'recover-request') return assertOnly('state-dir', 'request-key');
+  if (command === 'fail-pre-submit') return assertOnly('state-dir', 'run', 'failure-code');
+  throw new Error('Unknown chatgpt-run command.');
+};
 const receipt = (): TrustedChatGptRunReceipt => ({
   repositoryId: need('repository'), taskId: need('task'), promptSha256: need('prompt-sha256'),
   baseCommit: need('base-commit'), browserEventId: need('browser-event-id'), observedAt: need('observed-at'),
@@ -70,56 +146,67 @@ const receipt = (): TrustedChatGptRunReceipt => ({
 });
 
 try {
-  if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit.');
-  if (command === 'prepare') {
-    const promptFile = need('prompt-file');
-    print(await prepareChatGptRun({
-      stateDir, repositoryId: need('repository'), taskId: need('task'),
-      coordinator: need('coordinator') as ChatGptCoordinator, workKind: need('kind') as ChatGptWorkKind,
-      profile: values.profile as ModelProfile | undefined, surface: need('surface') as ChatSurface,
-      conversationId: values['conversation-id'], sessionId: values['session-id'], baseRef: values['base-ref'],
-      prompt: await readRegularFile(promptFile, CHATGPT_RUN_MAX_PROMPT_BYTES, 'Prompt file')
-    }));
-  } else if (command === 'status') {
-    print(await chatGptRunStatus(need('run'), stateDir));
-  } else if (command === 'observe') {
-    print(await recordTrustedBrowserObservation({
-      selectionId: need('selection-id'), surface: need('surface') as ChatSurface,
-      controlLabel: need('control-label'), modelLabel: values['model-label'],
-      selectedAt: need('selected-at'), observedAt: need('observed-at'),
-      conversationId: values['conversation-id'], sessionId: values['session-id']
-    }, { stateDir: `${stateDir}/model-policy` }));
-  } else if (command === 'reserve') {
-    print(await reserveChatGptRun({
-      stateDir, runId: need('run'),
-      contract: contractFromPrepared(await jsonFile(need('contract-file'), 'Contract file')),
-      evidence: await jsonFile(need('evidence-file'), 'Evidence file') as SanitizedModelSelectionEvidence
-    }));
-  } else if (command === 'submitted') {
-    print(await markChatGptRunSubmitted({ runId: need('run'), stateDir, receipt: receipt() }));
-  } else if (command === 'complete') {
-    const outcome = need('outcome');
-    if (outcome !== 'ship' && outcome !== 'no-ship' && outcome !== 'completed') throw new Error('complete --outcome must be ship, no-ship or completed.');
-    if (need('response-state') !== 'completed') throw new Error('complete requires an observed completed response.');
-    const completionReceipt: TrustedChatGptCompletionReceipt = { ...receipt(), kind: 'completion', responseState: 'completed',
-      submissionEventSha256: need('submission-event-sha256'), outputSha256: need('output-sha256') };
-    print(await completeChatGptRun({
-      stateDir, runId: need('run'), outcome,
-      output: await readRegularFile(need('output-file'), CHATGPT_RUN_MAX_OUTPUT_BYTES, 'Output file'), receipt: completionReceipt
-    }));
-  } else if (command === 'uncertain') {
-    print(await markChatGptRunUncertain(need('run'), need('failure-code'), stateDir));
-  } else if (command === 'recover') {
-    const resolution = need('resolution');
-    if (resolution !== 'submitted' && resolution !== 'not-submitted') throw new Error('recover --resolution must be submitted or not-submitted.');
-    print(await recoverChatGptRun(need('run'), resolution, receipt(), stateDir));
-  } else if (command === 'recover-lock') {
-    print(await recoverChatGptRunLock(need('run'), stateDir));
-  } else if (command === 'recover-request') {
-    print(await recoverChatGptRequestClaim(need('request-key'), stateDir));
-  } else if (command === 'fail-pre-submit') {
-    print(await failChatGptRunBeforeSubmit(need('run'), need('failure-code'), stateDir));
-  } else throw new Error('Unknown chatgpt-run command.');
+  if (values.help) {
+    if (positionals.length !== 0 || Object.entries(values).some(([name, value]) => name !== 'help' && value !== undefined)) {
+      throw new Error('Use chatgpt-run --help without a command or other options.');
+    }
+    process.stdout.write(HELP);
+  } else {
+    if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit.');
+    validateCommandOptions();
+    if (command === 'prepare') {
+      const promptFile = need('prompt-file');
+      print(await prepareChatGptRun({
+        stateDir, repositoryId: need('repository'), taskId: need('task'),
+        coordinator: need('coordinator') as ChatGptCoordinator, workKind: need('kind') as ChatGptWorkKind,
+        profile: values.profile as ModelProfile | undefined, surface: values.surface as ChatSurface | undefined,
+        surfaceOverrideReason: values['surface-override-reason'],
+        conversationId: values['conversation-id'], sessionId: values['session-id'], baseRef: values['base-ref'],
+        prompt: await readRegularFile(promptFile, CHATGPT_RUN_MAX_PROMPT_BYTES, 'Prompt file')
+      }));
+    } else if (command === 'status') {
+      print(await chatGptRunStatus(need('run'), stateDir));
+    } else if (command === 'observe') {
+      print(await recordTrustedBrowserObservation({
+        selectionId: need('selection-id'), surface: need('surface') as ChatSurface,
+        controlLabel: need('control-label'), modelLabel: values['model-label'],
+        selectedAt: need('selected-at'), observedAt: need('observed-at'),
+        conversationId: values['conversation-id'], sessionId: values['session-id']
+      }, { stateDir: `${stateDir}/model-policy` }));
+    } else if (command === 'reserve') {
+      print(await reserveChatGptRun({
+        stateDir, runId: need('run'),
+        contract: contractFromPrepared(await jsonFile(need('contract-file'), 'Contract file')),
+        evidence: await jsonFile(need('evidence-file'), 'Evidence file') as SanitizedModelSelectionEvidence
+      }));
+    } else if (command === 'submitted') {
+      print(await markChatGptRunSubmitted({ runId: need('run'), stateDir, receipt: receipt() }));
+    } else if (command === 'complete') {
+      const outcome = need('outcome');
+      if (outcome !== 'ship' && outcome !== 'no-ship' && outcome !== 'completed') throw new Error('complete --outcome must be ship, no-ship or completed.');
+      if (need('response-state') !== 'completed') throw new Error('complete requires an observed completed response.');
+      const completionReceipt: TrustedChatGptCompletionReceipt = { ...receipt(), kind: 'completion', responseState: 'completed',
+        submissionEventSha256: need('submission-event-sha256'), outputSha256: need('output-sha256') };
+      print(await completeChatGptRun({
+        stateDir, runId: need('run'), outcome,
+        output: await readRegularFile(need('output-file'), CHATGPT_RUN_MAX_OUTPUT_BYTES, 'Output file'), receipt: completionReceipt
+      }));
+    } else if (command === 'uncertain') {
+      print(await markChatGptRunUncertain(need('run'), need('failure-code'), stateDir));
+    } else if (command === 'recover') {
+      const resolution = need('resolution');
+      if (resolution !== 'submitted' && resolution !== 'not-submitted') throw new Error('recover --resolution must be submitted or not-submitted.');
+      print(await recoverChatGptRun(need('run'), resolution, receipt(), stateDir));
+    } else if (command === 'recover-lock') {
+      print(await recoverChatGptRunLock(need('run'), stateDir));
+    } else if (command === 'recover-request') {
+      print(await recoverChatGptRequestClaim(need('request-key'), stateDir));
+    } else if (command === 'fail-pre-submit') {
+      print(await failChatGptRunBeforeSubmit(need('run'), need('failure-code'), stateDir));
+    } else {
+      throw new Error('Unknown chatgpt-run command.');
+    }
+  }
 } catch (error) {
   process.stderr.write((error instanceof Error ? error.message : 'ChatGPT run command failed.') + '\n');
   process.exitCode = 1;

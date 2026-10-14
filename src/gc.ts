@@ -344,11 +344,15 @@ export async function garbageCollect(options: GcOptions): Promise<GcSummary> {
         return;
       }
     }
-    const auth = await collectExpiredAuthorization({
-      stateDir: options.stateDir,
-      cutoffMs: nowMs - authHours * HOUR_MS,
-      apply
-    });
+    const { withProtectedReviewWorkspaceIds } = await import('./review-state.js');
+    const auth = await withProtectedReviewWorkspaceIds(options.stateDir, preserveWorkspaceIds =>
+      collectExpiredAuthorization({
+        stateDir: options.stateDir,
+        cutoffMs: nowMs - authHours * HOUR_MS,
+        apply,
+        preserveWorkspaceIds
+      })
+    );
     const target = apply ? summary.removed : summary.would_remove;
     target.workspaces = auth.workspaces;
     target.grants = auth.grants;

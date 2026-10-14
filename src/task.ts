@@ -319,6 +319,17 @@ async function recoverStaleGate(store: StateStore, taskId: string) {
 const coordinatorGate = <T>(store: StateStore, taskId: string, fn: () => Promise<T>) =>
   withShortLock(store, gateKey(taskId), fn, { waitMs: COORDINATOR_GATE_WAIT_MS, purpose: 'coordinator' });
 
+async function withLifecycleShare<T>(
+  stateDir: string,
+  taskId: string,
+  shareGateHeld: boolean,
+  fn: () => Promise<T>
+) {
+  if (shareGateHeld) return fn();
+  const { withTaskShareGate } = await import('./review-state.js');
+  return withTaskShareGate(stateDir, taskId, fn, 'task lifecycle ' + taskId);
+}
+
 /** Serialize an operator authorization/catalog transition with task mutations and checks. */
 export async function withTaskCoordinatorGate<T>(stateDir: string, taskId: string, fn: () => Promise<T>) {
   const { store } = await coordinatorStore(stateDir, taskId);
@@ -354,6 +365,29 @@ export async function withCompletedTaskGcLease<T>(
   });
 }
 
+export async function recoverTaskCoordinatorStaleLock(stateDir: string, taskId: string) {
+  const { store, binding } = await coordinatorStore(stateDir, taskId);
+  const identity = await resolveIdentity(binding.root);
+  const drift = identityDrift(binding, identity);
+  if (drift) throw new SafeError('Task coordinator-lock recovery refused because the active task binding is no longer current: ' + drift);
+  const key = gateKey(taskId);
+  const raw = await store.read<unknown>(`locks/${key}.json`, 'lock');
+  if (raw === undefined) return { recovered: false as const, task_id: taskId };
+  const existing = validateLockRecord(raw, key);
+  if (existing.hostname !== os.hostname()) throw new SafeError('Task coordinator lock belongs to another host; recovery is refused.');
+  if (lockOwnerAlive(existing.pid)) throw new SafeError('Task coordinator lock is owned by a live process; recovery is refused.');
+  if (!['coordinator', 'recovery'].includes(existing.purpose)) {
+    throw new SafeError(`Task coordinator lock has unexpected purpose "${existing.purpose}"; inspect it before recovery.`);
+  }
+  const recovered = await acquireLock(store, key, 'recovery', {
+    recoverStale: true,
+    expectedExistingPurpose: existing.purpose,
+    expectedExistingToken: existing.token
+  });
+  await recovered.release();
+  return { recovered: true as const, task_id: taskId, previous_pid: existing.pid, previous_purpose: existing.purpose };
+}
+
 export async function recoverTaskStaleLocks(stateDir: string, taskId: string) {
   const { store, binding } = await coordinatorStore(stateDir, taskId);
   const identity = await resolveIdentity(binding.root);
@@ -365,65 +399,92 @@ export async function recoverTaskStaleLocks(stateDir: string, taskId: string) {
 }
 
 /** Returns only after in-flight mutations have drained and the new phase is durable. */
-export async function setTaskPhase(stateDir: string, taskId: string, phase: Phase) {
+export async function setTaskPhase(
+  stateDir: string,
+  taskId: string,
+  phase: Phase,
+  options: { shareGateHeld?: boolean } = {}
+) {
   if (!PHASES.includes(phase)) throw new SafeError('Invalid task phase: expected coding or review.');
   const { store, paths } = await coordinatorStore(stateDir, taskId);
-  await coordinatorGate(store, taskId, async () => {
-    if (await store.read(paths.completion, 'completion')) throw new SafeError(`Task ${taskId} is completed and cannot change phase.`);
-    const current = await store.read<PhaseRecord>(paths.phase, 'phase');
-    if (!current || !PHASES.includes(current.phase)) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
-    const epoch = current.epoch ?? 1;
-    if (!Number.isSafeInteger(epoch) || epoch < 1) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
-    if (current.phase === phase) return;
-    await store.write(paths.phase, 'phase', { phase, epoch: epoch + 1 } satisfies PhaseRecord);
-  });
+  return withLifecycleShare(stateDir, taskId, !!options.shareGateHeld, () =>
+    coordinatorGate(store, taskId, async () => {
+      const { assertReviewLifecycleAllowedUnderGate } = await import('./review-state.js');
+      await assertReviewLifecycleAllowedUnderGate(stateDir, taskId);
+      if (await store.read(paths.completion, 'completion')) throw new SafeError(`Task ${taskId} is completed and cannot change phase.`);
+      const current = await store.read<PhaseRecord>(paths.phase, 'phase');
+      if (!current || !PHASES.includes(current.phase)) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
+      const epoch = current.epoch ?? 1;
+      if (!Number.isSafeInteger(epoch) || epoch < 1) throw new StateError(`Task ${taskId} phase record is missing or invalid.`);
+      if (current.phase === phase) return;
+      await store.write(paths.phase, 'phase', { phase, epoch: epoch + 1 } satisfies PhaseRecord);
+    })
+  );
 }
 
 /** Accept the checkout's current branch/HEAD (and optionally a new policy) after reconciliation. */
-export async function rebindTask(stateDir: string, taskId: string, root: string, options: { policyDigest?: string; allowDetached?: boolean } = {}) {
+export async function rebindTask(
+  stateDir: string,
+  taskId: string,
+  root: string,
+  options: { policyDigest?: string; allowDetached?: boolean; shareGateHeld?: boolean } = {}
+) {
   const { store, paths } = await coordinatorStore(stateDir, taskId);
-  return coordinatorGate(store, taskId, async () => {
-    if (await store.read(paths.completion, 'completion')) throw new SafeError(`Task ${taskId} is completed and cannot be rebound.`);
-    const binding = (await store.read<Binding>(paths.binding, 'binding'))!;
-    const protocol = await store.read<Stage1Protocol>(paths.protocol, 'task-protocol');
-    if (!protocolMatchesAdoption(protocol, binding)) throw new SafeError(`Task ${taskId} lacks a matching Stage 1 protocol marker and cannot be rebound implicitly.`);
-    const identity = await resolveIdentity(root);
-    if (identity.root !== binding.root || identity.git_dir !== binding.git_dir || identity.common_dir !== binding.common_dir) throw new SafeError(`Task ${taskId} is bound to a different checkout (${binding.root}).`);
-    const allowDetached = options.allowDetached ?? binding.allow_detached;
-    if (identity.detached && !allowDetached) throw new SafeError('Checkout is on a detached HEAD. Rebind it only with explicit detached-HEAD approval.');
-    const updated: Binding = {
-      ...binding,
-      branch: identity.branch,
-      head: identity.head,
-      allow_detached: allowDetached,
-      policy_digest: options.policyDigest ?? binding.policy_digest,
-      bound_at: new Date().toISOString(),
-      binding_epoch: (binding.binding_epoch ?? 1) + 1
-    };
-    await store.write(paths.binding, 'binding', updated);
-    return updated;
-  });
+  return withLifecycleShare(stateDir, taskId, !!options.shareGateHeld, () =>
+    coordinatorGate(store, taskId, async () => {
+      const { assertReviewLifecycleAllowedUnderGate } = await import('./review-state.js');
+      await assertReviewLifecycleAllowedUnderGate(stateDir, taskId);
+      if (await store.read(paths.completion, 'completion')) throw new SafeError(`Task ${taskId} is completed and cannot be rebound.`);
+      const binding = (await store.read<Binding>(paths.binding, 'binding'))!;
+      const protocol = await store.read<Stage1Protocol>(paths.protocol, 'task-protocol');
+      if (!protocolMatchesAdoption(protocol, binding)) throw new SafeError(`Task ${taskId} lacks a matching Stage 1 protocol marker and cannot be rebound implicitly.`);
+      const identity = await resolveIdentity(root);
+      if (identity.root !== binding.root || identity.git_dir !== binding.git_dir || identity.common_dir !== binding.common_dir) throw new SafeError(`Task ${taskId} is bound to a different checkout (${binding.root}).`);
+      const allowDetached = options.allowDetached ?? binding.allow_detached;
+      if (identity.detached && !allowDetached) throw new SafeError('Checkout is on a detached HEAD. Rebind it only with explicit detached-HEAD approval.');
+      const updated: Binding = {
+        ...binding,
+        branch: identity.branch,
+        head: identity.head,
+        allow_detached: allowDetached,
+        policy_digest: options.policyDigest ?? binding.policy_digest,
+        bound_at: new Date().toISOString(),
+        binding_epoch: (binding.binding_epoch ?? 1) + 1
+      };
+      await store.write(paths.binding, 'binding', updated);
+      return updated;
+    })
+  );
 }
 
-export async function completeTask(stateDir: string, taskId: string, outcome: { result: 'committed' | 'abandoned'; commit_sha?: string }) {
+export async function completeTask(
+  stateDir: string,
+  taskId: string,
+  outcome: { result: 'committed' | 'abandoned'; commit_sha?: string },
+  options: { shareGateHeld?: boolean } = {}
+) {
   if (outcome.result === 'committed' && (!outcome.commit_sha || !/^[a-f0-9]{40,64}$/i.test(outcome.commit_sha))) throw new SafeError('Committed completion requires a verified commit SHA.');
   if (outcome.result === 'abandoned' && outcome.commit_sha) throw new SafeError('Abandoned completion cannot include a commit SHA.');
   const { store, paths } = await coordinatorStore(stateDir, taskId, { allowCompleted: true });
   const record: Completion = { finished_at: new Date().toISOString(), result: outcome.result, ...(outcome.commit_sha ? { commit_sha: outcome.commit_sha } : {}) };
-  return coordinatorGate(store, taskId, async () => {
-    const existing = await store.read<Completion>(paths.completion, 'completion');
-    if (existing) {
-      if (existing.result !== record.result || (existing.commit_sha ?? null) !== (record.commit_sha ?? null)) throw new SafeError(`Task ${taskId} is already completed with a different outcome.`);
-      return existing;
-    }
-    const writer = await taskWriterLockStatus(stateDir, taskId);
-    if (writer.state !== 'absent') {
-      const owner = writer.state === 'live' ? `live in process ${writer.pid}` : `stale from exited process ${writer.pid}`;
-      throw new SafeError(`Task ${taskId} checkout writer lock is ${owner}; completion was not published. Recover/clear the task's writer lock explicitly before completion.`);
-    }
-    if (!(await store.create(paths.completion, 'completion', record))) throw new StateError(`Task ${taskId} completion changed concurrently; retry after inspection.`);
-    return record;
-  });
+  return withLifecycleShare(stateDir, taskId, !!options.shareGateHeld, () =>
+    coordinatorGate(store, taskId, async () => {
+      const { assertReviewLifecycleAllowedUnderGate } = await import('./review-state.js');
+      await assertReviewLifecycleAllowedUnderGate(stateDir, taskId);
+      const existing = await store.read<Completion>(paths.completion, 'completion');
+      if (existing) {
+        if (existing.result !== record.result || (existing.commit_sha ?? null) !== (record.commit_sha ?? null)) throw new SafeError(`Task ${taskId} is already completed with a different outcome.`);
+        return existing;
+      }
+      const writer = await taskWriterLockStatus(stateDir, taskId);
+      if (writer.state !== 'absent') {
+        const owner = writer.state === 'live' ? `live in process ${writer.pid}` : `stale from exited process ${writer.pid}`;
+        throw new SafeError(`Task ${taskId} checkout writer lock is ${owner}; completion was not published. Recover/clear the task's writer lock explicitly before completion.`);
+      }
+      if (!(await store.create(paths.completion, 'completion', record))) throw new StateError(`Task ${taskId} completion changed concurrently; retry after inspection.`);
+      return record;
+    })
+  );
 }
 
 export async function taskWriterLockStatus(stateDir: string, taskId: string, options: { readOnly?: boolean } = {}) {

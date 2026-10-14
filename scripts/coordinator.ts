@@ -1,6 +1,15 @@
 import { parseArgs } from 'node:util';
 import { coordinatorMigrateLegacy, coordinatorStatus, formatCoordinatorStatusText } from '../src/coordinator.js';
 import { garbageCollect } from '../src/gc.js';
+import { readRegularFile } from '../src/bounded-file.js';
+import { CHATGPT_RUN_MAX_PROMPT_BYTES } from '../src/chatgpt-run.js';
+import {
+  closeReviewParticipant,
+  prepareOrJoinReview,
+  reconcileReviewParticipant,
+  recoverReviewParticipant,
+  reviewShareStatus
+} from '../src/review-share.js';
 import {
   bindRegisteredTask,
   configureMultiRepoService,
@@ -20,12 +29,66 @@ import {
   revokeGrant,
   revokeWorkspace,
   setRegisteredTaskPhase,
-  setRepositoryEnabled
+  setRepositoryEnabled,
+  setRepositorySurfacePolicy
 } from '../src/multirepo-state.js';
 import { brokerServiceStatus, installOrReloadBroker, stopBrokerService } from '../src/service-control.js';
 import { defaultStateDir } from '../src/task-state.js';
 import { recoverTaskStaleLocks, taskStatus } from '../src/task.js';
 import { RELEASE_VERSION } from '../src/version.js';
+
+const HELP = `Repo MCP coordinator
+
+Usage:
+  coord --help
+  coord status [--state-dir PATH] [--json]
+  coord gc [--state-dir PATH] [--dry-run|--apply] [--json]
+    [--auth-retention-hours N] [--capture-retention-hours N]
+    [--task-retention-days N] [--max-records N]
+
+Service:
+  coord service configure [--state-dir PATH] --port PORT
+  coord service start [--state-dir PATH] [--port PORT]
+  coord service status [--state-dir PATH]
+  coord service stop [--state-dir PATH]
+  coord service recover-stale-control [--state-dir PATH]
+  coord service migrate-legacy-plist [--state-dir PATH] [--use-active-task]
+
+Repository:
+  coord repository add [--state-dir PATH] --repository ID [--name NAME] --repo PATH --policy PATH
+  coord repository list [--state-dir PATH]
+  coord repository resolve [--state-dir PATH] --repo PATH
+  coord repository enable|disable [--state-dir PATH] --repository ID
+  coord repository surface-policy [--state-dir PATH] --repository ID --mode default|chat-only
+  coord repository remove [--state-dir PATH] --repository ID
+
+Task:
+  coord task bind [--state-dir PATH] --repository ID --task ID [--allow-detached]
+  coord task status [--state-dir PATH] --task ID
+  coord task phase [--state-dir PATH] --task ID --phase coding|review
+  coord task rebind [--state-dir PATH] --task ID [--allow-detached]
+  coord task recover-stale [--state-dir PATH] --task ID
+  coord task finish [--state-dir PATH] --task ID
+
+Workspace:
+  coord workspace grant [--state-dir PATH] --task ID [--ttl-seconds N]
+  coord workspace revoke [--state-dir PATH] (--workspace ID|--grant ID)
+  coord workspace recover-stale [--state-dir PATH] --workspace ID
+
+Review:
+  coord review prepare-or-join [--state-dir PATH] --repository ID [--task ID]
+    --coordinator codex|claude --profile review|review-critical --surface chat
+    --session-id ID --workspace-request-id ID --prompt-file PATH
+    [--base-ref REF] [--scope-prefix PREFIX] [--ttl-seconds N]
+  coord review reconcile [--state-dir PATH] --task ID --participant ID
+  coord review status [--state-dir PATH] --task ID
+  coord review close [--state-dir PATH] --task ID --participant ID --request-id ID
+  coord review recover-participant [--state-dir PATH] --task ID --participant ID
+
+Migration:
+  coord migration active-service [--state-dir PATH] --repository ID [--name NAME]
+  coord migration rollback-active-service [--state-dir PATH]
+`;
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -37,8 +100,20 @@ const { positionals, values } = parseArgs({
     policy: { type: 'string' },
     port: { type: 'string' },
     phase: { type: 'string' },
+    mode: { type: 'string' },
+    help: { type: 'boolean' },
     workspace: { type: 'string' },
     grant: { type: 'string' },
+    coordinator: { type: 'string' },
+    profile: { type: 'string' },
+    surface: { type: 'string' },
+    'session-id': { type: 'string' },
+    'workspace-request-id': { type: 'string' },
+    'prompt-file': { type: 'string' },
+    'base-ref': { type: 'string' },
+    'scope-prefix': { type: 'string' },
+    participant: { type: 'string' },
+    'request-id': { type: 'string' },
     'ttl-seconds': { type: 'string' },
     'state-dir': { type: 'string' },
     'allow-detached': { type: 'boolean' },
@@ -75,6 +150,12 @@ const asTtlMs = () => {
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) throw new Error('--ttl-seconds must be an integer from 1 to 3600.');
   return seconds * 1000;
 };
+const asReviewTtlSeconds = () => {
+  if (values['ttl-seconds'] === undefined) return undefined;
+  const seconds = Number(values['ttl-seconds']);
+  if (!Number.isInteger(seconds) || seconds < 60 || seconds > 3600) throw new Error('review --ttl-seconds must be an integer from 60 to 3600.');
+  return seconds;
+};
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
 const assertOnly = (...allowed: string[]) => {
   const allow = new Set(allowed);
@@ -84,7 +165,11 @@ const assertOnly = (...allowed: string[]) => {
 };
 
 try {
-  if (positionals.length === 1 && area === 'status') {
+  if (values.help) {
+    if (positionals.length !== 0) throw new Error('Use coord --help without a command.');
+    assertOnly('help');
+    process.stdout.write(HELP);
+  } else if (positionals.length === 1 && area === 'status') {
     assertOnly('state-dir', 'json');
     const status = await coordinatorStatus({ stateDir });
     console.log(values.json ? JSON.stringify(status, null, 2) : formatCoordinatorStatusText(status));
@@ -102,7 +187,7 @@ try {
     console.log(values.json ? JSON.stringify(summary) : JSON.stringify(summary, null, 2));
     if (!summary.complete) process.exitCode = 2;
   } else if (positionals.length !== 2) {
-    throw new Error('Use: coord <service|repository|task|workspace|migration> <command>. The pre-0.2 single-active CLI no longer selects production repository scope; only read-only `coord status` remains as a compatibility alias.');
+    throw new Error('Use: coord <service|repository|task|workspace|review|migration> <command>. The pre-0.2 single-active CLI no longer selects production repository scope; only read-only `coord status` remains as a compatibility alias.');
   } else if (area === 'service') {
     if (command === 'configure') {
       assertOnly('state-dir', 'port');
@@ -153,11 +238,21 @@ try {
       assertOnly('state-dir', 'repository');
       if (!values.repository) throw new Error(`repository ${command} requires --repository.`);
       print(await setRepositoryEnabled({ stateDir, repositoryId: values.repository, enabled: command === 'enable' }));
+    } else if (command === 'surface-policy') {
+      assertOnly('state-dir', 'repository', 'mode');
+      if (!values.repository || (values.mode !== 'default' && values.mode !== 'chat-only')) {
+        throw new Error('repository surface-policy requires --repository and --mode default|chat-only.');
+      }
+      print(await setRepositorySurfacePolicy({
+        stateDir,
+        repositoryId: values.repository,
+        mode: values.mode
+      }));
     } else if (command === 'remove') {
       assertOnly('state-dir', 'repository');
       if (!values.repository) throw new Error('repository remove requires --repository.');
       print(await removeRepository({ stateDir, repositoryId: values.repository }));
-    } else throw new Error('repository command must be add, list, resolve, enable, disable or remove.');
+    } else throw new Error('repository command must be add, list, resolve, enable, disable, surface-policy or remove.');
   } else if (area === 'task') {
     if (command === 'bind') {
       assertOnly('state-dir', 'repository', 'task', 'allow-detached');
@@ -204,6 +299,53 @@ try {
       if (!values.workspace) throw new Error('workspace recover-stale requires --workspace.');
       print(await recoverWorkspaceAdmissionLock({ stateDir, workspaceId: values.workspace }));
     } else throw new Error('workspace command must be grant, revoke or recover-stale.');
+  } else if (area === 'review') {
+    if (command === 'prepare-or-join') {
+      assertOnly(
+        'state-dir', 'repository', 'task', 'coordinator', 'profile', 'surface',
+        'session-id', 'workspace-request-id', 'prompt-file', 'base-ref', 'scope-prefix', 'ttl-seconds'
+      );
+      if (!values.repository ||
+          (values.coordinator !== 'codex' && values.coordinator !== 'claude') ||
+          (values.profile !== 'review' && values.profile !== 'review-critical') ||
+          values.surface !== 'chat' ||
+          !values['session-id'] || !values['workspace-request-id'] || !values['prompt-file']) {
+        throw new Error('review prepare-or-join requires --repository, --coordinator codex|claude, --profile review|review-critical, --surface chat, --session-id, --workspace-request-id and --prompt-file.');
+      }
+      const prompt = await readRegularFile(values['prompt-file'], CHATGPT_RUN_MAX_PROMPT_BYTES, 'Review prompt');
+      print(await prepareOrJoinReview({
+        stateDir,
+        repositoryId: values.repository,
+        taskId: values.task,
+        coordinator: values.coordinator,
+        profile: values.profile,
+        surface: 'chat',
+        sessionId: values['session-id'],
+        workspaceRequestId: values['workspace-request-id'],
+        prompt,
+        baseRef: values['base-ref'],
+        scopePrefix: values['scope-prefix'],
+        ttlSeconds: asReviewTtlSeconds()
+      }));
+    } else if (command === 'reconcile') {
+      assertOnly('state-dir', 'task', 'participant');
+      if (!values.task || !values.participant) throw new Error('review reconcile requires --task and --participant; it does not accept a workspace ID.');
+      print(await reconcileReviewParticipant({ stateDir, taskId: values.task, participantId: values.participant }));
+    } else if (command === 'status') {
+      assertOnly('state-dir', 'task');
+      if (!values.task) throw new Error('review status requires --task.');
+      print(await reviewShareStatus({ stateDir, taskId: values.task }));
+    } else if (command === 'close') {
+      assertOnly('state-dir', 'task', 'participant', 'request-id');
+      if (!values.task || !values.participant || !values['request-id']) throw new Error('review close requires --task, --participant and --request-id.');
+      print(await closeReviewParticipant({
+        stateDir, taskId: values.task, participantId: values.participant, requestId: values['request-id']
+      }));
+    } else if (command === 'recover-participant') {
+      assertOnly('state-dir', 'task', 'participant');
+      if (!values.task || !values.participant) throw new Error('review recover-participant requires --task and --participant.');
+      print(await recoverReviewParticipant({ stateDir, taskId: values.task, participantId: values.participant }));
+    } else throw new Error('review command must be prepare-or-join, reconcile, status, close or recover-participant.');
   } else if (area === 'migration') {
     if (command === 'active-service') {
       assertOnly('state-dir', 'repository', 'name');
@@ -214,7 +356,7 @@ try {
       print(await rollbackActiveServiceCatalogMigration({ stateDir }));
     } else throw new Error('migration command must be active-service or rollback-active-service.');
   } else {
-    throw new Error('Area must be service, repository, task, workspace or migration.');
+    throw new Error('Area must be service, repository, task, workspace, review or migration.');
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Coordinator operation failed.');

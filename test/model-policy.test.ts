@@ -379,6 +379,145 @@ test('sanitized Chat fixture represents missing model-family evidence honestly a
     modelLabel: 'GPT-5.6 Sol'
   });
   assert.equal((await verifyModelSelection(proven, provenReceipt, { stateDir, now: VERIFY_NOW })).ok, true);
+
+  const versioned = await contract(stateDir, 'review', 'chat');
+  const versionedReceipt = await trustedEvidence(stateDir, versioned, {
+    controlLabel: '5.6 Extra High',
+    modelLabel: 'GPT-5.6 Sol'
+  });
+  assert.equal(versionedReceipt.observed_target_label, 'Extra High');
+  assert.equal((await verifyModelSelection(versioned, versionedReceipt, { stateDir, now: VERIFY_NOW })).ok, true);
+
+  // Stage 1 contract inventory: VERSION now permits a single numeric component,
+  // so this former "unsupported target" case is specifically a picker/control version mismatch.
+  const versionMismatch = await contract(stateDir, 'review', 'chat');
+  await expectCode((async () => {
+    const evidence = await trustedEvidence(stateDir, versionMismatch, {
+      controlLabel: '6 Extra High',
+      modelLabel: 'GPT-5.6 Sol'
+    });
+    return verifyModelSelection(versionMismatch, evidence, { stateDir, now: VERIFY_NOW });
+  })(), 'MODEL_VERSION_MISMATCH');
+});
+
+test('Chat accepts dynamic one-to-three component Sol versions and preserves versioned labels through validation', async t => {
+  const cases: Array<{
+    name: string;
+    profile: ModelProfile;
+    modelLabel: string;
+    controlLabel: string;
+  }> = [
+    { name: 'one-component Sol', profile: 'review', modelLabel: 'GPT-6 Sol', controlLabel: '6 Extra High' },
+    { name: 'one-component Sol Pro', profile: 'review-critical', modelLabel: 'GPT-6 Sol Pro', controlLabel: '6 Pro' },
+    { name: 'future two-component Sol', profile: 'review', modelLabel: 'GPT-6.2 Sol', controlLabel: '6.2 Extra High' },
+    { name: 'three-component Sol', profile: 'review', modelLabel: 'GPT-5.6.1 Sol', controlLabel: '5.6.1 Extra High' },
+    { name: 'maximum component widths', profile: 'review', modelLabel: 'GPT-123.123.123 Sol', controlLabel: '123.123.123 Extra High' },
+    { name: 'bare picker with versioned control', profile: 'review', modelLabel: 'Sol', controlLabel: '6 Extra High' },
+    { name: 'versioned picker with bare control', profile: 'review', modelLabel: 'GPT-6 Sol', controlLabel: 'Extra High' }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async st => {
+      const stateDir = await testState(st);
+      const c = await contract(stateDir, item.profile, 'chat');
+      const receipt = await trustedEvidence(stateDir, c, {
+        controlLabel: item.controlLabel,
+        modelLabel: item.modelLabel
+      });
+      assert.equal(receipt.observed_model_label, item.modelLabel);
+      assert.equal(receipt.observed_control_label, item.controlLabel);
+      assert.equal((await verifyModelSelection(c, receipt, { stateDir, now: VERIFY_NOW })).ok, true);
+    });
+  }
+});
+
+test('Chat enforces picker/control version agreement after parsing both labels', async t => {
+  const cases = [
+    { name: 'Sol mismatch', profile: 'review' as const, modelLabel: 'GPT-5.6 Sol', controlLabel: '6.1 Extra High' },
+    { name: 'Sol Pro mismatch', profile: 'review-critical' as const, modelLabel: 'GPT-5.6 Sol Pro', controlLabel: '6.1 Pro' },
+    { name: 'one-vs-two component mismatch', profile: 'review' as const, modelLabel: 'GPT-6 Sol', controlLabel: '6.1 Extra High' }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async st => {
+      const stateDir = await testState(st);
+      const c = await contract(stateDir, item.profile, 'chat');
+      await expectCode((async () => {
+        const evidence = await trustedEvidence(stateDir, c, {
+          controlLabel: item.controlLabel,
+          modelLabel: item.modelLabel
+        });
+        return verifyModelSelection(c, evidence, { stateDir, now: VERIFY_NOW });
+      })(), 'MODEL_VERSION_MISMATCH');
+    });
+  }
+});
+
+test('Chat VERSION grammar is strict while picker model evidence remains mandatory', async t => {
+  const invalidModels = [
+    'GPT-06 Sol',
+    'GPT-6.02 Sol',
+    'GPT-1234 Sol',
+    'GPT-6.1.2.3 Sol',
+    'GPT-123.123.1234 Sol',
+    'GPT-+6 Sol',
+    'GPT-６ Sol',
+    'GPT-6 Astra',
+    'GPT-5.6\nSol'
+  ];
+  for (const modelLabel of invalidModels) {
+    await t.test(`invalid picker ${modelLabel}`, async st => {
+      const stateDir = await testState(st);
+      const c = await contract(stateDir, 'review', 'chat');
+      await expectCode(
+        trustedEvidence(stateDir, c, { controlLabel: 'Extra High', modelLabel }),
+        'UNSUPPORTED_MODEL_LABEL'
+      );
+    });
+  }
+
+  const invalidControls = [
+    'XHigh',
+    '6 XHigh',
+    '06 Extra High',
+    '6.02 Extra High',
+    '1234 Extra High',
+    '6.1.2.3 Extra High',
+    '123.123.1234 Extra High',
+    '+6 Extra High',
+    '６ Extra High',
+    'Light',
+    'Très élevé',
+    '5.6\nExtra High'
+  ];
+  for (const controlLabel of invalidControls) {
+    await t.test(`invalid control ${controlLabel}`, async st => {
+      const stateDir = await testState(st);
+      const c = await contract(stateDir, 'review', 'chat');
+      await expectCode(
+        trustedEvidence(stateDir, c, { controlLabel, modelLabel: 'Sol' }),
+        'UNSUPPORTED_TARGET_LABEL'
+      );
+    });
+  }
+
+  await t.test('plain GPT-6 is not Sol model proof', async st => {
+    const stateDir = await testState(st);
+    const c = await contract(stateDir, 'review', 'chat');
+    await expectCode(
+      trustedEvidence(stateDir, c, { controlLabel: '6 Extra High', modelLabel: 'GPT-6' }),
+      'UNSUPPORTED_MODEL_LABEL'
+    );
+  });
+
+  await t.test('versioned control without picker model proof remains MODEL_UNPROVEN', async st => {
+    const stateDir = await testState(st);
+    const c = await contract(stateDir, 'review', 'chat');
+    await expectCode((async () => {
+      const evidence = await trustedEvidence(stateDir, c, { controlLabel: '6 Extra High' });
+      return verifyModelSelection(c, evidence, { stateDir, now: VERIFY_NOW });
+    })(), 'MODEL_UNPROVEN');
+  });
 });
 
 test('sanitized Work fixtures allowlist versioned Sol, reject Astra, and never promote Light', async t => {
@@ -390,6 +529,15 @@ test('sanitized Work fixtures allowlist versioned Sol, reject Astra, and never p
   assert.equal(reviewReceipt.observed_model_label, 'GPT-6.1 Sol');
   assert.equal(reviewReceipt.observed_target_label, 'Extra High');
   assert.equal((await verifyModelSelection(review, reviewReceipt, { stateDir, now: VERIFY_NOW })).ok, true);
+
+  const legacyXHigh = await contract(stateDir, 'review', 'work');
+  const legacyXHighReceipt = await trustedEvidence(stateDir, legacyXHigh, {
+    controlLabel: 'GPT-6.1 Sol XHigh'
+  });
+  assert.equal(legacyXHighReceipt.observed_target_label, 'Extra High');
+  assert.equal((await verifyModelSelection(legacyXHigh, legacyXHighReceipt, {
+    stateDir, now: VERIFY_NOW
+  })).ok, true);
 
   const code = await contract(stateDir, 'code', 'work');
   const codeReceipt = await trustedEvidence(stateDir, code, { controlLabel: 'GPT-5.6 Sol High' });

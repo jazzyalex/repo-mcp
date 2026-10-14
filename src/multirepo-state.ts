@@ -15,7 +15,7 @@ const AUTH_PATH = 'control/multirepo-auth.json';
 const AUTH_USED_PATH = 'control/multirepo-auth-used.json';
 const TOKEN_KEY_PATH = 'control/workspace-token-key.json';
 const CONTROL_LOCK = 'multirepo-control-v1';
-const WORKSPACE_TTL_MS = 8 * 60 * 60_000;
+export const WORKSPACE_TTL_MS = 8 * 60 * 60_000;
 const GRANT_TTL_MS = 10 * 60_000;
 const WORKSPACE_DRAIN_WAIT_MS = 60_000;
 const MAX_AUTH_RECORDS = 4096;
@@ -26,9 +26,12 @@ const HEX64 = /^[a-f0-9]{64}$/;
 export type WorkspaceMode = 'inspect' | 'code' | 'review';
 export type WorkspaceCapability = 'read' | 'write' | 'check';
 
+export type RepositorySurfacePolicy = 'default' | 'chat-only';
+
 export type RepositoryRegistration = {
   repository_id: string;
   name: string;
+  surface_policy: RepositorySurfacePolicy;
   root: string;
   root_digest: string;
   git_dir: string;
@@ -172,12 +175,17 @@ function parseRepository(value: unknown, key: string): RepositoryRegistration {
   const root_digest = stringField(v.root_digest, 'root_digest');
   const policy_digest = stringField(v.policy_digest, 'policy_digest');
   const name = stringField(v.name, 'repository name');
+  const surface_policy = v.surface_policy === undefined ? 'default' : v.surface_policy;
+  if (surface_policy !== 'default' && surface_policy !== 'chat-only') {
+    throw new SafeError('Corrupt repository surface policy; expected default or chat-only.');
+  }
   if (!name.trim()) throw new SafeError('Corrupt repository name; it must contain at least one non-whitespace character.');
   if (!HEX64.test(root_digest) || !HEX64.test(policy_digest)) throw new SafeError('Corrupt repository digest; inspect operator state before continuing.');
   if (!validDate(v.created_at) || !validDate(v.updated_at)) throw new SafeError('Corrupt repository timestamps; inspect operator state before continuing.');
   return {
     repository_id,
     name,
+    surface_policy,
     root: absoluteField(v.root, 'repository root'),
     root_digest,
     git_dir: absoluteField(v.git_dir, 'git_dir'),
@@ -454,7 +462,14 @@ async function withRepositoryTaskDrain<T>(
     }
     return fn(store, catalog);
   }, forbiddenRoots);
-  return active ? withTaskCoordinatorGate(stateDir, active.task_id, apply) : apply();
+  if (!active) return apply();
+  const { withTaskShareGate } = await import('./review-state.js');
+  return withTaskShareGate(
+    stateDir,
+    active.task_id,
+    () => withTaskCoordinatorGate(stateDir, active.task_id, apply),
+    purpose
+  );
 }
 const admissionKey = (workspaceId: string) => `workspace-${workspaceId}-admission`;
 
@@ -465,7 +480,12 @@ export type AuthorizationGcResult = {
   skipped_workspaces: string[];
 };
 
-function authorizationGcPlan(auth: AuthState, cutoffMs: number, allowedWorkspaces?: Set<string>) {
+function authorizationGcPlan(
+  auth: AuthState,
+  cutoffMs: number,
+  allowedWorkspaces?: Set<string>,
+  preserveWorkspaces: Set<string> = new Set()
+) {
   const requestsByWorkspace = new Map<string, RequestLedgerEntry[]>();
   for (const request of Object.values(auth.requests)) {
     const list = requestsByWorkspace.get(request.workspace_id) ?? [];
@@ -474,6 +494,7 @@ function authorizationGcPlan(auth: AuthState, cutoffMs: number, allowedWorkspace
   }
   const workspaces = Object.values(auth.workspaces)
     .filter(workspace => {
+      if (preserveWorkspaces.has(workspace.workspace_id)) return false;
       if (allowedWorkspaces && !allowedWorkspaces.has(workspace.workspace_id)) return false;
       const last = Math.max(
         Date.parse(workspace.expires_at),
@@ -505,10 +526,11 @@ export async function collectExpiredAuthorization(options: {
   stateDir: string;
   cutoffMs: number;
   apply: boolean;
+  preserveWorkspaceIds?: Set<string>;
 }): Promise<AuthorizationGcResult> {
   const inspected = await StateStore.inspect(options.stateDir);
   if (!inspected) return { workspaces: 0, grants: 0, requests: 0, skipped_workspaces: [] };
-  const snapshot = authorizationGcPlan(await readAuthStore(inspected), options.cutoffMs);
+  const snapshot = authorizationGcPlan(await readAuthStore(inspected), options.cutoffMs, undefined, options.preserveWorkspaceIds);
   if (!options.apply) {
     return {
       workspaces: snapshot.workspaces.length,
@@ -534,7 +556,7 @@ export async function collectExpiredAuthorization(options: {
   try {
     return await withControlLock(options.stateDir, 'garbage collect authorization state', async controlStore => {
       const auth = await readAuthStore(controlStore);
-      const plan = authorizationGcPlan(auth, options.cutoffMs, allowed);
+      const plan = authorizationGcPlan(auth, options.cutoffMs, allowed, options.preserveWorkspaceIds);
       if (plan.workspaces.length || plan.grants.length || plan.requests.length) {
         if (authHasHistory(auth)) await ensureAuthUsed(controlStore);
         for (const id of plan.workspaces) delete auth.workspaces[id];
@@ -572,6 +594,8 @@ function knownControlPurpose(purpose: string) {
   }
   const open = /^open (?:inspect|code|review) workspace for ([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.exec(purpose);
   if (open) return true;
+  if (/^read review workspace outcome [A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(purpose)) return true;
+  if (/^set repository [A-Za-z0-9][A-Za-z0-9._-]{0,63} surface policy (?:default|chat-only)$/.test(purpose)) return true;
   const workspace = /^(?:close|revoke) workspace ([a-f0-9]{32})$/.exec(purpose);
   if (workspace) return true;
   return /^revoke grant [a-f0-9]{32}$/.test(purpose);
@@ -826,6 +850,7 @@ export async function registerRepository(options: { stateDir?: string; repositor
     const repository: RepositoryRegistration = {
       repository_id: repositoryId,
       name: desiredName,
+      surface_policy: existing?.surface_policy ?? 'default',
       root,
       root_digest: rootDigest(root),
       git_dir: identity.git_dir,
@@ -855,6 +880,43 @@ export async function setRepositoryEnabled(options: { stateDir?: string; reposit
     if (repository.enabled === options.enabled) return { repository, catalog_revision: catalog.revision, unchanged: true };
     const next = { ...repository, enabled: options.enabled, registration_epoch: repository.registration_epoch + 1, updated_at: nowIso() };
     catalog = await writeCatalog(store, { ...catalog, repositories: { ...catalog.repositories, [repositoryId]: next } });
+    const active = activeRepositoryTask(catalog, repositoryId);
+    if (active) {
+      const { invalidateReviewShareUnderGate } = await import('./review-state.js');
+      await invalidateReviewShareUnderGate(stateDir, active.task_id, options.enabled ? 'repository-enabled-epoch-change' : 'repository-disabled');
+    }
+    return { repository: next, catalog_revision: catalog.revision, unchanged: false };
+  });
+}
+
+export async function setRepositorySurfacePolicy(options: {
+  stateDir?: string;
+  repositoryId: string;
+  mode: RepositorySurfacePolicy;
+}) {
+  const stateDir = options.stateDir ?? defaultStateDir();
+  const repositoryId = assertId(options.repositoryId, 'repository ID');
+  if (options.mode !== 'default' && options.mode !== 'chat-only') {
+    throw new SafeError('Repository surface policy mode must be default or chat-only.');
+  }
+  return withRepositoryTaskDrain(stateDir, repositoryId, `set repository ${repositoryId} surface policy ${options.mode}`, async (store, catalog) => {
+    const repository = catalog.repositories[repositoryId];
+    if (!repository) throw new SafeError(`Repository ${repositoryId} is not registered.`);
+    if (repository.surface_policy === options.mode) {
+      return { repository, catalog_revision: catalog.revision, unchanged: true };
+    }
+    const next: RepositoryRegistration = {
+      ...repository,
+      surface_policy: options.mode,
+      registration_epoch: repository.registration_epoch + 1,
+      updated_at: nowIso()
+    };
+    catalog = await writeCatalog(store, { ...catalog, repositories: { ...catalog.repositories, [repositoryId]: next } });
+    const active = activeRepositoryTask(catalog, repositoryId);
+    if (active) {
+      const { invalidateReviewShareUnderGate } = await import('./review-state.js');
+      await invalidateReviewShareUnderGate(stateDir, active.task_id, 'surface-policy-authorization-change');
+    }
     return { repository: next, catalog_revision: catalog.revision, unchanged: false };
   });
 }
@@ -879,7 +941,7 @@ export async function bindRegisteredTask(options: { stateDir?: string; repositor
   const stateDir = options.stateDir ?? defaultStateDir();
   const repositoryId = assertId(options.repositoryId, 'repository ID');
   const taskId = assertId(options.taskId, 'task ID');
-  return withControlLock(stateDir, `bind task ${taskId}`, async store => {
+  const bind = () => withControlLock(stateDir, `bind task ${taskId}`, async store => {
     let catalog = await readCatalogStore(store);
     const repository = catalog.repositories[repositoryId];
     if (!repository || !repository.enabled) throw new SafeError(`Repository ${repositoryId} is not registered and enabled.`);
@@ -921,6 +983,8 @@ export async function bindRegisteredTask(options: { stateDir?: string; repositor
     catalog = await writeCatalog(store, { ...catalog, tasks: { ...catalog.tasks, [taskId]: task } });
     return { task, catalog_revision: catalog.revision, unchanged: false };
   });
+  const { withRepositoryReviewSelectionGate } = await import('./review-state.js');
+  return withRepositoryReviewSelectionGate(stateDir, repositoryId, bind);
 }
 
 export async function setRegisteredTaskPhase(options: { stateDir?: string; taskId: string; phase: Phase }) {
@@ -931,10 +995,11 @@ export async function setRegisteredTaskPhase(options: { stateDir?: string; taskI
   if (!beforeTask) throw new SafeError(`Task ${taskId} is not registered in the multi-repository catalog.`);
   if (beforeTask.completed) throw new SafeError(`Task ${taskId} is already draining/completed and cannot change phase.`);
 
-  // The task gate drains mutations/checks without holding the service-wide catalog lock.
-  await setTaskPhase(stateDir, taskId, options.phase);
+  const { withTaskShareGate } = await import('./review-state.js');
+  return withTaskShareGate(stateDir, taskId, async () => {
+    await setTaskPhase(stateDir, taskId, options.phase, { shareGateHeld: true });
 
-  return withControlLock(stateDir, `publish task ${taskId} phase ${options.phase}`, async store => {
+    return withControlLock(stateDir, `publish task ${taskId} phase ${options.phase}`, async store => {
     let catalog = await readCatalogStore(store);
     const registered = catalog.tasks[taskId];
     if (!registered) throw new SafeError(`Task ${taskId} is no longer registered in the multi-repository catalog.`);
@@ -958,7 +1023,8 @@ export async function setRegisteredTaskPhase(options: { stateDir?: string; taskI
     if (unchanged) return { task: registered, catalog_revision: catalog.revision, unchanged: true };
     catalog = await writeCatalog(store, { ...catalog, tasks: { ...catalog.tasks, [taskId]: task } });
     return { task, catalog_revision: catalog.revision, unchanged: false };
-  });
+    });
+  }, 'phase task ' + taskId);
 }
 
 export async function rebindRegisteredTask(options: { stateDir?: string; taskId: string; allowDetached?: boolean }) {
@@ -972,14 +1038,15 @@ export async function rebindRegisteredTask(options: { stateDir?: string; taskId:
   if (!beforeRepository || !beforeRepository.enabled) throw new SafeError('Registered repository is disabled or missing.');
   await verifyRepositoryLive(beforeRepository);
 
-  // Rebind owns the task gate itself. Publish the resulting epoch afterward so the
-  // service-wide catalog lock is never held while repository work drains.
-  await rebindTask(stateDir, taskId, beforeRepository.root, {
-    policyDigest: beforeRepository.policy_digest,
-    allowDetached: options.allowDetached
-  });
+  const { withTaskShareGate } = await import('./review-state.js');
+  return withTaskShareGate(stateDir, taskId, async () => {
+    await rebindTask(stateDir, taskId, beforeRepository.root, {
+      policyDigest: beforeRepository.policy_digest,
+      allowDetached: options.allowDetached,
+      shareGateHeld: true
+    });
 
-  return withControlLock(stateDir, `publish task ${taskId} rebind`, async store => {
+    return withControlLock(stateDir, `publish task ${taskId} rebind`, async store => {
     let catalog = await readCatalogStore(store);
     const registered = catalog.tasks[taskId];
     if (!registered || registered.repository_id !== beforeTask.repository_id) {
@@ -1003,52 +1070,57 @@ export async function rebindRegisteredTask(options: { stateDir?: string; taskId:
     };
     catalog = await writeCatalog(store, { ...catalog, tasks: { ...catalog.tasks, [taskId]: task } });
     return { task, catalog_revision: catalog.revision };
-  });
+    });
+  }, 'rebind task ' + taskId);
 }
 
 export async function finishRegisteredTask(options: { stateDir?: string; taskId: string; result: 'abandoned' | 'committed'; commitSha?: string }) {
   const stateDir = options.stateDir ?? defaultStateDir();
   const taskId = assertId(options.taskId, 'task ID');
   if (options.result === 'committed') throw new SafeError('Verified commit completion remains unavailable through the multi-repository coordinator; commit/push stay outside MCP.');
+  const { withTaskShareGate, assertReviewLifecycleAllowedUnderGate } = await import('./review-state.js');
 
-  const markDraining = () => withControlLock(stateDir, `drain task ${taskId}`, async store => {
-    let catalog = await readCatalogStore(store);
-    const registered = catalog.tasks[taskId];
-    if (!registered) throw new SafeError(`Task ${taskId} is not registered in the multi-repository catalog.`);
-    if (registered.completed) return { task: registered, catalog_revision: catalog.revision };
-    const task: TaskRegistration = { ...registered, completed: true, updated_at: nowIso() };
-    catalog = await writeCatalog(store, { ...catalog, tasks: { ...catalog.tasks, [taskId]: task } });
-    return { task, catalog_revision: catalog.revision };
-  });
+  return withTaskShareGate(stateDir, taskId, async () => {
+    await assertReviewLifecycleAllowedUnderGate(stateDir, taskId);
+    const markDraining = () => withControlLock(stateDir, `drain task ${taskId}`, async store => {
+      let catalog = await readCatalogStore(store);
+      const registered = catalog.tasks[taskId];
+      if (!registered) throw new SafeError(`Task ${taskId} is not registered in the multi-repository catalog.`);
+      if (registered.completed) return { task: registered, catalog_revision: catalog.revision };
+      const task: TaskRegistration = { ...registered, completed: true, updated_at: nowIso() };
+      catalog = await writeCatalog(store, { ...catalog, tasks: { ...catalog.tasks, [taskId]: task } });
+      return { task, catalog_revision: catalog.revision };
+    });
 
-  // Completion authority is published only after every admitted mutation/check
-  // has drained. If another finisher already published the terminal marker, the
-  // task gate is no longer needed and the catalog is reconciled idempotently.
-  const liveBefore = await taskStatus(stateDir, taskId, { readOnly: true });
-  let draining;
-  if (liveBefore.completion) {
-    draining = await markDraining();
-  } else {
-    try {
-      draining = await withTaskCoordinatorGate(stateDir, taskId, markDraining);
-    } catch (error) {
-      const liveAfter = await taskStatus(stateDir, taskId, { readOnly: true });
-      if (!liveAfter.completion) throw error;
+    const liveBefore = await taskStatus(stateDir, taskId, { readOnly: true });
+    let draining;
+    if (liveBefore.completion) {
       draining = await markDraining();
+    } else {
+      try {
+        draining = await withTaskCoordinatorGate(stateDir, taskId, async () => {
+          await assertReviewLifecycleAllowedUnderGate(stateDir, taskId);
+          return markDraining();
+        });
+      } catch (error) {
+        const liveAfter = await taskStatus(stateDir, taskId, { readOnly: true });
+        if (!liveAfter.completion) throw error;
+        draining = await markDraining();
+      }
     }
-  }
 
-  let writer = await taskWriterLockStatus(stateDir, taskId);
-  for (let i = 0; writer.state === 'live' && i < 240; i++) {
-    await new Promise(resolve => setTimeout(resolve, 250));
-    writer = await taskWriterLockStatus(stateDir, taskId);
-  }
-  if (writer.state !== 'absent') {
-    const owner = writer.state === 'live' ? `live in process ${writer.pid}` : `stale from exited process ${writer.pid}`;
-    throw new SafeError(`Task ${taskId} is marked draining but its checkout writer lock is ${owner}; no completion was published. Let the permanent broker drain, or recover a stale lock explicitly, then retry finish.`);
-  }
-  const completion = await completeTask(stateDir, taskId, { result: 'abandoned' });
-  return { ...draining, completion };
+    let writer = await taskWriterLockStatus(stateDir, taskId);
+    for (let i = 0; writer.state === 'live' && i < 240; i++) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      writer = await taskWriterLockStatus(stateDir, taskId);
+    }
+    if (writer.state !== 'absent') {
+      const owner = writer.state === 'live' ? `live in process ${writer.pid}` : `stale from exited process ${writer.pid}`;
+      throw new SafeError(`Task ${taskId} is marked draining but its checkout writer lock is ${owner}; no completion was published. Let the permanent broker drain, or recover a stale lock explicitly, then retry finish.`);
+    }
+    const completion = await completeTask(stateDir, taskId, { result: 'abandoned' }, { shareGateHeld: true });
+    return { ...draining, completion };
+  }, 'finish task ' + taskId);
 }
 
 export async function listRegisteredRepositories(stateDir = defaultStateDir()) {
@@ -1058,6 +1130,7 @@ export async function listRegisteredRepositories(stateDir = defaultStateDir()) {
     repositories: Object.values(catalog.repositories).map(repository => ({
       repository_id: repository.repository_id,
       name: repository.name,
+      surface_policy: repository.surface_policy,
       enabled: repository.enabled,
       registration_epoch: repository.registration_epoch,
       policy_digest: repository.policy_digest,
@@ -1079,21 +1152,24 @@ export async function resolveRegisteredRepository(root: string, stateDir = defau
   const catalog = await readMultiRepoCatalog(stateDir);
   const repository = Object.values(catalog.repositories).find(candidate => candidate.root === canonicalRoot);
   if (!repository) return { catalog_revision: catalog.revision, repository: null };
+  const { publicReviewTaskSummary } = await import('./review-state.js');
   return {
     catalog_revision: catalog.revision,
     repository: {
       repository_id: repository.repository_id,
       name: repository.name,
+      surface_policy: repository.surface_policy,
       enabled: repository.enabled,
       registration_epoch: repository.registration_epoch,
       policy_digest: repository.policy_digest,
-      tasks: Object.values(catalog.tasks).filter(task => task.repository_id === repository.repository_id).map(task => ({
+      tasks: await Promise.all(Object.values(catalog.tasks).filter(task => task.repository_id === repository.repository_id).map(async task => ({
         task_id: task.task_id,
         phase: task.phase,
         binding_epoch: task.binding_epoch,
         phase_epoch: task.phase_epoch,
-        completed: task.completed
-      }))
+        completed: task.completed,
+        ...(await publicReviewTaskSummary(stateDir, repository, task))
+      })))
     }
   };
 }
@@ -1155,7 +1231,7 @@ export async function openWorkspace(options: {
   const taskId = assertId(options.taskId, 'task ID');
   const ttlMs = options.ttlMs ?? WORKSPACE_TTL_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 24 * 60 * 60_000) throw new SafeError('Workspace TTL must be between 1 minute and 24 hours.');
-  return withControlLock(stateDir, `open ${options.mode} workspace for ${taskId}`, async store => {
+  const open = () => withControlLock(stateDir, `open ${options.mode} workspace for ${taskId}`, async store => {
     const catalog = await readCatalogStore(store);
     const repository = catalog.repositories[repositoryId];
     const task = catalog.tasks[taskId];
@@ -1218,6 +1294,67 @@ export async function openWorkspace(options: {
     await writeAuth(store, auth);
     return { workspace_token: await workspaceToken(store, selection), selection, scope: scopeFor(selection, live), already_applied: false };
   });
+  const { withTaskShareGate } = await import('./review-state.js');
+  return withTaskShareGate(stateDir, taskId, open, 'open ' + options.mode + ' workspace ' + taskId);
+}
+
+export async function readWorkspaceOpenOutcome(options: {
+  stateDir: string;
+  requestId: string;
+  repositoryId: string;
+  taskId: string;
+  mode: 'review';
+  ttlMs: number;
+}) {
+  validateRequestId(options.requestId);
+  const repositoryId = assertId(options.repositoryId, 'repository ID');
+  const taskId = assertId(options.taskId, 'task ID');
+  if (!Number.isSafeInteger(options.ttlMs) || options.ttlMs < 60_000 || options.ttlMs > 24 * 60 * 60_000) {
+    throw new SafeError('Workspace TTL must be between 1 minute and 24 hours.');
+  }
+  return withControlLock(options.stateDir, 'read review workspace outcome ' + taskId, async store => {
+    const auth = await readAuthStore(store);
+    const key = requestKey('workspace_open', options.requestId);
+    const prior = auth.requests[key];
+    if (!prior) return null;
+    const digest = requestDigest('workspace_open', [repositoryId, taskId, options.mode, null, options.ttlMs]);
+    if (prior.operation !== 'workspace_open' || prior.args_digest !== digest) {
+      throw new SafeError('workspace_open request ledger entry does not match the expected review arguments.');
+    }
+    const selection = auth.workspaces[prior.workspace_id];
+    if (!selection) throw new SafeError('workspace_open request ledger points to a missing workspace selection.');
+    return { request: prior, selection };
+  });
+}
+
+export async function closeReviewWorkspaceUnderGate(options: {
+  stateDir: string;
+  workspaceId: string;
+  requestId: string;
+}) {
+  if (!HEX32.test(options.workspaceId)) throw new SafeError('Invalid workspace ID.');
+  validateRequestId(options.requestId);
+  const store = await StateStore.open(options.stateDir);
+  return withShortLock(store, admissionKey(options.workspaceId), () =>
+    withControlLock(options.stateDir, 'close workspace ' + options.workspaceId, async controlStore => {
+      const auth = await readAuthStore(controlStore);
+      const selection = auth.workspaces[options.workspaceId];
+      if (!selection || selection.mode !== 'review') throw new SafeError('Review workspace selection is unknown.');
+      const key = requestKey('workspace_close:' + selection.workspace_id, options.requestId);
+      const digest = requestDigest('workspace_close', [selection.workspace_id]);
+      const prior = auth.requests[key];
+      if (prior) {
+        if (prior.operation !== 'workspace_close' || prior.args_digest !== digest || prior.workspace_id !== selection.workspace_id) {
+          throw new SafeError('request_id was already used with different workspace arguments.');
+        }
+        return { workspace_id: selection.workspace_id, status: auth.workspaces[selection.workspace_id]?.status ?? selection.status, already_applied: true };
+      }
+      auth.workspaces[selection.workspace_id] = { ...selection, status: 'closed' };
+      auth.requests[key] = { operation: 'workspace_close', args_digest: digest, workspace_id: selection.workspace_id, at: nowIso() };
+      await writeAuth(controlStore, auth);
+      return { workspace_id: selection.workspace_id, status: 'closed' as const, already_applied: false };
+    }),
+  { waitMs: WORKSPACE_DRAIN_WAIT_MS, purpose: 'close workspace ' + options.workspaceId });
 }
 
 function scopeFor(selection: WorkspaceSelection, live: Awaited<ReturnType<typeof taskStatus>>) {
@@ -1294,17 +1431,27 @@ export async function revokeWorkspace(options: { stateDir?: string; workspaceId:
   const stateDir = options.stateDir ?? defaultStateDir();
   if (!HEX32.test(options.workspaceId)) throw new SafeError('Invalid workspace ID.');
   const store = await StateStore.open(stateDir);
-  return withShortLock(store, admissionKey(options.workspaceId), () =>
+  const initialAuth = await readAuthStore(store);
+  const initial = initialAuth.workspaces[options.workspaceId];
+  if (!initial) throw new SafeError('Workspace selection is unknown.');
+  const revoke = () => withShortLock(store, admissionKey(options.workspaceId), () =>
     withControlLock(stateDir, `revoke workspace ${options.workspaceId}`, async controlStore => {
       const auth = await readAuthStore(controlStore);
       const selection = auth.workspaces[options.workspaceId];
       if (!selection) throw new SafeError('Workspace selection is unknown.');
-      if (selection.status === 'revoked') return { workspace_id: selection.workspace_id, status: 'revoked', unchanged: true };
+      if (selection.status === 'revoked') return { workspace_id: selection.workspace_id, status: 'revoked' as const, unchanged: true };
       auth.workspaces[selection.workspace_id] = { ...selection, status: 'revoked' };
       await writeAuth(controlStore, auth);
-      return { workspace_id: selection.workspace_id, status: 'revoked', unchanged: false };
+      return { workspace_id: selection.workspace_id, status: 'revoked' as const, unchanged: false };
     }),
   { waitMs: WORKSPACE_DRAIN_WAIT_MS, purpose: `revoke workspace ${options.workspaceId}` });
+  if (initial.mode !== 'review') return revoke();
+  const { withTaskShareGate, invalidateReviewShareUnderGate } = await import('./review-state.js');
+  return withTaskShareGate(stateDir, initial.task_id, async () => {
+    const result = await revoke();
+    await invalidateReviewShareUnderGate(stateDir, initial.task_id, 'workspace-revoked', options.workspaceId);
+    return result;
+  }, 'revoke review workspace ' + options.workspaceId);
 }
 
 export async function revokeGrant(options: { stateDir?: string; grantId: string }) {
@@ -1415,6 +1562,7 @@ export async function migrateActiveServiceToCatalog(options: { stateDir?: string
     const repository: RepositoryRegistration = {
       repository_id: repositoryId,
       name: options.name ?? repositoryId,
+      surface_policy: 'default',
       root,
       root_digest: active.root_digest,
       git_dir: identity.git_dir,

@@ -529,6 +529,13 @@ test('RuntimeManager serializes first-use leasing, stale reconcile, and replacem
     const enabledAuth = await authorizeWorkspace(stateDir, enabled.workspace_token, 'read');
     await manager.use(enabledAuth, enabled.workspace_token, 'read', repo => repo.read('README.md'));
 
+    await assert.rejects(
+      rebindRegisteredTask({ stateDir, taskId: 'task' }),
+      /REVIEW_PROTECTED|protected.*workspace/i
+    );
+    await closeWorkspace({
+      stateDir, workspaceToken: enabled.workspace_token, requestId: 'runtime-enabled-close-before-rebind'
+    });
     await rebindRegisteredTask({ stateDir, taskId: 'task' });
     const rebound = await openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'inspect', requestId: 'runtime-rebound-open' });
     const reboundAuth = await authorizeWorkspace(stateDir, rebound.workspace_token, 'read');
@@ -616,11 +623,21 @@ test('broker reauthorizes mutations and checks inside the task gate after contro
     barrier = { capability: 'check', reached: deferred(), release: deferred(), used: false };
     const checking = call(client, 'run_tests', { workspace_token: resumed.data.workspace_token, suite: 'test/clamp.test.js' });
     await barrier.reached.promise;
+    await assert.rejects(
+      setRegisteredTaskPhase({ stateDir, taskId: 'task', phase: 'review' }),
+      /REVIEW_PROTECTED|protected.*workspace/i
+    );
+    // revokeWorkspace drains this same admitted workspace, so a synchronous revoke here would
+    // deadlock the intentionally paused check. Use the explicit repository security cutoff to
+    // retire its authorization epoch while admission is held, then phase-change normally.
+    await setRepositoryEnabled({ stateDir, repositoryId: 'repo', enabled: false });
+    await setRepositoryEnabled({ stateDir, repositoryId: 'repo', enabled: true });
     await setRegisteredTaskPhase({ stateDir, taskId: 'task', phase: 'review' });
     barrier.release.resolve();
     const checkResult = await checking;
     assert.equal(checkResult.error, true, String(checkResult.data));
     assert.match(String(checkResult.data), /stale|authorization changed|phase/i);
+    await revokeWorkspace({ stateDir, workspaceId: resumed.data.selection.workspace_id });
   } finally {
     barrier.release.resolve();
     await client.close();
@@ -756,12 +773,19 @@ test('multi-repository broker isolates workspaces, writers, cursors, requests an
     assert.equal(reuseA.error, true);
     assert.match(String(reuseA.data), /request_id.*different arguments/i);
 
+    await assert.rejects(
+      setRegisteredTaskPhase({ stateDir, taskId: 'task-a', phase: 'review' }),
+      /REVIEW_PROTECTED|protected.*workspace/i
+    );
+    await closeWorkspace({ stateDir, workspaceToken: inspectAToken, requestId: 'close-inspect-a-before-review' });
+    await closeWorkspace({ stateDir, workspaceToken: inspectA2Token, requestId: 'close-inspect-a-2-before-review' });
+    await closeWorkspace({ stateDir, workspaceToken: codeAToken, requestId: 'close-code-a-before-review' });
     await setRegisteredTaskPhase({ stateDir, taskId: 'task-a', phase: 'review' });
     const staleCode = await call(client, 'read', { workspace_token: codeAToken, path: 'README.md' });
     const staleInspect = await call(client, 'read', { workspace_token: inspectAToken, path: 'README.md' });
     assert.equal(staleCode.error, true);
     assert.equal(staleInspect.error, true);
-    assert.match(String(staleCode.data), /stale|authorization changed|phase/i);
+    assert.match(String(staleCode.data), /stale|authorization changed|phase|closed or revoked/i);
 
     const reviewA = await call(client, 'workspace_open', { repository_id: 'repo-a', task_id: 'task-a', mode: 'review', request_id: 'open-review-a' });
     assert.equal(reviewA.error, false, String(reviewA.data));
@@ -774,6 +798,13 @@ test('multi-repository broker isolates workspaces, writers, cursors, requests an
     assert.equal(reviewEdit.error, true);
     assert.match(String(reviewEdit.data), /does not grant write|write capability/i);
 
+    await assert.rejects(
+      setRegisteredTaskPhase({ stateDir, taskId: 'task-a', phase: 'coding' }),
+      /REVIEW_PROTECTED|protected.*workspace/i
+    );
+    await closeWorkspace({
+      stateDir, workspaceToken: reviewA.data.workspace_token, requestId: 'close-review-a-before-coding'
+    });
     await setRegisteredTaskPhase({ stateDir, taskId: 'task-a', phase: 'coding' });
     const oldCodeAfterResume = await call(client, 'read', { workspace_token: codeAToken, path: 'README.md' });
     const oldReviewAfterResume = await call(client, 'read', { workspace_token: reviewA.data.workspace_token, path: 'README.md' });

@@ -16,7 +16,7 @@ import {
 } from './model-policy.js';
 import { readMultiRepoCatalog } from './multirepo-state.js';
 import { StateStore, acquireLock, defaultStateDir, validateLockRecord, lockOwnerAlive, withShortLock, type LockRecord } from './task-state.js';
-import { taskStatus } from './task.js';
+import { taskStatus, withTaskCoordinatorGate } from './task.js';
 
 export const CHATGPT_RUN_SCHEMA_VERSION = 1 as const;
 export type ChatGptCoordinator = 'codex' | 'claude';
@@ -46,6 +46,9 @@ export type ChatGptRunRecord = {
   prompt_sha256: string;
   request_key: string;
   selection: ModelSelectionContract;
+  share_generation?: number;
+  participant_id?: string;
+  workspace_request_id?: string;
   created_at: string;
   updated_at: string;
   submitted_at?: string;
@@ -85,9 +88,12 @@ export type TrustedChatGptCompletionReceipt = TrustedChatGptRunReceipt & {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const HEX = /^[a-f0-9]{64}$/;
+const CONTROL = /[\u0000-\u001f\u007f]/u;
 const KIND = 'chatgpt-run-v1';
 const REQUEST_KIND = 'chatgpt-run-request-v1';
+const SURFACE_OVERRIDE_KIND = 'chatgpt-run-surface-override-v1';
 const RECEIPT_MAX_AGE_MS = 60_000;
 const STATES = new Set<ChatGptRunState>(['prepared', 'verification-pending', 'submission-reserved', 'submitted', 'completed', 'failed-pre-submit', 'uncertain']);
 const PROFILES = new Set<ModelProfile>(['code', 'code-hard', 'review', 'review-critical', 'brainstorm', 'plan', 'architecture']);
@@ -104,7 +110,8 @@ const RECORD_KEYS = new Set([
   'schema_version', 'run_id', 'coordinator', 'execution_surface', 'work_kind', 'profile', 'state',
   'repository_id', 'task_id', 'registration_epoch', 'binding_epoch', 'phase_epoch', 'policy_digest',
   'root_sha256', 'branch', 'head', 'requested_base_ref', 'resolved_base_commit', 'prompt_sha256', 'request_key',
-  'selection', 'created_at', 'updated_at', 'submitted_at', 'completed_at', 'output_sha256', 'outcome',
+  'selection', 'share_generation', 'participant_id', 'workspace_request_id',
+  'created_at', 'updated_at', 'submitted_at', 'completed_at', 'output_sha256', 'outcome',
   'failure_code', 'uncertain_from', 'model_verified_at',
   'submission_event_sha256', 'submission_observed_at', 'completion_event_sha256', 'completion_observed_at',
   'completion_submission_event_sha256',
@@ -119,6 +126,7 @@ export const CHATGPT_RUN_MAX_PROMPT_BYTES = 256 * 1024;
 export const CHATGPT_RUN_MAX_OUTPUT_BYTES = 1024 * 1024;
 const recordPath = (runId: string) => `chatgpt-runs/${runId}.json`;
 const requestPath = (requestKey: string) => `chatgpt-run-requests/${requestKey}.json`;
+const surfaceOverridePath = (runId: string) => `chatgpt-run-authorizations/${runId}.json`;
 const lockKey = (runId: string) => `chatgpt-run-${runId}`;
 
 function assertId(value: string, name: string) {
@@ -130,6 +138,13 @@ function assertRunId(value: string) {
 function assertPrompt(prompt: string) {
   if (!prompt.trim()) throw new SafeError('ChatGPT run prompt must not be empty.');
   if (Buffer.byteLength(prompt, 'utf8') > CHATGPT_RUN_MAX_PROMPT_BYTES) throw new SafeError('ChatGPT run prompt exceeds 256 KiB.');
+}
+function surfaceOverrideReason(value: string | undefined) {
+  if (value === undefined) return undefined;
+  if (CONTROL.test(value) || value.length > 512 || !value.trim()) {
+    throw new SafeError('Surface override reason must be a nonempty control-free string of at most 512 characters.');
+  }
+  return value.trim();
 }
 function profileFor(kind: ChatGptWorkKind, profile?: ModelProfile): ModelProfile {
   const chosen = profile ?? (kind === 'architecture' ? 'architecture' : kind === 'code' ? 'code' : 'review');
@@ -182,13 +197,18 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
   const validEpoch = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 1;
   const selection = record.selection;
   const expectedSelection = selection && PROFILES.has(selection.profile) ? PROFILE_SELECTION[selection.profile] : undefined;
-  const expectedRequestKey = selection && typeof selection === 'object'
-    ? sha256(JSON.stringify([
-      record.repository_id, record.task_id, record.registration_epoch, record.binding_epoch, record.phase_epoch,
-      record.policy_digest, record.head, record.resolved_base_commit, record.prompt_sha256, selection.browser_context,
-      record.coordinator, record.work_kind, record.profile
-    ]))
-    : '';
+  const sharedCount = [record.share_generation, record.participant_id, record.workspace_request_id]
+    .filter(value => value !== undefined).length;
+  const shared = sharedCount === 3;
+  const requestParts: unknown[] | undefined = selection && typeof selection === 'object' ? [
+    record.repository_id, record.task_id, record.registration_epoch, record.binding_epoch, record.phase_epoch,
+    record.policy_digest, record.head, record.resolved_base_commit, record.prompt_sha256, selection.browser_context,
+    record.coordinator, record.work_kind, record.profile
+  ] : undefined;
+  if (shared && requestParts) {
+    requestParts.push(record.share_generation, record.participant_id, record.workspace_request_id);
+  }
+  const expectedRequestKey = requestParts ? sha256(JSON.stringify(requestParts)) : '';
   if (Object.keys(record).some(key => !RECORD_KEYS.has(key)) ||
       record.schema_version !== CHATGPT_RUN_SCHEMA_VERSION || record.run_id !== runId ||
       (record.coordinator !== 'codex' && record.coordinator !== 'claude') || record.execution_surface !== 'ChatGPT web' ||
@@ -199,9 +219,13 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
       !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.head) || typeof record.requested_base_ref !== 'string' ||
       !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.resolved_base_commit) || !HEX.test(record.prompt_sha256) ||
       !HEX.test(record.request_key) || record.request_key !== expectedRequestKey ||
+      (sharedCount !== 0 && sharedCount !== 3) ||
+      (shared && (!validEpoch(record.share_generation) || typeof record.participant_id !== 'string' ||
+        !UUID.test(record.participant_id) || typeof record.workspace_request_id !== 'string' ||
+        !REQUEST_ID.test(record.workspace_request_id) || record.work_kind !== 'review')) ||
       !selection || typeof selection !== 'object' || Object.keys(selection).some(key => !SELECTION_KEYS.has(key)) ||
       selection.schema_version !== MODEL_POLICY_SCHEMA_VERSION || selection.profile !== record.profile || !UUID.test(selection.selection_id) ||
-      (selection.surface !== 'chat' && selection.surface !== 'work') || !expectedSelection ||
+      (selection.surface !== 'chat' && selection.surface !== 'work') || (shared && selection.surface !== 'chat') || !expectedSelection ||
       selection.picker_target !== expectedSelection[0] || selection.expected_model_label !== expectedSelection[1] ||
       selection.expected_target_label !== expectedSelection[2] || selection.required_selection_method !== 'model-picker' ||
       selection.required_evidence_source !== 'trusted-browser-adapter-live-control' ||
@@ -291,6 +315,50 @@ const initializePurpose = (key: string) => `initialize ChatGPT request ${key}`;
 const releasePurpose = (key: string) => `release ChatGPT request ${key}`;
 const recoverPurpose = (key: string) => `recover ChatGPT request ${key}`;
 const isTerminal = (record: ChatGptRunRecord) => record.state === 'completed' || record.state === 'failed-pre-submit';
+const isSharedRun = (record: ChatGptRunRecord) =>
+  record.share_generation !== undefined && record.participant_id !== undefined && record.workspace_request_id !== undefined;
+
+async function withSharedRunGate<T>(
+  stateDir: string,
+  record: ChatGptRunRecord,
+  purpose: string,
+  fn: () => Promise<T>
+) {
+  if (!isSharedRun(record)) return fn();
+  const { withTaskShareGate } = await import('./review-state.js');
+  return withTaskShareGate(stateDir, record.task_id, fn, purpose);
+}
+
+type ObservedReviewTarget = { fingerprint: string; head: string; branch: string | null };
+
+async function observeSharedReviewTarget(stateDir: string, record: ChatGptRunRecord): Promise<ObservedReviewTarget | undefined> {
+  if (!isSharedRun(record)) return undefined;
+  const { computeCurrentReviewTarget, ReviewShareError } = await import('./review-state.js');
+  try {
+    const current = await computeCurrentReviewTarget(stateDir, record.repository_id, record.task_id);
+    return {
+      fingerprint: current.target.fingerprint,
+      head: current.target.head,
+      branch: current.target.branch
+    };
+  } catch (error) {
+    if (error instanceof ReviewShareError &&
+        (error.code === 'REVIEW_REPOSITORY_UNAVAILABLE' || error.code === 'REVIEW_TASK_REQUIRED')) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function assertSharedRunUnderGate(
+  stateDir: string,
+  record: ChatGptRunRecord,
+  options: { requireBound?: boolean; allowInvalidated?: boolean; observedTarget?: ObservedReviewTarget } = {}
+) {
+  if (!isSharedRun(record)) return undefined;
+  const { assertAndSyncSharedRunUnderGate } = await import('./review-state.js');
+  return assertAndSyncSharedRunUnderGate(stateDir, record, options);
+}
 
 function validateRequestClaim(raw: unknown, requestKey: string): RequestClaim {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SafeError('Corrupt ChatGPT request claim.');
@@ -322,28 +390,62 @@ async function acquireRecoveryLock(store: StateStore, key: string, purpose: stri
 export async function recoverChatGptRequestClaim(requestKey: string, stateDir = defaultStateDir()) {
   if (!HEX.test(requestKey)) throw new SafeError('Invalid ChatGPT request key.');
   const store = await StateStore.open(stateDir);
-  const lock = await acquireRecoveryLock(store, requestLockKey(requestKey), recoverPurpose(requestKey),
-    new Set([initializePurpose(requestKey), releasePurpose(requestKey), recoverPurpose(requestKey)]));
-  try {
-    const raw = await store.read<unknown>(requestPath(requestKey), REQUEST_KIND);
-    if (raw === undefined) return { recovered: false as const, request_key: requestKey };
-    const claim = validateRequestClaim(raw, requestKey);
-    const runRaw = await store.read<unknown>(recordPath(claim.run_id), KIND);
-    if (runRaw !== undefined) {
-      const run = validateRun(runRaw, claim.run_id);
-      if (run.request_key !== requestKey) throw new SafeError('ChatGPT request claim does not match its run.');
-      if (!isTerminal(run)) throw new SafeError(`An unresolved ChatGPT run exists (${run.run_id}); recover that run, not its claim.`);
-    } else {
-      // Confirm the pathname is still absent before treating this as an orphan.
-      if (!(await runRecordAbsent(store, claim.run_id))) throw new SafeError('Corrupt ChatGPT run record; refusing claim recovery.');
-      if (!claim.initializer) throw new SafeError('Orphan ChatGPT request has no initializer proof; manual inspection is required.');
-      if (claim.initializer.hostname !== os.hostname()) throw new SafeError('ChatGPT request initializer is on a foreign host; refusing recovery.');
-      if (lockOwnerAlive(claim.initializer.pid)) throw new SafeError('ChatGPT request has a live initializer; refusing recovery.');
-    }
-    // Prepare, terminal cleanup, and recovery all hold the same request lock.
-    await store.remove(requestPath(requestKey));
-    return { recovered: true as const, request_key: requestKey, run_id: claim.run_id };
-  } finally { await lock.release(); }
+  const initialRaw = await store.read<unknown>(requestPath(requestKey), REQUEST_KIND);
+  if (initialRaw === undefined) return { recovered: false as const, request_key: requestKey };
+  const initialClaim = validateRequestClaim(initialRaw, requestKey);
+  const initialRunRaw = await store.read<unknown>(recordPath(initialClaim.run_id), KIND);
+  const preliminaryRun = initialRunRaw === undefined ? undefined : validateRun(initialRunRaw, initialClaim.run_id);
+
+  const recover = async () => {
+    const lock = await acquireRecoveryLock(store, requestLockKey(requestKey), recoverPurpose(requestKey),
+      new Set([initializePurpose(requestKey), releasePurpose(requestKey), recoverPurpose(requestKey)]));
+    try {
+      const raw = await store.read<unknown>(requestPath(requestKey), REQUEST_KIND);
+      if (raw === undefined) return { recovered: false as const, request_key: requestKey };
+      const claim = validateRequestClaim(raw, requestKey);
+      const runRaw = await store.read<unknown>(recordPath(claim.run_id), KIND);
+      if (runRaw !== undefined) {
+        const run = validateRun(runRaw, claim.run_id);
+        if (run.request_key !== requestKey) throw new SafeError('ChatGPT request claim does not match its run.');
+        await assertSharedRunUnderGate(stateDir, run, { allowInvalidated: true });
+        if (!isTerminal(run)) throw new SafeError(`An unresolved ChatGPT run exists (${run.run_id}); recover that run, not its claim.`);
+      } else {
+        if (!(await runRecordAbsent(store, claim.run_id))) throw new SafeError('Corrupt ChatGPT run record; refusing claim recovery.');
+        if (!claim.initializer) throw new SafeError('Orphan ChatGPT request has no initializer proof; manual inspection is required.');
+        if (claim.initializer.hostname !== os.hostname()) throw new SafeError('ChatGPT request initializer is on a foreign host; refusing recovery.');
+        if (lockOwnerAlive(claim.initializer.pid)) throw new SafeError('ChatGPT request has a live initializer; refusing recovery.');
+      }
+      await store.remove(requestPath(requestKey));
+      return { recovered: true as const, request_key: requestKey, run_id: claim.run_id };
+    } finally { await lock.release(); }
+  };
+  return preliminaryRun
+    ? withSharedRunGate(stateDir, preliminaryRun, `recover shared ChatGPT request ${requestKey}`, recover)
+    : recover();
+}
+
+export async function recoverChatGptOrphanRequestForRun(runId: string, stateDir = defaultStateDir()) {
+  assertRunId(runId);
+  const store = await StateStore.inspect(stateDir);
+  if (!store) return { recovered: false as const, run_id: runId };
+  const existingRun = await store.read<unknown>(recordPath(runId), KIND);
+  if (existingRun !== undefined) {
+    validateRun(existingRun, runId);
+    return { recovered: false as const, run_id: runId };
+  }
+  const names = (await store.list('chatgpt-run-requests')).filter(name => /^[a-f0-9]{64}\.json$/.test(name));
+  if (names.length > 4096) throw new SafeError('Too many ChatGPT request claims for bounded orphan recovery.');
+  const matches: string[] = [];
+  for (const name of names) {
+    const key = name.slice(0, -5);
+    const raw = await store.read<unknown>(requestPath(key), REQUEST_KIND);
+    const claim = validateRequestClaim(raw, key);
+    if (claim.run_id === runId) matches.push(key);
+  }
+  if (matches.length > 1) throw new SafeError('Multiple ChatGPT request claims reference one missing run; manual inspection is required.');
+  if (!matches.length) return { recovered: false as const, run_id: runId };
+  const recovered = await recoverChatGptRequestClaim(matches[0], stateDir);
+  return { ...recovered, run_id: runId };
 }
 
 async function assertCandidateCurrent(record: ChatGptRunRecord, stateDir: string) {
@@ -371,9 +473,10 @@ async function assertCandidateCurrent(record: ChatGptRunRecord, stateDir: string
 
 export async function prepareChatGptRun(options: {
   stateDir?: string; repositoryId: string; taskId: string; coordinator: ChatGptCoordinator;
-  workKind: ChatGptWorkKind; profile?: ModelProfile; surface: ChatSurface;
+  workKind: ChatGptWorkKind; profile?: ModelProfile; surface?: ChatSurface; surfaceOverrideReason?: string;
   conversationId?: string; sessionId?: string; prompt: string; baseRef?: string;
   runId?: string; selectionId?: string; now?: Date;
+  sharedReview?: { generation: number; participantId: string; workspaceRequestId: string };
 }) {
   const stateDir = options.stateDir ?? defaultStateDir();
   assertId(options.repositoryId, 'repository ID');
@@ -383,6 +486,20 @@ export async function prepareChatGptRun(options: {
   if (options.coordinator === 'claude' && options.workKind === 'code') {
     throw new SafeError('Claude coordinates Repo MCP review and architecture only; coding is a Codex-coordinated workflow.');
   }
+  if (options.sharedReview && (
+    options.workKind !== 'review' ||
+    !Number.isSafeInteger(options.sharedReview.generation) || options.sharedReview.generation < 1 ||
+    !UUID.test(options.sharedReview.participantId) ||
+    !REQUEST_ID.test(options.sharedReview.workspaceRequestId) ||
+    typeof options.runId !== 'string' || !UUID.test(options.runId) ||
+    typeof options.selectionId !== 'string' || !UUID.test(options.selectionId)
+  )) {
+    throw new SafeError('Invalid shared review ChatGPT run binding.');
+  }
+  if (options.sharedReview) {
+    const { assertTaskShareGateHeld } = await import('./review-state.js');
+    await assertTaskShareGateHeld(stateDir, options.taskId);
+  }
   assertPrompt(options.prompt);
   const catalog = await readMultiRepoCatalog(stateDir);
   const repository = catalog.repositories[options.repositoryId];
@@ -390,6 +507,21 @@ export async function prepareChatGptRun(options: {
   if (!repository || !repository.enabled) throw new SafeError(`Repository ${options.repositoryId} is not registered and enabled.`);
   if (!task || task.repository_id !== options.repositoryId || task.completed) {
     throw new SafeError(`Task ${options.taskId} is not an unfinished task for repository ${options.repositoryId}.`);
+  }
+  const surface = options.surface ?? 'chat';
+  if (surface !== 'chat' && surface !== 'work') throw new SafeError('ChatGPT surface must be chat or work.');
+  if (options.sharedReview && surface !== 'chat') throw new SafeError('Shared review ChatGPT runs require Chat surface.');
+  const overrideReason = surfaceOverrideReason(options.surfaceOverrideReason);
+  if (surface === 'chat' && overrideReason !== undefined) {
+    throw new SafeError('Surface override reason is valid only when explicitly selecting Work.');
+  }
+  if (surface === 'work') {
+    if (repository.surface_policy === 'chat-only') {
+      throw new SafeError('OWNER_SURFACE_POLICY: repository policy permits Chat only; Work is not authorized.');
+    }
+    if (overrideReason === undefined) {
+      throw new SafeError('Work surface requires an explicit surface override reason.');
+    }
   }
   const live = await taskStatus(stateDir, options.taskId, { readOnly: true });
   const identity = await resolveIdentity(repository.root);
@@ -400,54 +532,148 @@ export async function prepareChatGptRun(options: {
   }
   if (options.workKind === 'review' && live.phase !== 'review') throw new SafeError('ChatGPT review requires the task review phase.');
   if (options.workKind === 'code' && live.phase !== 'coding') throw new SafeError('ChatGPT coding requires the task coding phase.');
-  const base = await resolveGitCommit(identity.root, options.baseRef);
+  // Validate the requested base against the preliminary snapshot, then repeat all
+  // authorization-sensitive reads under the task coordinator gate before publication.
+  await resolveGitCommit(identity.root, options.baseRef);
   const profile = profileFor(options.workKind, options.profile);
   const runId = options.runId ?? randomUUID();
   assertRunId(runId);
-  const store = await StateStore.open(stateDir, { forbiddenRoots: [identity.root, identity.common_dir] });
-  if (await store.read<unknown>(recordPath(runId), KIND)) throw new SafeError(`ChatGPT run ${runId} already exists.`);
-  const at = nowIso(options.now);
   const browserContext = trustedBrowserContextBinding({ conversationId: options.conversationId, sessionId: options.sessionId });
-  const requestKey = sha256(JSON.stringify([
-    options.repositoryId, options.taskId, repository.registration_epoch, task.binding_epoch, task.phase_epoch,
-    repository.policy_digest, identity.head, base.commit, sha256(options.prompt), browserContext,
-    options.coordinator, options.workKind, profile
-  ]));
-  return withShortLock(store, requestLockKey(requestKey), async () => {
-    const requestClaim: RequestClaim = {
-      run_id: runId, request_key: requestKey, created_at: at,
-      initializer: { pid: process.pid, hostname: os.hostname(), token: randomUUID(),
-        purpose: initializePurpose(requestKey), acquired_at: at }
-    };
-    if (!(await store.create(requestPath(requestKey), REQUEST_KIND, requestClaim))) {
-      const existing = validateRequestClaim(await store.read(requestPath(requestKey), REQUEST_KIND), requestKey);
-      throw new SafeError(`An unresolved ChatGPT run already exists for this exact request (${existing.run_id}; request key ${requestKey}). Recover or finish that run, or explicitly recover its claim; do not submit a replacement.`);
+
+  return withTaskCoordinatorGate(stateDir, options.taskId, async () => {
+    const currentCatalog = await readMultiRepoCatalog(stateDir);
+    const currentRepository = currentCatalog.repositories[options.repositoryId];
+    const currentTask = currentCatalog.tasks[options.taskId];
+    if (!currentRepository || !currentRepository.enabled) {
+      throw new SafeError(`Repository ${options.repositoryId} is not registered and enabled.`);
     }
-    try {
-      const selection = await resolveModelProfile(profile, options.surface, {
-        now: options.now, selectionId: options.selectionId,
-        conversationId: options.conversationId, sessionId: options.sessionId,
-        stateDir: `${stateDir}/model-policy`
+    if (!currentTask || currentTask.repository_id !== options.repositoryId || currentTask.completed) {
+      throw new SafeError(`Task ${options.taskId} is not an unfinished task for repository ${options.repositoryId}.`);
+    }
+    if (surface === 'work' && currentRepository.surface_policy === 'chat-only') {
+      throw new SafeError('OWNER_SURFACE_POLICY: repository policy permits Chat only; Work is not authorized.');
+    }
+
+    const currentLive = await taskStatus(stateDir, options.taskId, { readOnly: true });
+    const currentIdentity = await resolveIdentity(currentRepository.root);
+    if (
+      currentIdentity.root !== currentLive.root ||
+      currentIdentity.git_dir !== currentLive.git_dir ||
+      currentIdentity.common_dir !== currentLive.common_dir ||
+      currentIdentity.branch !== currentLive.branch ||
+      currentIdentity.head !== currentLive.head ||
+      currentLive.policy_digest !== currentRepository.policy_digest ||
+      currentLive.binding_epoch !== currentTask.binding_epoch ||
+      currentLive.phase_epoch !== currentTask.phase_epoch ||
+      currentLive.phase !== currentTask.phase ||
+      currentLive.completion
+    ) {
+      throw new SafeError('Repository task binding is stale; reconcile it before preparing a ChatGPT run.');
+    }
+    if (options.workKind === 'review' && currentLive.phase !== 'review') {
+      throw new SafeError('ChatGPT review requires the task review phase.');
+    }
+    if (options.workKind === 'code' && currentLive.phase !== 'coding') {
+      throw new SafeError('ChatGPT coding requires the task coding phase.');
+    }
+
+    const currentBase = await resolveGitCommit(currentIdentity.root, options.baseRef);
+    if (options.sharedReview) {
+      const { assertSharedPreparationAuthorizedUnderGate } = await import('./review-state.js');
+      await assertSharedPreparationAuthorizedUnderGate({
+        stateDir,
+        repositoryId: options.repositoryId,
+        taskId: options.taskId,
+        generation: options.sharedReview.generation,
+        participantId: options.sharedReview.participantId,
+        runId,
+        selectionId: options.selectionId!,
+        workspaceRequestId: options.sharedReview.workspaceRequestId,
+        coordinator: options.coordinator,
+        profile,
+        promptDigest: sha256(options.prompt),
+        browserContextDigest: sha256(JSON.stringify(browserContext)),
+        requestedBaseRef: currentBase.requested,
+        resolvedBaseCommit: currentBase.commit
       });
-      const record: ChatGptRunRecord = {
-        schema_version: CHATGPT_RUN_SCHEMA_VERSION, run_id: runId, coordinator: options.coordinator,
-        execution_surface: 'ChatGPT web', work_kind: options.workKind, profile, state: 'prepared',
-        repository_id: options.repositoryId, task_id: options.taskId,
-        registration_epoch: repository.registration_epoch, binding_epoch: task.binding_epoch,
-        phase_epoch: task.phase_epoch, policy_digest: repository.policy_digest,
-        root_sha256: sha256(identity.root), branch: identity.branch, head: identity.head,
-        requested_base_ref: base.requested, resolved_base_commit: base.commit,
-        prompt_sha256: sha256(options.prompt), request_key: requestKey, selection, created_at: at, updated_at: at
-      };
-      validateRun(record, runId);
-      if (!(await store.create(recordPath(runId), KIND, record))) throw new SafeError(`ChatGPT run ${runId} already exists.`);
-      return record;
-    } catch (error) {
-      // A failed durable publication may already have created the run. Keep its claim.
-      if (await runRecordAbsent(store, runId)) await store.remove(requestPath(requestKey));
-      throw error;
     }
-  }, { purpose: initializePurpose(requestKey) });
+    const store = await StateStore.open(stateDir, { forbiddenRoots: [currentIdentity.root, currentIdentity.common_dir] });
+    if (await store.read<unknown>(recordPath(runId), KIND)) throw new SafeError(`ChatGPT run ${runId} already exists.`);
+    const at = nowIso(options.now);
+    const requestParts: unknown[] = [
+      options.repositoryId, options.taskId, currentRepository.registration_epoch,
+      currentTask.binding_epoch, currentTask.phase_epoch, currentRepository.policy_digest,
+      currentIdentity.head, currentBase.commit, sha256(options.prompt), browserContext,
+      options.coordinator, options.workKind, profile
+    ];
+    if (options.sharedReview) requestParts.push(
+      options.sharedReview.generation,
+      options.sharedReview.participantId,
+      options.sharedReview.workspaceRequestId
+    );
+    const requestKey = sha256(JSON.stringify(requestParts));
+
+    return withShortLock(store, requestLockKey(requestKey), async () => {
+      const requestClaim: RequestClaim = {
+        run_id: runId, request_key: requestKey, created_at: at,
+        initializer: { pid: process.pid, hostname: os.hostname(), token: randomUUID(),
+          purpose: initializePurpose(requestKey), acquired_at: at }
+      };
+      if (!(await store.create(requestPath(requestKey), REQUEST_KIND, requestClaim))) {
+        const existing = validateRequestClaim(await store.read(requestPath(requestKey), REQUEST_KIND), requestKey);
+        throw new SafeError(`An unresolved ChatGPT run already exists for this exact request (${existing.run_id}; request key ${requestKey}). Recover or finish that run, or explicitly recover its claim; do not submit a replacement.`);
+      }
+      let overridePublished = false;
+      try {
+        if (surface === 'work' && overrideReason !== undefined) {
+          const authorization = {
+            schema_version: 1,
+            run_id: runId,
+            surface: 'work' as const,
+            override_reason: overrideReason,
+            created_at: at
+          };
+          if (!(await store.create(surfaceOverridePath(runId), SURFACE_OVERRIDE_KIND, authorization))) {
+            throw new SafeError(`ChatGPT run ${runId} already has surface authorization metadata.`);
+          }
+          overridePublished = true;
+        }
+        const selection = await resolveModelProfile(profile, surface, {
+          now: options.now, selectionId: options.selectionId,
+          conversationId: options.conversationId, sessionId: options.sessionId,
+          stateDir: `${stateDir}/model-policy`
+        });
+        const record: ChatGptRunRecord = {
+          schema_version: CHATGPT_RUN_SCHEMA_VERSION, run_id: runId, coordinator: options.coordinator,
+          execution_surface: 'ChatGPT web', work_kind: options.workKind, profile, state: 'prepared',
+          repository_id: options.repositoryId, task_id: options.taskId,
+          registration_epoch: currentRepository.registration_epoch, binding_epoch: currentTask.binding_epoch,
+          phase_epoch: currentTask.phase_epoch, policy_digest: currentRepository.policy_digest,
+          root_sha256: sha256(currentIdentity.root), branch: currentIdentity.branch, head: currentIdentity.head,
+          requested_base_ref: currentBase.requested, resolved_base_commit: currentBase.commit,
+          prompt_sha256: sha256(options.prompt), request_key: requestKey, selection,
+          ...(options.sharedReview ? {
+            share_generation: options.sharedReview.generation,
+            participant_id: options.sharedReview.participantId,
+            workspace_request_id: options.sharedReview.workspaceRequestId
+          } : {}),
+          created_at: at, updated_at: at
+        };
+        validateRun(record, runId);
+        if (!(await store.create(recordPath(runId), KIND, record))) throw new SafeError(`ChatGPT run ${runId} already exists.`);
+        return record;
+      } catch (error) {
+        // A failed durable publication may already have created the run. Keep its claim
+        // and owner-only authorization metadata in that case; otherwise remove only
+        // metadata created by this failed initialization attempt.
+        if (await runRecordAbsent(store, runId)) {
+          await store.remove(requestPath(requestKey));
+          if (overridePublished) await store.remove(surfaceOverridePath(runId));
+        }
+        throw error;
+      }
+    }, { purpose: initializePurpose(requestKey) });
+  });
 }
 
 export async function chatGptRunStatus(runId: string, stateDir = defaultStateDir()) {
@@ -460,8 +686,11 @@ export async function reserveChatGptRun(options: {
   const stateDir = options.stateDir ?? defaultStateDir();
   assertRunId(options.runId);
   const store = await StateStore.open(stateDir);
-  return withShortLock(store, lockKey(options.runId), async () => {
+  const preliminary = await readRun(store, options.runId);
+  const observedTarget = await observeSharedReviewTarget(stateDir, preliminary);
+  const reserve = () => withShortLock(store, lockKey(options.runId), async () => {
     let record = await readRun(store, options.runId);
+    await assertSharedRunUnderGate(stateDir, record, { observedTarget });
     if (record.state === 'submission-reserved') {
       await assertCandidateCurrent(record, stateDir);
       return { ...record, submission_authorized: false as const, recovery_required: true as const };
@@ -470,6 +699,7 @@ export async function reserveChatGptRun(options: {
     await assertCandidateCurrent(record, stateDir);
     record = { ...record, state: 'verification-pending', updated_at: nowIso(options.now) };
     await writeRun(store, record);
+    await assertSharedRunUnderGate(stateDir, record);
     let verified: Awaited<ReturnType<typeof verifyModelSelection>>;
     try {
       verified = await verifyModelSelection(options.contract, options.evidence, {
@@ -482,13 +712,16 @@ export async function reserveChatGptRun(options: {
     } catch (error) {
       record = { ...record, state: 'failed-pre-submit', failure_code: 'MODEL_SELECTION_NOT_VERIFIED', updated_at: nowIso(options.now) };
       await writeRun(store, record);
+      await assertSharedRunUnderGate(stateDir, record, { allowInvalidated: true });
       await releaseRequestClaim(store, record);
       throw error;
     }
     record = { ...record, state: 'submission-reserved', model_verified_at: verified.verified_at, updated_at: nowIso(options.now) };
     await writeRun(store, record);
+    await assertSharedRunUnderGate(stateDir, record);
     return { ...record, submission_authorized: true as const, recovery_required: false as const };
   }, { purpose: `reserve ChatGPT run ${options.runId}` });
+  return withSharedRunGate(stateDir, preliminary, `reserve shared ChatGPT run ${options.runId}`, reserve);
 }
 
 async function releaseRequestClaim(store: StateStore, record: ChatGptRunRecord) {
@@ -502,18 +735,33 @@ async function releaseRequestClaim(store: StateStore, record: ChatGptRunRecord) 
   }, { purpose: releasePurpose(record.request_key) });
 }
 
-async function transitionRun(stateDir: string, runId: string, from: ChatGptRunState[], update: (record: ChatGptRunRecord) => ChatGptRunRecord | Promise<ChatGptRunRecord>) {
+async function transitionRun(
+  stateDir: string,
+  runId: string,
+  from: ChatGptRunState[],
+  update: (record: ChatGptRunRecord) => ChatGptRunRecord | Promise<ChatGptRunRecord>,
+  options: { requireBound?: boolean; allowInvalidated?: boolean; revalidateTarget?: boolean } = {}
+) {
   assertRunId(runId);
   const store = await StateStore.open(stateDir);
-  return withShortLock(store, lockKey(runId), async () => {
+  const preliminary = await readRun(store, runId);
+  const observedTarget = options.revalidateTarget ? await observeSharedReviewTarget(stateDir, preliminary) : undefined;
+  const transition = () => withShortLock(store, lockKey(runId), async () => {
     const record = await readRun(store, runId);
+    await assertSharedRunUnderGate(stateDir, record, {
+      requireBound: options.requireBound,
+      allowInvalidated: options.allowInvalidated,
+      observedTarget
+    });
     if (!from.includes(record.state)) throw new SafeError(`ChatGPT run cannot transition from state ${record.state}.`);
     const next = await update(record);
     validateRun(next, runId);
     await writeRun(store, next);
+    await assertSharedRunUnderGate(stateDir, next, { allowInvalidated: true });
     if (next.state === 'completed' || next.state === 'failed-pre-submit') await releaseRequestClaim(store, next);
     return next;
   }, { purpose: `transition ChatGPT run ${runId}` });
+  return withSharedRunGate(stateDir, preliminary, `transition shared ChatGPT run ${runId}`, transition);
 }
 
 export async function markChatGptRunSubmitted(options: {
@@ -531,7 +779,7 @@ export async function markChatGptRunSubmitted(options: {
     const at = nowIso(options.now);
     return { ...record, state: 'submitted', submitted_at: at, submission_event_sha256: trusted.event,
       submission_observed_at: trusted.observedAt, updated_at: at };
-  });
+  }, { revalidateTarget: true });
 }
 
 export async function completeChatGptRun(options: {
@@ -561,14 +809,14 @@ export async function completeChatGptRun(options: {
     return { ...record, state: 'completed', output_sha256: digest, outcome: options.outcome,
       completion_event_sha256: trusted.event, completion_submission_event_sha256: options.receipt.submissionEventSha256,
       completion_observed_at: trusted.observedAt, completed_at: at, updated_at: at };
-  });
+  }, { requireBound: true, revalidateTarget: true });
 }
 
 export async function markChatGptRunUncertain(runId: string, failureCode: string, stateDir = defaultStateDir(), now?: Date) {
   return transitionRun(stateDir, runId, ['submission-reserved', 'submitted'], record => ({
     ...record, state: 'uncertain', uncertain_from: record.state as 'submission-reserved' | 'submitted',
     failure_code: sanitizeFailure(failureCode), updated_at: nowIso(now)
-  }));
+  }), { allowInvalidated: true });
 }
 
 /** Resolve browser uncertainty only after reattaching to and inspecting the same conversation. */
@@ -588,14 +836,14 @@ export async function recoverChatGptRun(
       return { ...record, state: 'failed-pre-submit', failure_code: 'CONFIRMED_NOT_SUBMITTED', uncertain_from: undefined,
         recovery_event_sha256: trusted.event, recovery_observed_at: trusted.observedAt, updated_at: nowIso(now) };
     }
-    await assertCandidateCurrent(record, stateDir);
+    if (!isSharedRun(record)) await assertCandidateCurrent(record, stateDir);
     const at = nowIso(now);
     return { ...record, state: 'submitted', submitted_at: record.submitted_at ?? at, failure_code: undefined,
       uncertain_from: undefined,
       submission_event_sha256: record.submission_event_sha256 ?? trusted.event,
       submission_observed_at: record.submission_observed_at ?? trusted.observedAt,
       recovery_event_sha256: trusted.event, recovery_observed_at: trusted.observedAt, updated_at: at };
-  });
+  }, { allowInvalidated: true });
 }
 
 export async function failChatGptRunBeforeSubmit(runId: string, failureCode: string, stateDir = defaultStateDir(), now?: Date) {
@@ -606,23 +854,28 @@ export async function failChatGptRunBeforeSubmit(runId: string, failureCode: str
       return record;
     }
     return { ...record, state: 'failed-pre-submit', failure_code: code, updated_at: nowIso(now) };
-  });
+  }, { allowInvalidated: true });
 }
 
 export async function recoverChatGptRunLock(runId: string, stateDir = defaultStateDir()) {
   assertRunId(runId);
   const store = await StateStore.open(stateDir);
-  const key = lockKey(runId);
-  const raw = await store.read<unknown>(`locks/${key}.json`, 'lock');
-  if (raw === undefined) return { recovered: false as const, run_id: runId };
-  const existing = validateLockRecord(raw, key);
-  const allowed = new Set([`reserve ChatGPT run ${runId}`, `transition ChatGPT run ${runId}`, `recover ChatGPT run ${runId}`]);
-  if (!allowed.has(existing.purpose)) throw new SafeError(`Lock ${key} has unexpected purpose ${existing.purpose}; refusing recovery.`);
-  const lock = await acquireLock(store, key, `recover ChatGPT run ${runId}`, {
-    recoverStale: true,
-    expectedExistingPurpose: existing.purpose,
-    expectedExistingToken: existing.token
-  });
-  await lock.release();
-  return { recovered: true as const, run_id: runId, prior_pid: existing.pid, prior_purpose: existing.purpose };
+  const preliminary = await readRun(store, runId);
+  const recover = async () => {
+    const key = lockKey(runId);
+    const raw = await store.read<unknown>(`locks/${key}.json`, 'lock');
+    if (raw === undefined) return { recovered: false as const, run_id: runId };
+    const existing = validateLockRecord(raw, key);
+    const allowed = new Set([`reserve ChatGPT run ${runId}`, `transition ChatGPT run ${runId}`, `recover ChatGPT run ${runId}`]);
+    if (!allowed.has(existing.purpose)) throw new SafeError(`Lock ${key} has unexpected purpose ${existing.purpose}; refusing recovery.`);
+    const lock = await acquireLock(store, key, `recover ChatGPT run ${runId}`, {
+      recoverStale: true,
+      expectedExistingPurpose: existing.purpose,
+      expectedExistingToken: existing.token
+    });
+    await lock.release();
+    await assertSharedRunUnderGate(stateDir, preliminary, { allowInvalidated: true });
+    return { recovered: true as const, run_id: runId, prior_pid: existing.pid, prior_purpose: existing.purpose };
+  };
+  return withSharedRunGate(stateDir, preliminary, `recover shared ChatGPT run lock ${runId}`, recover);
 }

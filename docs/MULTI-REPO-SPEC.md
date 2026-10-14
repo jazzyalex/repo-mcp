@@ -44,7 +44,7 @@ The effective permission is the intersection of repository enabled state and reg
 
 ## 4. Repository registry
 
-A registration contains at least stable operator-chosen repository_id, display name, canonical checkout root, canonical git_dir/common_dir, root digest, immutable operator-state policy_ref, canonical policy_digest, monotonically increasing registration_epoch, enabled state, and timestamps.
+A registration contains at least stable operator-chosen repository_id, display name, canonical checkout root, canonical git_dir/common_dir, root digest, immutable operator-state policy_ref, canonical policy_digest, repository surface_policy (`default` or `chat-only`), monotonically increasing registration_epoch, enabled state, and timestamps. Legacy registrations without surface_policy normalize to `default` when read.
 
 The model MUST NOT supply filesystem roots or policy paths through MCP.
 
@@ -60,7 +60,9 @@ Registration is a coordinator operation. It MUST:
 - copy the normalized policy into owner-only, content-addressed operator state;
 - never make later source-policy file edits an implicit live policy change.
 
-Disabling or changing a registration increments its registration epoch and invalidates existing selections. If the registration has an unfinished task, the authorization change is acknowledged only after the task mutation/check gate drains, so no previously admitted write/check can publish after the new registration epoch is reported.
+Disabling or changing a registration increments its registration epoch and invalidates existing selections. Surface policy is changed locally with `coord repository surface-policy --repository ID --mode default|chat-only`; an actual mode change is a registration authorization change and increments the epoch, while selecting the current mode is an idempotent no-op. If the registration has an unfinished task, the authorization change is acknowledged only after the task mutation/check gate drains, so no previously admitted write/check can publish after the new registration epoch is reported.
+
+New ChatGPT run preparations default to Chat. Under `default`, explicit Work requires a bounded nonempty control-free override reason retained only in owner authorization metadata; public/sanitized run output excludes it. Under `chat-only`, Work is rejected before model-selection, request-claim, or run state publication. Surface-policy changes do not rewrite historical run records, although the registration-epoch change intentionally makes older authorization stale.
 
 ## 5. Tasks and checkout ownership
 

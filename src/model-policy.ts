@@ -55,6 +55,8 @@ const REQUEST_KIND = 'model-policy-request-v2';
 const OBSERVATION_KIND = 'model-policy-observation-v2';
 const CONSUMED_KIND = 'model-policy-consumed-v2';
 
+// Work keeps the shipped finite allowlist for backward-compatible combined-control
+// receipts. Chat picker/control evidence uses the dynamic VERSION grammar below.
 const SOL_MODEL_LABELS = new Map<string, string>([
   ['sol', 'Sol'],
   ['gpt-5.6 sol', 'GPT-5.6 Sol'],
@@ -65,6 +67,7 @@ const SOL_PRO_MODEL_LABELS = new Map<string, string>([
   ['gpt-5.6 sol pro', 'GPT-5.6 Sol Pro'],
   ['gpt-6.1 sol pro', 'GPT-6.1 Sol Pro']
 ]);
+const CHAT_VERSION = /^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){0,2}$/u;
 
 export class ModelPolicyError extends Error {
   readonly code: string;
@@ -207,31 +210,64 @@ function parseSurfaceContract(value: unknown): ChatSurface {
 
 function normalizeUiLabel(value: unknown, code: string, field: string): string {
   if (typeof value !== 'string') fail(code, field + ' must be a string.');
+  // Reject raw control characters before whitespace normalization so newlines/tabs
+  // cannot be erased into an apparently valid picker/control label.
+  if (CONTROL.test(value)) fail(code, field + ' is not a supported control label.');
   const normalized = value.trim().replace(/\s+/gu, ' ').toLowerCase();
   if (!normalized) fail(code, field + ' is empty.');
-  if (normalized.length > 160 || CONTROL.test(normalized)) fail(code, field + ' is not a supported control label.');
+  if (normalized.length > 160) fail(code, field + ' is not a supported control label.');
   return normalized;
+}
+
+function parseChatVersion(value: string, code: string, field: string) {
+  if (value.length > 11 || !CHAT_VERSION.test(value)) {
+    fail(code, field + ' contains an unsupported model version.');
+  }
+  return value;
 }
 
 function parseAllowedModelLabel(value: unknown): {
   model: CanonicalModel;
   family: CanonicalModelFamily;
   label: string;
+  version: string | null;
 } {
   const normalized = normalizeUiLabel(value, 'UNSUPPORTED_MODEL_LABEL', 'model_label');
-  const sol = SOL_MODEL_LABELS.get(normalized);
-  if (sol) return { model: 'sol', family: 'Sol', label: sol };
-  const pro = SOL_PRO_MODEL_LABELS.get(normalized);
-  if (pro) return { model: 'sol-pro', family: 'Sol Pro', label: pro };
-  fail('UNSUPPORTED_MODEL_LABEL', 'Observed model label is not an allowlisted Sol-family label.');
+  if (normalized === 'sol') return { model: 'sol', family: 'Sol', label: 'Sol', version: null };
+  if (normalized === 'sol pro') return { model: 'sol-pro', family: 'Sol Pro', label: 'Sol Pro', version: null };
+
+  const match = /^gpt-([^ ]+) (sol(?: pro)?)$/u.exec(normalized);
+  if (!match) fail('UNSUPPORTED_MODEL_LABEL', 'Observed model label is not a supported Sol-family picker label.');
+  const version = parseChatVersion(match[1], 'UNSUPPORTED_MODEL_LABEL', 'model_label');
+  if (match[2] === 'sol pro') {
+    return { model: 'sol-pro', family: 'Sol Pro', label: `GPT-${version} Sol Pro`, version };
+  }
+  return { model: 'sol', family: 'Sol', label: `GPT-${version} Sol`, version };
 }
 
-function parseStandaloneTarget(value: unknown): { target: ObservedTarget; label: ObservedTargetLabel } {
+function parseStandaloneTarget(value: unknown): {
+  target: ObservedTarget;
+  label: ObservedTargetLabel;
+  controlLabel: string;
+  version: string | null;
+} {
   const normalized = normalizeUiLabel(value, 'UNSUPPORTED_TARGET_LABEL', 'control_label');
-  if (normalized === 'high') return { target: 'high', label: 'High' };
-  if (normalized === 'xhigh' || normalized === 'extra high') return { target: 'xhigh', label: 'Extra High' };
-  if (normalized === 'pro') return { target: 'pro', label: 'Pro' };
-  fail('UNSUPPORTED_TARGET_LABEL', 'Observed Chat control label is not an allowlisted effort/target label.');
+  const targetFor = (label: string): { target: ObservedTarget; label: ObservedTargetLabel } | undefined => {
+    if (label === 'high') return { target: 'high', label: 'High' };
+    if (label === 'extra high') return { target: 'xhigh', label: 'Extra High' };
+    if (label === 'pro') return { target: 'pro', label: 'Pro' };
+    return undefined;
+  };
+
+  const bare = targetFor(normalized);
+  if (bare) return { ...bare, controlLabel: bare.label, version: null };
+
+  const match = /^([^ ]+) (high|extra high|pro)$/u.exec(normalized);
+  if (!match) fail('UNSUPPORTED_TARGET_LABEL', 'Observed Chat control label is not a supported effort/target label.');
+  const version = parseChatVersion(match[1], 'UNSUPPORTED_TARGET_LABEL', 'control_label');
+  const parsed = targetFor(match[2]);
+  if (!parsed) fail('UNSUPPORTED_TARGET_LABEL', 'Observed Chat control label is not a supported effort/target label.');
+  return { ...parsed, controlLabel: `${version} ${parsed.label}`, version };
 }
 
 function parseWorkControlLabel(value: unknown): {
@@ -366,9 +402,11 @@ function parseEvidenceReceipt(input: unknown) {
   let model: CanonicalModel | null;
   let modelFamily: CanonicalModelFamily | null;
   let modelLabel: string | null;
+  let modelVersion: string | null = null;
   let target: ObservedTarget;
   let targetLabel: ObservedTargetLabel;
   let controlLabel: string;
+  let controlVersion: string | null = null;
 
   if (surface === 'Work') {
     const parsed = parseWorkControlLabel(object.observed_control_label);
@@ -387,7 +425,8 @@ function parseEvidenceReceipt(input: unknown) {
     const parsedTarget = parseStandaloneTarget(object.observed_control_label);
     target = parsedTarget.target;
     targetLabel = parsedTarget.label;
-    controlLabel = parsedTarget.label;
+    controlLabel = parsedTarget.controlLabel;
+    controlVersion = parsedTarget.version;
     if (object.observed_model_family === null && object.observed_model_label === null) {
       model = null;
       modelFamily = null;
@@ -397,12 +436,16 @@ function parseEvidenceReceipt(input: unknown) {
       model = parsedModel.model;
       modelFamily = parsedModel.family;
       modelLabel = parsedModel.label;
+      modelVersion = parsedModel.version;
       if (object.observed_model_family !== modelFamily) {
         fail('INVALID_EVIDENCE', 'Chat model-family and model-label evidence disagree.');
       }
     }
     if (object.observed_target_label !== targetLabel) {
       fail('INVALID_EVIDENCE', 'Chat target evidence disagrees with the live control label.');
+    }
+    if (modelVersion !== null && controlVersion !== null && modelVersion !== controlVersion) {
+      fail('MODEL_VERSION_MISMATCH', 'Observed Chat picker and live control expose different model versions.');
     }
   }
 
@@ -590,9 +633,11 @@ export async function recordTrustedBrowserObservation(
   let model: CanonicalModel | null;
   let modelFamily: CanonicalModelFamily | null;
   let modelLabel: string | null;
+  let modelVersion: string | null = null;
   let target: ObservedTarget;
   let targetLabel: ObservedTargetLabel;
   let controlLabel: string;
+  let controlVersion: string | null = null;
 
   if (surface === 'work') {
     if (input.modelLabel !== undefined) {
@@ -609,7 +654,8 @@ export async function recordTrustedBrowserObservation(
     const parsedTarget = parseStandaloneTarget(input.controlLabel);
     target = parsedTarget.target;
     targetLabel = parsedTarget.label;
-    controlLabel = parsedTarget.label;
+    controlLabel = parsedTarget.controlLabel;
+    controlVersion = parsedTarget.version;
     if (input.modelLabel === undefined) {
       model = null;
       modelFamily = null;
@@ -619,6 +665,10 @@ export async function recordTrustedBrowserObservation(
       model = parsedModel.model;
       modelFamily = parsedModel.family;
       modelLabel = parsedModel.label;
+      modelVersion = parsedModel.version;
+    }
+    if (modelVersion !== null && controlVersion !== null && modelVersion !== controlVersion) {
+      fail('MODEL_VERSION_MISMATCH', 'Observed Chat picker and live control expose different model versions.');
     }
   }
 

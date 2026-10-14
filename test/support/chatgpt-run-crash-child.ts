@@ -20,7 +20,8 @@ if (mode === 'initializer') {
 }
 const run = await prepareChatGptRun({
   stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'review',
-  surface: 'work', conversationId: 'conversation-1', prompt: 'Crash request.',
+  surface: 'work', surfaceOverrideReason: 'crash-injection Work fixture',
+  conversationId: 'conversation-1', prompt: 'Crash request.',
   now: new Date('2026-10-07T20:00:00.000Z')
 });
 await failChatGptRunBeforeSubmit(run.run_id, 'CANCELLED', stateDir, new Date('2026-10-07T20:00:03.000Z'));
