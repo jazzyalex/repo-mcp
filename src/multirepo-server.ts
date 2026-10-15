@@ -7,7 +7,8 @@ import { z } from 'zod';
 import { auditedEdit } from './audit.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import { compilePolicyFor, policyDigest } from './policy.js';
-import { RepoWorkspace, SafeError } from './repo.js';
+import { RepoWorkspace, SafeError, type CommittedReadPage } from './repo.js';
+import { jsonBytes } from './paging.js';
 import { StateStore } from './task-state.js';
 import { RELEASE_VERSION } from './version.js';
 import {
@@ -430,12 +431,25 @@ function registerWorkspaceTools(
       task_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
       mode: z.enum(['inspect', 'code', 'review']),
       request_id: requestId,
-      write_grant: z.string().min(20).max(512).optional()
+      write_grant: z.string().min(20).max(512).optional(),
+      base_ref: z.string().min(1).max(128).optional(),
+      head_ref: z.string().min(1).max(128).optional(),
+      scope_prefix: z.string().max(256).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async args => {
     try {
-      const result = await openWorkspace({ stateDir, repositoryId: args.repository_id, taskId: args.task_id, mode: args.mode, requestId: args.request_id, writeGrant: args.write_grant });
+      const result = await openWorkspace({
+        stateDir,
+        repositoryId: args.repository_id,
+        taskId: args.task_id,
+        mode: args.mode,
+        requestId: args.request_id,
+        writeGrant: args.write_grant,
+        baseRef: args.base_ref,
+        headRef: args.head_ref,
+        scopePrefix: args.scope_prefix
+      });
       await deps.audit('workspace_open', era, true);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     } catch (error) {
@@ -464,6 +478,99 @@ function registerWorkspaceTools(
     inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, status_cursor: deps.cursor, files_cursor: deps.cursor }),
     annotations: readOnly
   }, scoped('repo_info', 'read', 'repo_info', async (repo, args, authorized) => {
+    const binding = authorized.selection.review_binding;
+    if (binding) {
+      if (args.status_cursor || args.files_cursor) {
+        throw new SafeError('Commit-pinned review does not expose live working-tree status or file-list continuations.');
+      }
+      const fixed = {
+        repository: authorized.repository.name,
+        scope: 'Commit-pinned review; coverage is limited to the bound policy and scope prefix.',
+        server: { name: 'repo-mcp', server_version: RELEASE_VERSION, service_mode: 'multirepo', process_pid: process.pid },
+        checkout_identity: {
+          root: authorized.live_task.root,
+          git_dir: authorized.live_task.git_dir,
+          common_dir: authorized.live_task.common_dir,
+          branch: authorized.live_task.branch,
+          detached: authorized.live_task.branch === null,
+          head: authorized.live_task.head
+        },
+        task: {
+          task_id: authorized.task.task_id,
+          phase: authorized.live_task.phase,
+          phase_epoch: authorized.task.phase_epoch,
+          binding_epoch: authorized.task.binding_epoch,
+          bound_branch: authorized.live_task.branch,
+          bound_head: authorized.live_task.head,
+          policy_digest: authorized.repository.policy_digest
+        },
+        review_assurance: 'commit_pinned' as const,
+        candidate_digest: binding.candidate_digest,
+        review_binding: binding,
+        review_target: {
+          requested_base_ref: binding.requested_base_ref,
+          base_commit: binding.base_commit,
+          requested_head_ref: binding.requested_head_ref,
+          head_commit: binding.head_commit,
+          scope_prefix: binding.scope_prefix
+        },
+        head: authorized.live_task.head,
+        live_status_available: false,
+        live_status_reason: 'Live checkout status is intentionally omitted from commit-pinned evidence.',
+        pinned_file_listing_available: false,
+        capabilities: {
+          policy_version: 2,
+          path_policy: repo.exactPolicy ? 'exact' : 'glob',
+          request_ids: true,
+          task_state: true,
+          paging: true,
+          workspace_selection: true,
+          workspace_mode: authorized.selection.mode,
+          workspace_capabilities: authorized.selection.capabilities,
+          commit_pinned_review: true,
+          committed_read: true,
+          commit_diff: true,
+          pinned_list_files: false,
+          pinned_search: false,
+          local_test_evidence: false,
+          limits: repo.limits
+        },
+        review_limitations: [
+          'Live checkout status is not commit-pinned evidence and is intentionally omitted.',
+          'list_files and search are disabled in commit-pinned review because commit-tree enumeration/search is not implemented in this bounded feature.',
+          'Binary/non-UTF8/oversized blobs are identity-only and cannot support semantic text review.',
+          'Local coordinator test/typecheck evidence is separate from Repo MCP review evidence.'
+        ]
+      };
+      const instructionShell = {
+        ...fixed,
+        instructions_path: 'AGENTS.md',
+        instructions: '',
+        instructions_next_cursor: 'x'.repeat(4096)
+      };
+      const instructionBudget = repo.limits.page_bytes - jsonBytes(instructionShell);
+      if (instructionBudget <= 0) {
+        throw new SafeError(`page_bytes (${repo.limits.page_bytes}) is too small for commit-pinned repo_info metadata.`);
+      }
+      let instructionPage: CommittedReadPage | undefined;
+      try {
+        instructionPage = await repo.readRange(
+          'AGENTS.md', 1, repo.limits.page_lines, undefined, binding.head_commit, instructionBudget
+        );
+      } catch (error) {
+        if (!(error instanceof SafeError) || !/(not exposed|does not exist)/i.test(error.message)) throw error;
+      }
+      const value = {
+        ...fixed,
+        instructions_path: instructionPage ? 'AGENTS.md' : null,
+        instructions: instructionPage?.content ?? '',
+        instructions_next_cursor: instructionPage?.next_cursor ?? null
+      };
+      if (jsonBytes(value) > repo.limits.page_bytes) {
+        throw new SafeError(`Commit-pinned repo_info exceeds page_bytes (${repo.limits.page_bytes}); narrow instruction metadata.`);
+      }
+      return wrapResult(stateDir, authorized, 'repo_info', value);
+    }
     if (args.status_cursor && args.files_cursor) throw new SafeError('Pass only one of status_cursor and files_cursor.');
     if (args.status_cursor) {
       const inner = await unwrapWorkspaceCursor(stateDir, authorized.selection.workspace_id, 'repo-status', args.status_cursor);
@@ -497,6 +604,9 @@ function registerWorkspaceTools(
     inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, prefix: z.string().max(256).optional(), cursor: deps.cursor }),
     annotations: readOnly
   }, scoped('list_files', 'read', 'list_files', async (repo, args, authorized) => {
+    if (authorized.selection.review_binding) {
+      throw new SafeError('list_files is not available in commit-pinned review; use the bound git_diff paths and committed read.');
+    }
     const inner = await unwrapWorkspaceCursor(stateDir, authorized.selection.workspace_id, 'list_files', args.cursor);
     return wrapResult(stateDir, authorized, 'list_files', await repo.listFiles(args.prefix, inner));
   }));
@@ -508,12 +618,18 @@ function registerWorkspaceTools(
       path: z.string().min(1).max(256),
       start_line: z.number().int().min(1).optional(),
       max_lines: z.number().int().min(1).max(DEFAULT_LIMITS.page_lines).optional(),
+      ref: z.string().min(1).max(128).optional(),
       cursor: deps.cursor
     }),
     annotations: readOnly
   }, scoped('read', 'read', 'read', async (repo, args, authorized) => {
+    const binding = authorized.selection.review_binding;
+    if (binding && args.ref !== undefined && args.ref !== binding.head_commit && args.ref !== binding.requested_head_ref) {
+      throw new SafeError('Read ref does not match this commit-pinned review workspace.');
+    }
     const inner = await unwrapWorkspaceCursor(stateDir, authorized.selection.workspace_id, 'read', args.cursor);
-    return wrapResult(stateDir, authorized, 'read', await repo.readRange(args.path, args.start_line, args.max_lines, inner));
+    const ref = binding ? binding.head_commit : args.ref;
+    return wrapResult(stateDir, authorized, 'read', await repo.readRange(args.path, args.start_line, args.max_lines, inner, ref));
   }));
 
   server.registerTool('search', {
@@ -521,17 +637,50 @@ function registerWorkspaceTools(
     inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, query: z.string().min(1).max(200), prefix: z.string().max(256).optional(), cursor: deps.cursor }),
     annotations: readOnly
   }, scoped('search', 'read', 'search', async (repo, args, authorized) => {
+    if (authorized.selection.review_binding) {
+      throw new SafeError('search is not available in commit-pinned review; use committed read on paths identified by the bound diff.');
+    }
     const inner = await unwrapWorkspaceCursor(stateDir, authorized.selection.workspace_id, 'search', args.cursor);
     return wrapResult(stateDir, authorized, 'search', await repo.search(args.query, args.prefix, inner));
   }));
 
   server.registerTool('git_diff', {
-    description: 'Inspect the bounded diff for the selected workspace. Optional base_ref compares the working tree to that commit, branch, tag, or relative commit (for example HEAD^) so committed changes remain reviewable. Continue every page with the same base_ref. In review phase this is still a phase freeze, not a content-verified candidate unless future candidate fields say otherwise.',
-    inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, prefix: z.string().max(256).optional(), base_ref: z.string().min(1).max(128).optional(), cursor: deps.cursor }),
+    description: 'Inspect a bounded diff. With head_ref, base_ref is required and Git compares only the two resolved commits; working tree, index and untracked files are excluded. Commit-pinned review workspaces default to and enforce their bound base/head/scope.',
+    inputSchema: z.strictObject({
+      workspace_token: deps.workspaceToken,
+      prefix: z.string().max(256).optional(),
+      base_ref: z.string().min(1).max(128).optional(),
+      head_ref: z.string().min(1).max(128).optional(),
+      cursor: deps.cursor
+    }),
     annotations: readOnly
   }, scoped('git_diff', 'read', 'git_diff', async (repo, args, authorized) => {
+    const binding = authorized.selection.review_binding;
+    if (binding) {
+      if (args.prefix !== undefined && args.prefix !== binding.scope_prefix) {
+        throw new SafeError('Diff prefix does not match this commit-pinned review scope.');
+      }
+      if (args.base_ref !== undefined && args.base_ref !== binding.base_commit && args.base_ref !== binding.requested_base_ref) {
+        throw new SafeError('Diff base_ref does not match this commit-pinned review workspace.');
+      }
+      if (args.head_ref !== undefined && args.head_ref !== binding.head_commit && args.head_ref !== binding.requested_head_ref) {
+        throw new SafeError('Diff head_ref does not match this commit-pinned review workspace.');
+      }
+    } else if (args.head_ref !== undefined && args.base_ref === undefined) {
+      throw new SafeError('Commit git_diff requires explicit base_ref with head_ref.');
+    }
     const inner = await unwrapWorkspaceCursor(stateDir, authorized.selection.workspace_id, 'git_diff', args.cursor);
-    return wrapResult(stateDir, authorized, 'git_diff', await repo.diff(args.prefix, inner, args.base_ref));
+    return wrapResult(
+      stateDir,
+      authorized,
+      'git_diff',
+      await repo.diff(
+        binding ? binding.scope_prefix : args.prefix,
+        inner,
+        binding ? binding.base_commit : args.base_ref,
+        binding ? binding.head_commit : args.head_ref
+      )
+    );
   }));
 
   server.registerTool('edit', {

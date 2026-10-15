@@ -5,7 +5,7 @@ import { Deadline } from './deadline.js';
 import { resolveIdentity, identityDrift, type RepoIdentity } from './identity.js';
 import { GIT_BUFFERED_BYTES, GIT_CAPTURE_BYTES, OPERATION_BUDGET_MS, type Limits } from './limits.js';
 import { walk, fingerprint as statFingerprint, type Inventory } from './inventory.js';
-import { diffInput, openVerified, safeStatInput, type SafeStatInput } from './safe-fs.js';
+import { diffInput, openVerified, readSymlinkVerified, safeStatInput, type SafeStatInput } from './safe-fs.js';
 import { batchPaths } from './git-batches.js';
 import { pathProblem } from './glob.js';
 import type { PathPolicy } from './path-policy.js';
@@ -71,6 +71,7 @@ type Structure = {
   untrackedVisible: Set<string>;
   flaggedVisible: Set<string>;
   changedTracked: Set<string>;
+  trackedSymlinks: Map<string, string>;
   structuralDigest: string;
   canonicalInputs: {
     visibleIndexDigest: string;
@@ -78,6 +79,7 @@ type Structure = {
     inventoryDigest: string;
     metadataDigest: string;
     statusDigest: string;
+    symlinkDigest: string;
     deniedToken: string;
   };
 };
@@ -151,6 +153,46 @@ async function metadataRecords(root: string, names: Iterable<string>, deadline: 
     records.push(`${name}\0${statState(input)}`);
   }
   return { records, states };
+}
+
+function gitBlobId(raw: Uint8Array, objectId: string) {
+  const algorithm = objectId.length === 40 ? 'sha1' : objectId.length === 64 ? 'sha256' : undefined;
+  if (!algorithm) throw unavailable();
+  const hash = createHash(algorithm);
+  hash.update(`blob ${raw.byteLength}\0`);
+  hash.update(raw);
+  return hash.digest('hex');
+}
+
+async function trackedSymlinkRecords(
+  root: string,
+  trackedVisible: Iterable<string>,
+  indexByPath: Map<string, IndexEntry[]>,
+  metadata: Map<string, SafeStatInput>,
+  deadline: Deadline
+) {
+  const links = new Map<string, string>();
+  const records: string[] = [];
+  for (const name of sorted(trackedVisible)) {
+    deadline.check(unavailable);
+    const entries = indexByPath.get(name) ?? [];
+    if (entries.length !== 1 || entries[0].stage !== 0 || entries[0].mode !== '120000') continue;
+    const state = metadata.get(name);
+    if (!state) throw unavailable();
+    if (state.state === 'absent' || state.state === 'file') continue;
+    let verified: Awaited<ReturnType<typeof readSymlinkVerified>>;
+    try { verified = await readSymlinkVerified(root, name); }
+    catch { throw unavailable(); }
+    const rawSha = sha256(verified.link);
+    const actualBlob = gitBlobId(verified.link, entries[0].object);
+    const record = [
+      name, entries[0].object, actualBlob, rawSha,
+      verified.link.byteLength.toString(), statFingerprint(verified.stat)
+    ].join('\0');
+    links.set(name, rawSha);
+    records.push(record);
+  }
+  return { links, records };
 }
 
 async function deniedToken(
@@ -231,9 +273,10 @@ function assertVisibleCaptureBound(status: StatusRecord[], untracked: Iterable<s
   if (Buffer.byteLength(captured) > captureLimit(limits)) throw unavailable();
 }
 
-function unsafeInventorySkipped(inv: Inventory) {
+function unsafeInventorySkipped(inv: Inventory, verifiedTrackedSymlinks = 0) {
   const { symlinks, special, linked, unsafe_name, too_long, other_device } = inv.skipped;
-  return symlinks + special + linked + unsafe_name + too_long + other_device;
+  if (verifiedTrackedSymlinks > symlinks) return 1;
+  return (symlinks - verifiedTrackedSymlinks) + special + linked + unsafe_name + too_long + other_device;
 }
 
 async function captureStructure(options: TargetFingerprintV1Options, deadline: Deadline): Promise<Structure> {
@@ -250,12 +293,15 @@ async function captureStructure(options: TargetFingerprintV1Options, deadline: D
     deadline,
     expired: unavailable
   });
-  if (unsafeInventorySkipped(inventory) !== 0) throw unavailable();
 
   const trackedAll = new Set<string>([...headNames, ...indexByPath.keys()]);
   const trackedVisible = new Set(sorted(trackedAll).filter(name => isVisible(options.pathPolicy, name)));
   const deniedNames = new Set(sorted(trackedAll).filter(name => !isVisible(options.pathPolicy, name)));
   const visibleMetadata = await metadataRecords(options.root, trackedVisible, deadline);
+  const symlinks = await trackedSymlinkRecords(
+    options.root, trackedVisible, indexByPath, visibleMetadata.states, deadline
+  );
+  if (unsafeInventorySkipped(inventory, symlinks.links.size) !== 0) throw unavailable();
 
   let trackedOverCap = 0;
   for (const input of visibleMetadata.states.values()) {
@@ -293,6 +339,7 @@ async function captureStructure(options: TargetFingerprintV1Options, deadline: D
     inventoryDigest: inventory.digest,
     metadataDigest: sha256(visibleMetadata.records.join('\0')),
     statusDigest: sha256(status.map(record => record.canonical).join('\0')),
+    symlinkDigest: sha256(symlinks.records.join('\0')),
     deniedToken: denied
   };
   const structuralDigest = sha256(JSON.stringify([
@@ -316,6 +363,7 @@ async function captureStructure(options: TargetFingerprintV1Options, deadline: D
     untrackedVisible,
     flaggedVisible,
     changedTracked,
+    trackedSymlinks: symlinks.links,
     structuralDigest,
     canonicalInputs
   };
@@ -379,7 +427,10 @@ async function contentDigest(options: TargetFingerprintV1Options, structure: Str
   ]);
   const records: string[] = [];
   for (const name of sorted(names)) {
-    const content = await hashVisibleFile(options.root, name, options.limits.edit_file_bytes, deadline);
+    const symlink = structure.trackedSymlinks.get(name);
+    const content = symlink
+      ? `symlink-sha256:${symlink}`
+      : await hashVisibleFile(options.root, name, options.limits.edit_file_bytes, deadline);
     records.push(`${name}\0${content}`);
   }
   return sha256(records.join('\0'));

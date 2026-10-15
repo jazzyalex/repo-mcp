@@ -40,7 +40,7 @@ test('public source archive is deterministic, allowlisted and self-contained', {
   for (const required of [
     'README.md', 'SETUP.md', 'SECURITY.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 'SOURCE-MANIFEST.json',
     'docs/MULTI-REPO-SPEC.md', 'docs/DESIGN-2B-PATH-POLICY.md', 'docs/WORKFLOW-SPEC.md',
-    'docs/V1-HARDENING-SPEC.md', 'docs/PROVIDER-NEUTRAL-REVIEW-PLAN.md', '.claude/skills/repo-mcp/SKILL.md',
+    'docs/SHARED-REVIEW-WORKFLOW.md', 'docs/V1-HARDENING-SPEC.md', 'docs/PROVIDER-NEUTRAL-REVIEW-PLAN.md', '.claude/skills/repo-mcp/SKILL.md',
     '.claude/skills/repo-mcp-review/SKILL.md', '.claude/skills/repo-mcp-architect/SKILL.md',
     '.codex/skills/repo-mcp/SKILL.md', '.codex/skills/repo-mcp-architect/SKILL.md',
     'scripts/model-policy.ts', 'src/model-policy.ts', 'scripts/chatgpt-run.ts', 'src/chatgpt-run.ts', 'src/git-ref.ts',

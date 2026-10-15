@@ -38,6 +38,7 @@ import { PROJECT_BASE } from '../src/version.js';
 import { sha256 } from '../src/errors.js';
 import { StateStore } from '../src/task-state.js';
 import { recoverTaskStaleLocks } from '../src/task.js';
+import { prepareOrJoinReview, reconcileReviewParticipant } from '../src/review-share.js';
 
 const NOW = new Date('2026-10-07T20:00:00.000Z');
 const OBSERVED = new Date('2026-10-07T20:00:03.000Z');
@@ -276,6 +277,208 @@ test('public ChatGPT run CLI prepares from a regular prompt and refuses a symlin
   const invalidRefused = spawnSync('npm', args(invalid), { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 5_000 });
   assert.equal(invalidRefused.status, 1);
   assert.match(invalidRefused.stderr, /valid UTF-8/i);
+});
+
+test('public ChatGPT run CLI carries commit-bound receipts through submit complete and recovery', async t => {
+  const { base, root, stateDir } = await fixture(t);
+  await writeFile(path.join(root, 'src/clamp.js'), 'export function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }\n// pinned CLI head\n');
+  await git(root, 'add', '--', 'src/clamp.js');
+  await git(root, 'commit', '-m', 'commit-bound CLI receipt fixture');
+  await rebindRegisteredTask({ stateDir, taskId: 'task' });
+
+  const preparePinned = async (label: string) => {
+    const sessionId = `session-${label}`;
+    const prepared = await prepareOrJoinReview({
+      stateDir,
+      repositoryId: 'repo',
+      coordinator: 'codex',
+      profile: 'review',
+      surface: 'chat',
+      sessionId,
+      workspaceRequestId: `open-${label}`,
+      prompt: `Review commit-bound CLI receipt ${label}.\n`,
+      baseRef: 'HEAD^',
+      headRef: 'HEAD',
+      scopePrefix: 'src/',
+      ttlSeconds: 300,
+      now: new Date()
+    });
+    const binding = prepared.participant.commit_binding;
+    assert.ok(binding);
+    await openWorkspace({
+      stateDir,
+      repositoryId: 'repo',
+      taskId: 'task',
+      mode: 'review',
+      requestId: prepared.participant.workspace_request_id,
+      ttlMs: prepared.participant.workspace_ttl_ms,
+      baseRef: binding.requested_base_ref,
+      headRef: binding.requested_head_ref,
+      scopePrefix: binding.scope_prefix
+    });
+    await reconcileReviewParticipant({
+      stateDir,
+      taskId: 'task',
+      participantId: prepared.participant.participant_id
+    });
+
+    const contractFile = path.join(base, `${label}-prepared.json`);
+    const evidenceFile = path.join(base, `${label}-evidence.json`);
+    await writeFile(contractFile, JSON.stringify(prepared.run));
+    const observed = runNpm('chatgpt-run', [
+      'observe',
+      '--state-dir', stateDir,
+      '--selection-id', prepared.run.selection.selection_id,
+      '--surface', 'chat',
+      '--session-id', sessionId,
+      '--control-label', 'Extra High',
+      '--model-label', 'Sol',
+      '--selected-at', prepared.run.selection.requested_at,
+      '--observed-at', new Date().toISOString()
+    ], stateDir);
+    assert.equal(observed.status, 0, observed.stderr);
+    await writeFile(evidenceFile, observed.stdout);
+    const reserved = runNpm('chatgpt-run', [
+      'reserve',
+      '--state-dir', stateDir,
+      '--run', prepared.run.run_id,
+      '--contract-file', contractFile,
+      '--evidence-file', evidenceFile
+    ], stateDir);
+    assert.equal(reserved.status, 0, reserved.stderr);
+    assert.equal(JSON.parse(reserved.stdout).state, 'submission-reserved');
+    return { prepared, binding, sessionId };
+  };
+
+  const receiptArgs = (
+    prepared: Awaited<ReturnType<typeof prepareOrJoinReview>>,
+    sessionId: string,
+    event: string,
+    binding: { head_commit: string; candidate_digest: string },
+    mode: 'valid' | 'missing' | 'mismatch' = 'valid'
+  ) => {
+    const args = [
+      '--state-dir', stateDir,
+      '--run', prepared.run.run_id,
+      '--repository', 'repo',
+      '--task', 'task',
+      '--prompt-sha256', prepared.run.prompt_sha256,
+      '--base-commit', prepared.run.resolved_base_commit,
+      '--session-id', sessionId,
+      '--browser-event-id', event,
+      '--observed-at', new Date().toISOString()
+    ];
+    if (mode !== 'missing') {
+      args.push(
+        '--head-commit', binding.head_commit,
+        '--candidate-digest', mode === 'mismatch' ? '0'.repeat(64) : binding.candidate_digest
+      );
+    }
+    return args;
+  };
+
+  const completedRun = await preparePinned('cli-bound-complete');
+  const strict = runNpm('chatgpt-run', [
+    'status',
+    '--state-dir', stateDir,
+    '--run', completedRun.prepared.run.run_id,
+    '--head-commit', completedRun.binding.head_commit,
+    '--candidate-digest', completedRun.binding.candidate_digest
+  ], stateDir);
+  assert.equal(strict.status, 1);
+  assert.match(strict.stderr, /--head-commit is not valid for chatgpt-run status/i);
+
+  const missingSubmit = runNpm('chatgpt-run', [
+    'submitted',
+    ...receiptArgs(
+      completedRun.prepared, completedRun.sessionId, 'cli-bound-submit-missing',
+      completedRun.binding, 'missing'
+    )
+  ], stateDir);
+  assert.equal(missingSubmit.status, 1);
+  assert.match(missingSubmit.stderr, /receipt does not match/i);
+
+  const submitEvent = 'cli-bound-submit';
+  const submitted = runNpm('chatgpt-run', [
+    'submitted',
+    ...receiptArgs(completedRun.prepared, completedRun.sessionId, submitEvent, completedRun.binding)
+  ], stateDir);
+  assert.equal(submitted.status, 0, submitted.stderr);
+  assert.equal(JSON.parse(submitted.stdout).state, 'submitted');
+
+  const output = 'SHIP: commit-bound CLI receipt accepted.\n';
+  const outputFile = path.join(base, 'cli-bound-output.txt');
+  await writeFile(outputFile, output);
+  const completionTail = [
+    '--output-file', outputFile,
+    '--outcome', 'ship',
+    '--submission-event-sha256', sha256(`browser-event\0${submitEvent}`),
+    '--output-sha256', sha256(output),
+    '--response-state', 'completed'
+  ];
+  const mismatchedComplete = runNpm('chatgpt-run', [
+    'complete',
+    ...receiptArgs(
+      completedRun.prepared, completedRun.sessionId, 'cli-bound-complete-bad',
+      completedRun.binding, 'mismatch'
+    ),
+    ...completionTail
+  ], stateDir);
+  assert.equal(mismatchedComplete.status, 1);
+  assert.match(mismatchedComplete.stderr, /receipt does not match/i);
+
+  const completed = runNpm('chatgpt-run', [
+    'complete',
+    ...receiptArgs(
+      completedRun.prepared, completedRun.sessionId, 'cli-bound-complete',
+      completedRun.binding
+    ),
+    ...completionTail
+  ], stateDir);
+  assert.equal(completed.status, 0, completed.stderr);
+  assert.equal(JSON.parse(completed.stdout).state, 'completed');
+
+  const recoveredRun = await preparePinned('cli-bound-recover');
+  const recoveredSubmit = runNpm('chatgpt-run', [
+    'submitted',
+    ...receiptArgs(
+      recoveredRun.prepared, recoveredRun.sessionId, 'cli-bound-recover-submit',
+      recoveredRun.binding
+    )
+  ], stateDir);
+  assert.equal(recoveredSubmit.status, 0, recoveredSubmit.stderr);
+  assert.equal(JSON.parse(recoveredSubmit.stdout).state, 'submitted');
+
+  const uncertain = runNpm('chatgpt-run', [
+    'uncertain',
+    '--state-dir', stateDir,
+    '--run', recoveredRun.prepared.run.run_id,
+    '--failure-code', 'BROWSER_DISCONNECTED'
+  ], stateDir);
+  assert.equal(uncertain.status, 0, uncertain.stderr);
+  assert.equal(JSON.parse(uncertain.stdout).state, 'uncertain');
+
+  const missingRecover = runNpm('chatgpt-run', [
+    'recover',
+    '--resolution', 'submitted',
+    ...receiptArgs(
+      recoveredRun.prepared, recoveredRun.sessionId, 'cli-bound-recover-missing',
+      recoveredRun.binding, 'missing'
+    )
+  ], stateDir);
+  assert.equal(missingRecover.status, 1);
+  assert.match(missingRecover.stderr, /receipt does not match/i);
+
+  const recovered = runNpm('chatgpt-run', [
+    'recover',
+    '--resolution', 'submitted',
+    ...receiptArgs(
+      recoveredRun.prepared, recoveredRun.sessionId, 'cli-bound-recover',
+      recoveredRun.binding
+    )
+  ], stateDir);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(JSON.parse(recovered.stdout).state, 'submitted');
 });
 
 test('Stage 1 new ChatGPT preparations default code, code-hard, review and architecture to Chat', async t => {

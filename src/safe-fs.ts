@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, realpath, unlink, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readlink, realpath, unlink, type FileHandle } from 'node:fs/promises';
 import type { Stats, BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { SafeError, NotAppliedError } from './errors.js';
@@ -75,6 +75,45 @@ export async function safeStatInput(root: string, rel: string): Promise<SafeStat
     return { state: 'refused', reason: 'it cannot be inspected' };
   }
   return { state: 'refused', reason: 'it is not a regular file' };
+}
+
+/**
+ * Read only the raw link text of a symlink leaf. Parent components are required to remain plain
+ * directories with stable identities before and after readlink; the leaf itself must remain the same
+ * symlink. The link target is never resolved or followed.
+ */
+export async function readSymlinkVerified(root: string, rel: string): Promise<{ link: Buffer; stat: BigIntStats }> {
+  const rootStat = await lstat(root, { bigint: true });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new SafeError('Repository root is not a plain directory.');
+  const parts = rel.split('/');
+  if (!parts.length || parts.some(part => !part || part === '.' || part === '..')) throw new SafeError('Invalid symlink path.');
+  const parents: Array<{ path: string; dev: bigint; ino: bigint }> = [];
+  let current = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    current = path.join(current, parts[i]);
+    const stat = await lstat(current, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== rootStat.dev) {
+      throw new SafeError('Symlink parent path is not a stable in-repository directory.');
+    }
+    parents.push({ path: current, dev: stat.dev, ino: stat.ino });
+  }
+  const leaf = path.join(current, parts[parts.length - 1]);
+  const before = await lstat(leaf, { bigint: true });
+  if (!before.isSymbolicLink() || before.dev !== rootStat.dev) throw new SafeError('Expected a tracked symlink leaf.');
+  const link = await readlink(leaf, { encoding: 'buffer' });
+  const after = await lstat(leaf, { bigint: true });
+  if (!after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino ||
+      after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) {
+    throw new SafeError('Symlink changed while it was being inspected.');
+  }
+  for (const parent of parents) {
+    const stat = await lstat(parent.path, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== parent.dev || stat.ino !== parent.ino) {
+      throw new SafeError('Symlink parent path changed while it was being inspected.');
+    }
+  }
+  if (BigInt(link.byteLength) !== before.size) throw new SafeError('Symlink link text changed while it was being inspected.');
+  return { link, stat: before };
 }
 
 /**

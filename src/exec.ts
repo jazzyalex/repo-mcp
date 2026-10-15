@@ -54,19 +54,34 @@ export async function execute(executable: string, args: string[], cwd: string, t
 }
 
 const GIT_BASE = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '--no-pager', '--literal-pathspecs'];
-const CHILD_ENV = { PATH: '/usr/bin:/bin', LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
+const GIT_INSPECTION_ENV = { GIT_NO_REPLACE_OBJECTS: '1' };
+const CHILD_ENV = {
+  PATH: '/usr/bin:/bin',
+  LANG: 'C',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_OPTIONAL_LOCKS: '0',
+  ...GIT_INSPECTION_ENV
+};
 
 /**
  * Stream stdout to `dest` without holding it in memory. Output beyond maxBytes, invalid UTF-8,
  * a timeout or a write failure kills the process group; the caller discards `dest` unless the
  * result is clean. stderr is not kept.
  */
-export async function executeToFile(executable: string, args: string[], cwd: string, dest: string, options: { maxBytes: number; timeout?: number; append?: boolean }) {
+export async function executeToFile(
+  executable: string,
+  args: string[],
+  cwd: string,
+  dest: string,
+  options: { maxBytes: number; timeout?: number; append?: boolean; validateUtf8?: boolean }
+) {
   return new Promise<{ exit_code: number | null; signal: string | null; bytes: number; timed_out: boolean; truncated: boolean; invalid_utf8: boolean; duration_ms: number }>((resolve, reject) => {
     const start = performance.now();
     const child = spawn(executable, args, { cwd, shell: false, detached: true, stdio: ['ignore', 'pipe', 'ignore'], env: CHILD_ENV });
     const out = createWriteStream(dest, { flags: options.append ? 'a' : 'wx', mode: 0o600 });
-    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+    const decoder = options.validateUtf8 === false ? undefined : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
     let bytes = 0, timed_out = false, truncated = false, invalid_utf8 = false, writeError: Error | undefined, spawnError = false;
     const kill = () => { if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} } };
     const timer = setTimeout(() => { timed_out = true; kill(); }, options.timeout ?? 10_000);
@@ -75,7 +90,9 @@ export async function executeToFile(executable: string, args: string[], cwd: str
       if (truncated || invalid_utf8 || writeError) return;
       bytes += chunk.length;
       if (bytes > options.maxBytes) { truncated = true; kill(); return; }
-      try { decoder.decode(chunk, { stream: true }); } catch { invalid_utf8 = true; kill(); return; }
+      if (decoder) {
+        try { decoder.decode(chunk, { stream: true }); } catch { invalid_utf8 = true; kill(); return; }
+      }
       if (!out.write(chunk)) { child.stdout.pause(); out.once('drain', () => child.stdout.resume()); }
     });
     child.on('error', () => { spawnError = true; clearTimeout(timer); out.destroy(); reject(new SafeError('Unable to start the configured command.')); });
@@ -83,7 +100,9 @@ export async function executeToFile(executable: string, args: string[], cwd: str
       if (spawnError) return;
       clearTimeout(timer);
       kill();
-      try { decoder.decode(); } catch { invalid_utf8 = true; }
+      if (decoder) {
+        try { decoder.decode(); } catch { invalid_utf8 = true; }
+      }
       out.end(() => {
         if (writeError) reject(new SafeError('Unable to store Git output.'));
         else resolve({ exit_code, signal, bytes, timed_out, truncated, invalid_utf8, duration_ms: Math.round(performance.now() - start) });
@@ -95,6 +114,9 @@ export async function executeToFile(executable: string, args: string[], cwd: str
 export const runGitToFile = (cwd: string, args: string[], dest: string, options: { maxBytes: number; timeout?: number; append?: boolean }) =>
   executeToFile('/usr/bin/git', [...GIT_BASE, ...args], cwd, dest, options);
 
-// Hooks, fsmonitor and pagers are disabled for every inspection command.
+export const runGitRawToFile = (cwd: string, args: string[], dest: string, options: { maxBytes: number; timeout?: number; append?: boolean }) =>
+  executeToFile('/usr/bin/git', [...GIT_BASE, ...args], cwd, dest, { ...options, validateUtf8: false });
+
+// Hooks, fsmonitor, pagers and replacement-object rewriting are disabled for every inspection command.
 export const runGit = (cwd: string, args: string[], options: { strictUtf8?: boolean; timeout?: number; maxBytes?: number } = {}) =>
-  execute('/usr/bin/git', [...GIT_BASE, ...args], cwd, options.timeout ?? 10_000, {}, { maxOutputBytes: options.maxBytes ?? GIT_BUFFERED_BYTES, strictUtf8: options.strictUtf8 });
+  execute('/usr/bin/git', [...GIT_BASE, ...args], cwd, options.timeout ?? 10_000, GIT_INSPECTION_ENV, { maxOutputBytes: options.maxBytes ?? GIT_BUFFERED_BYTES, strictUtf8: options.strictUtf8 });

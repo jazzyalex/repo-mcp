@@ -76,7 +76,98 @@ A workspace stores both epochs. Therefore a coding workspace made before review 
 
 All mutations and approved test/check execution MUST pass through the task gate. The broker MUST repeat workspace/catalog authorization inside that same task-gated critical section immediately before a mutation/check begins; an authorization check performed only before waiting for the gate is insufficient. A repository registration/policy change, disable, rebind, finish, or review transition that wins the gate therefore makes a delayed older mutation/check fail before execution. A transition to review is acknowledged only after admitted mutations/checks have drained and the new phase epoch is durable.
 
-Read-only repository operations remain live views of the current checkout. A review phase is a write freeze, not a cryptographically immutable candidate. Until candidate-manifest support is implemented, review responses MUST state review_assurance="phase_only" and candidate_digest=null.
+Read-only repository operations are live checkout views unless the caller explicitly
+uses committed `read.ref` / commit `git_diff`, or opens a commit-pinned review
+workspace. A review phase by itself is still only a write freeze:
+legacy working-target review MUST report `review_assurance="phase_only"` and
+`candidate_digest=null`. A server-verified review workspace created with explicit
+base/head instead reports `commit_pinned` assurance and its scoped candidate digest;
+that does not imply a full candidate manifest or whole-repository coverage.
+
+### 5.1 Shared review generations and participants
+
+The accepted shared-review coordinator is owner-side state layered over the same task,
+workspace, run, and request authorities. It does not add a new MCP tool or a second task
+platform.
+
+`coord review prepare-or-join` accepts a repository, optional task, coordinator
+(`codex` or `claude`), review profile, Chat surface, stable logical browser session
+ID, preallocated `workspace_open` request ID, final prompt, and optional review
+base/head/scope. Supplying `head_ref` requires an explicit `base_ref` and creates a
+server-verified commit-pinned binding; omitting `head_ref` preserves the legacy
+working-tree `phase_only` workflow.
+Taskless selection is serialized by repository selection then task-share gates, but it is
+not a read-only discovery primitive: omitting the task asks prepare-or-join to combine task
+selection with durable participant/run preparation and therefore still requires the final
+prompt, session ID, and workspace request ID. The browser handoff MUST discover the sole
+safe task from owner-side repository/catalog status first, embed that exact task ID in the
+final prompt, and then call prepare-or-join with that same explicit task ID. It may reuse
+exactly one compatible unfinished review task, but MUST NOT bind a second unfinished task,
+freeze/rebind a coding owner, or repair zero/multiple/coding/stale/conflicting authority
+implicitly.
+
+A per-task strict/versioned review-share journal retains a current generation and
+historical participant evidence. Compatible reviewers of the same live target MAY share
+one generation even when their prompt, diff base, and scope differ; each reviewer keeps
+its own participant ID, ChatGPT run, browser-context binding, `workspace_open` request
+ID, workspace, and result. An exact request retry reuses the existing participant/run and
+MUST NOT authorize another prompt submission.
+
+For legacy working-tree review, generation compatibility is based on current
+task/repository authorization plus TargetFingerprintV1. That target fingerprint is
+independent of participant, prompt, resolved base, and scope. It binds branch/HEAD,
+bounded Git index identity, policy-visible changed/untracked content, flagged
+assume-unchanged/skip-worktree worktree state, safe visible metadata, verified unchanged
+tracked-symlink blob/link identity, and owner-keyed opaque denied metadata. Unsafe,
+untracked/unsafe symlinks, incomplete, changing, or over-cap capture fails closed.
+Denied content is not read. This remains `phase_only` assurance.
+
+Commit-pinned review instead resolves both requested refs conservatively to immutable Git
+commits and never invokes the working-target fingerprint. Its durable binding carries
+format version, policy digest, resolved base/head, scope prefix, and a domain-separated
+`candidate_digest`; the same binding is propagated through participant, run/request
+identity, browser workspace selection/reconciliation, recovery, and trusted receipts.
+That digest certifies only the bound policy/scope and immutable commit pair. It is not a
+whole-repository candidate manifest and does not make binary/non-text blobs semantically
+reviewed.
+
+Before shared preparation the coordinator MUST pre-resolve the requested Git base and
+preallocate both a unique `workspace_open` request ID and stable logical browser session
+ID. The final browser prompt is hashed only after repository/task IDs, immutable base,
+review workspace mode, and request ID are present. No coordinator MAY append those
+instructions or late-add a conversation ID after a session-only browser binding.
+
+The prepare result is nested as `{generation, participant, run, ...}`. Existing
+ChatGPT-run observe/reserve/submitted/complete/recover operations use the exact nested
+`run` record and its selection; the outer wrapper is not a model-selection contract.
+Shared run publication is authorized only while the real matching task-share lock
+acquisition is live and the exact durable initializing participant/generation/run/
+selection/workspace-request/prompt/browser/base binding matches.
+
+Workspace reconciliation takes only task ID plus participant ID. It MUST derive the
+workspace ID from the authoritative `workspace_open` request ledger and validate the
+operation, arguments, mode, repository/task identity, authorization epochs, policy and
+immutable TTL before binding it write-once. A caller-supplied workspace ID is not
+authority. Normal completion/close requires a bound workspace. Only an actual terminal
+failed-pre-submit participant may prove authoritative workspace absence.
+
+Current submitted/uncertain work remains protected even when its workspace association is
+pending. Security disable/revoke MAY invalidate current authority without claiming
+completion or deleting run/request/share evidence. Historical invalidated generations
+remain recoverable by the same immutable run/evidence but do not regain current
+submission authority and do not block a newer authorized generation merely because they
+remain historical evidence.
+
+Normal phase/rebind/finish paths, including direct/legacy compatibility paths, MUST refuse
+current protected participants, active relevant workspaces/admitted operations, and
+currently authorized unresolved legacy runs. Explicit security invalidation preserves
+evidence. Closing one review participant MUST NOT close or invalidate compatible
+siblings.
+
+The lock order is acyclic: taskless selection takes repository-selection -> task-share;
+shared prepare takes task-share -> task -> request; run transitions take task-share ->
+run -> request; normal lifecycle takes task-share -> task -> sorted relevant workspace
+admission -> control. No such lock is held across browser/model execution.
 
 ## 6. Workspace selections and tokens
 
@@ -86,9 +177,14 @@ Supported modes:
 | --- | --- | --- |
 | inspect | read | enabled registered task |
 | code | read, write, check | task in coding phase plus one operator-issued write grant |
-| review | read | task in review phase |
+| review | read | task in review phase; optional commit binding requires explicit base_ref + head_ref |
 
-Workspace opening is MCP-visible but may select only a previously registered repository_id and task_id. It never accepts a filesystem root, policy path, shell command, branch, or Git remote.
+Workspace opening is MCP-visible but may select only a previously registered
+repository_id and task_id. It never accepts a filesystem root, policy path, shell
+command, or Git remote. A review workspace may additionally accept bounded conservative
+`base_ref`, `head_ref`, and `scope_prefix`; if any commit-binding field is requested,
+both refs are mandatory, are resolved server-side to commits, and become immutable
+selection state. Those arguments are invalid for inspect/code workspaces.
 
 A coding workspace additionally consumes a short-lived single-use write_grant issued by the coordinator. The grant is authenticated and bound to the repository registration epoch, policy digest, task binding epoch, and task phase epoch, so repository disable/re-enable, policy change, rebind, or phase change invalidates older grants. Only one open, unexpired coding workspace with current authorization is allowed per task.
 
@@ -107,26 +203,37 @@ The production service exposes twelve fixed tools.
 Bootstrap tools:
 - service_info {}
 - repository_list {}
-- workspace_open { repository_id, task_id, mode, request_id, write_grant? }
+- workspace_open { repository_id, task_id, mode, request_id, write_grant?, base_ref?, head_ref?, scope_prefix? }
 - workspace_close { workspace_token, request_id }
 
 Repository tools:
 - repo_info
 - list_files
-- read
+- read { workspace_token, path, start_line?, max_lines?, ref?, cursor? }
 - search
-- git_diff { workspace_token, prefix?, base_ref?, cursor? }
+- git_diff { workspace_token, prefix?, base_ref?, head_ref?, cursor? }
 - edit
 - create_file
 - run_tests
 
 Every repository tool schema MUST require workspace_token.
 
-`git_diff.base_ref` is optional. When present, the service MUST accept only a bounded,
-conservative revision expression, resolve it to a commit before capture, return the
-resolved `base_commit`, and bind both the requested and resolved base into continuation
-authority. This permits review of committed changes from a clean checkout without making
-a branch or tag movement silently change later pages.
+`read.ref` accepts only the conservative revision grammar, resolves once to a commit,
+checks the path read policy before tree/blob access, and reads the Git blob rather than
+the checkout. The response carries resolved commit, Git blob ID/mode/size, full raw-byte
+SHA-256, and a ref/commit/blob-bound cursor. Regular UTF-8 source is paged as text;
+committed symlink blobs expose link text only as metadata and are never followed;
+binary/non-UTF8 content returns immutable identity plus an explicit unsupported-text
+reason.
+
+Legacy `git_diff` without `head_ref` retains working-tree/index semantics. Supplying
+`head_ref` requires explicit `base_ref`: both are conservatively resolved to commits
+and Git compares those two objects only with ext-diff/textconv/rename detection disabled.
+The working tree, index, and untracked additions are not inputs. The response returns the
+requested/resolved base and head plus the full retained-capture SHA-256, and continuation
+authority binds prefix, requested refs, resolved commits, capture identity, task and
+policy. Policy filtering occurs before scoped blob reads. Non-text/binary changes report
+old/new Git blob IDs, modes and sizes and explicitly do not claim semantic text review.
 
 Old unscoped production calls MUST fail closed. The service MUST NOT choose the sole registered repository, most-recent repository, active task, or another ambient default.
 
@@ -182,16 +289,37 @@ Repository/task selection never changes launchd configuration and never restarts
 
 The stable launchd definition remains repository-agnostic: it contains the installed Node/runtime path and owner state directory, not a repository, task, policy, tunnel key, or workspace token.
 
-Coordinator service commands are service configure, service start, service status, service stop, service recover-stale-control, and legacy plist migration where required. Starting/stopping/rebuilding the service is an operator action and is not exposed through MCP.
+Coordinator service commands are service configure, service start, service status, service stop, service recover-stale-control, and legacy plist migration where required. `service start` intentionally reloads the launchd broker; use it for first load, authorized deployment, or recovery, never merely to select a repository/task. Starting/stopping/rebuilding the service is an operator action and is not exposed through MCP. A healthy private tunnel/runtime key is reused across repository/task selection; tool-list refresh is needed only after a deployed MCP schema change.
 
 ## 13. Coordinator contract
 
 Coordinator command groups are:
-- repository add|list|enable|disable|remove
+- repository add|list|enable|disable|surface-policy|remove
 - task bind|status|phase|rebind|recover-stale|finish
 - workspace grant|revoke|recover-stale
+- review prepare-or-join|reconcile|status|close|recover-participant
 - migration active-service|rollback-active-service
 - service commands from section 12.
+
+`review prepare-or-join` requires Chat surface, coordinator `codex` or `claude`,
+profile `review` or `review-critical`, stable session ID, preallocated workspace-open
+request ID, and a bounded final prompt file. Omitting `--task` is a combined
+selection+preparation API for callers intentionally delegating task selection; it is not
+a discovery command and still requires the prompt/session/workspace-request inputs. A
+browser handoff MUST instead discover the task from owner-side repository/catalog status,
+embed it in the final prompt, pass that same explicit task ID, and compare returned
+participant/run task IDs plus resolved base before observe/reserve/send. Selection fails
+closed rather than stealing authority.
+Reconciliation accepts task+participant only.
+Close requires a fresh public request ID. Review status is sanitized and MUST NOT return
+workspace/write-grant tokens, raw prompts/outputs/browser IDs, policy source paths, or
+unrelated filesystem roots.
+
+The provider-neutral owner CLI `chatgpt-run` supplies prepare/status/observe/reserve/
+submitted/complete/uncertain/recover/recover-lock/recover-request/fail-pre-submit.
+For shared review, preparation is created by the review coordinator and later run
+commands operate on the exact nested run/selection. `reserve` is one-send authority:
+only `submission_authorized=true` permits browser submission.
 
 Commands validate command-specific options and reject irrelevant known flags.
 
@@ -248,8 +376,14 @@ The implementation MUST maintain all of these:
 12. Policy/state/token/audit material stays outside all served roots.
 13. Existing symlink/hard-link/traversal/secret/VCS protections remain in force.
 14. Git commit/push and arbitrary shell remain outside MCP.
-15. Phase freeze is not described as content-verified candidate evidence.
+15. Phase freeze and target fingerprinting are not described as content-verified candidate-manifest evidence.
 16. Workspace tokens are described as bearer capabilities, not authenticated conversation identity.
+17. Shared review preparation cannot synthesize participant/run authority outside the live matching task-share acquisition and durable initializing participant.
+18. Exact shared-review retries never authorize a second browser submission.
+19. Reconciliation derives workspace identity only from the authoritative workspace-open ledger; caller workspace IDs are not authority.
+20. Submitted/uncertain shared work remains protected while workspace association is pending.
+21. Historical invalidated generations retain evidence and same-run recovery without regaining current authority.
+22. Normal lifecycle refuses protected current review/run/workspace authority; explicit security invalidation preserves evidence rather than fabricating completion.
 
 ## 17. Resource and retention limits
 
@@ -259,7 +393,21 @@ The authorization ledger is additionally bounded. Current implementation refuses
 
 The local `coord gc` maintenance command defaults to a read-only deterministic plan. Apply mode MAY remove expired authorization history, expired capture pairs, and terminal non-publication outcomes only after their tasks are durably completed and the relevant control/admission/task/checkout locks are owned. Defaults are 24 hours for authorization history, zero additional hours after capture expiry, and 30 days after durable task completion for terminal outcomes. Operators may configure these windows and a bounded scan limit.
 
-GC MUST preserve active or unfinished tasks, lifecycle records, intent/publication evidence, policy and token material, audits, locks, and unknown state. It MUST fail closed or report an incomplete run when a candidate is busy, malformed, linked, permission-unsafe, identity-changed, or cannot be journaled. A permanent authorization-use marker MUST retain the migration rollback boundary after historical authorization rows are removed. GC is independent of, and has no authority over, ChatGPT or Claude conversation history.
+GC MUST preserve active or unfinished tasks, lifecycle records, intent/publication
+evidence, policy and token material, audits, locks, protected shared-review/run/request
+evidence, and unknown state. For any non-closed shared participant whose workspace is
+still pending, GC MUST resolve its immutable `workspace_open` request through the
+authoritative request ledger, validate operation/arguments/repository/task/mode/epochs/
+policy/TTL, and preserve the matching workspace plus request evidence. Bound protected
+workspaces are preserved directly. Corrupt or mismatched pending evidence fails closed
+before deletion. GC MUST NOT infer reviewer completion, convert uncertainty to success,
+or delete evidence merely because a security action invalidated current authority.
+
+It MUST fail closed or report an incomplete run when a candidate is busy, malformed,
+linked, permission-unsafe, identity-changed, or cannot be journaled. A permanent
+authorization-use marker MUST retain the migration rollback boundary after historical
+authorization rows are removed. GC is independent of, and has no authority over,
+ChatGPT or Claude conversation history.
 
 Future production scaling MAY add global/per-checkout admission quotas, but MUST NOT evict active selections, mutation outcomes, or active capture state merely to satisfy cache pressure.
 
@@ -283,6 +431,13 @@ The release gate requires deterministic tests for:
 - safe active-service migration and pre-use rollback;
 - fail-closed corrupt catalog/auth/token state;
 - policy/state material excluded from served roots and release packages;
+- taskless shared-review zero/multiple/coding-state refusal without task theft;
+- parallel Codex+Claude compatible joins sharing one target generation but distinct participants/runs/workspace requests/results;
+- exact shared-review retry with one-send authorization;
+- authoritative task+participant workspace reconciliation and bound-before-completion;
+- lifecycle refusal for protected participants/active workspaces/current unresolved runs while security invalidation preserves evidence;
+- same-run recovery of historical invalidated generations without restoring current authority;
+- pending protected workspace/request-ledger preservation across GC and fail-closed corrupt/mismatched ledger handling;
 - existing path/race/request-outcome regressions.
 
 Local typecheck/test execution is a separate validation step. Source implementation alone is not evidence that these acceptance criteria passed.

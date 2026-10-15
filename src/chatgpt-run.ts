@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { lstat } from 'node:fs/promises';
 import { SafeError, sha256 } from './errors.js';
-import { resolveGitCommit } from './git-ref.js';
+import {
+  commitReviewCandidateDigest,
+  isConservativeGitRevision,
+  resolveCommitReviewBinding,
+  resolveGitCommit,
+  type CommitReviewBinding
+} from './git-ref.js';
 import { resolveIdentity } from './identity.js';
 import {
   MODEL_POLICY_SCHEMA_VERSION,
@@ -43,6 +49,7 @@ export type ChatGptRunRecord = {
   head: string;
   requested_base_ref: string;
   resolved_base_commit: string;
+  commit_binding?: CommitReviewBinding;
   prompt_sha256: string;
   request_key: string;
   selection: ModelSelectionContract;
@@ -72,6 +79,8 @@ export type TrustedChatGptRunReceipt = {
   taskId: string;
   promptSha256: string;
   baseCommit: string;
+  headCommit?: string;
+  candidateDigest?: string;
   browserEventId: string;
   observedAt: string;
   conversationId?: string;
@@ -109,7 +118,7 @@ const PROFILE_SELECTION = {
 const RECORD_KEYS = new Set([
   'schema_version', 'run_id', 'coordinator', 'execution_surface', 'work_kind', 'profile', 'state',
   'repository_id', 'task_id', 'registration_epoch', 'binding_epoch', 'phase_epoch', 'policy_digest',
-  'root_sha256', 'branch', 'head', 'requested_base_ref', 'resolved_base_commit', 'prompt_sha256', 'request_key',
+  'root_sha256', 'branch', 'head', 'requested_base_ref', 'resolved_base_commit', 'commit_binding', 'prompt_sha256', 'request_key',
   'selection', 'share_generation', 'participant_id', 'workspace_request_id',
   'created_at', 'updated_at', 'submitted_at', 'completed_at', 'output_sha256', 'outcome',
   'failure_code', 'uncertain_from', 'model_verified_at',
@@ -171,6 +180,31 @@ function browserEventHash(value: string) {
   return sha256(`browser-event\0${value}`);
 }
 
+function validateCommitBinding(raw: unknown, policyDigest: string): CommitReviewBinding | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new SafeError('Corrupt ChatGPT commit review binding.');
+  const value = raw as Record<string, unknown>;
+  const keys = new Set([
+    'format_version', 'assurance', 'requested_base_ref', 'base_commit',
+    'requested_head_ref', 'head_commit', 'scope_prefix', 'candidate_digest'
+  ]);
+  if (
+    Object.keys(value).some(key => !keys.has(key)) ||
+    value.format_version !== 1 ||
+    value.assurance !== 'commit_pinned' ||
+    typeof value.requested_base_ref !== 'string' || !isConservativeGitRevision(value.requested_base_ref) ||
+    typeof value.requested_head_ref !== 'string' || !isConservativeGitRevision(value.requested_head_ref) ||
+    typeof value.base_commit !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.base_commit) ||
+    typeof value.head_commit !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.head_commit) ||
+    typeof value.scope_prefix !== 'string' || value.scope_prefix.length > 256 || CONTROL.test(value.scope_prefix) ||
+    typeof value.candidate_digest !== 'string' || !HEX.test(value.candidate_digest) ||
+    value.candidate_digest !== commitReviewCandidateDigest(
+      policyDigest, value.base_commit as string, value.head_commit as string, value.scope_prefix as string
+    )
+  ) throw new SafeError('Corrupt ChatGPT commit review binding.');
+  return value as unknown as CommitReviewBinding;
+}
+
 function validateTrustedReceipt(record: ChatGptRunRecord, receipt: TrustedChatGptRunReceipt, now = new Date(), notBefore = record.created_at) {
   const observed = Date.parse(receipt.observedAt);
   const current = now.getTime();
@@ -179,7 +213,11 @@ function validateTrustedReceipt(record: ChatGptRunRecord, receipt: TrustedChatGp
     throw new SafeError('Trusted browser receipt has an invalid or stale observation time.');
   }
   if (receipt.repositoryId !== record.repository_id || receipt.taskId !== record.task_id ||
-      receipt.promptSha256 !== record.prompt_sha256 || receipt.baseCommit !== record.resolved_base_commit) {
+      receipt.promptSha256 !== record.prompt_sha256 || receipt.baseCommit !== record.resolved_base_commit ||
+      (record.commit_binding
+        ? receipt.headCommit !== record.commit_binding.head_commit ||
+          receipt.candidateDigest !== record.commit_binding.candidate_digest
+        : receipt.headCommit !== undefined || receipt.candidateDigest !== undefined)) {
     throw new SafeError('Trusted browser receipt does not match this ChatGPT run.');
   }
   const context = trustedBrowserContextBinding({ conversationId: receipt.conversationId, sessionId: receipt.sessionId });
@@ -200,11 +238,21 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
   const sharedCount = [record.share_generation, record.participant_id, record.workspace_request_id]
     .filter(value => value !== undefined).length;
   const shared = sharedCount === 3;
+  let commitBinding: CommitReviewBinding | undefined;
+  try {
+    commitBinding = HEX.test(record.policy_digest) ? validateCommitBinding(record.commit_binding, record.policy_digest) : undefined;
+  } catch {
+    throw new SafeError(`ChatGPT run ${runId} does not exist or is corrupt.`);
+  }
+  if (record.commit_binding !== undefined && !commitBinding) {
+    throw new SafeError(`ChatGPT run ${runId} does not exist or is corrupt.`);
+  }
   const requestParts: unknown[] | undefined = selection && typeof selection === 'object' ? [
     record.repository_id, record.task_id, record.registration_epoch, record.binding_epoch, record.phase_epoch,
     record.policy_digest, record.head, record.resolved_base_commit, record.prompt_sha256, selection.browser_context,
     record.coordinator, record.work_kind, record.profile
   ] : undefined;
+  if (commitBinding && requestParts) requestParts.push(commitBinding);
   if (shared && requestParts) {
     requestParts.push(record.share_generation, record.participant_id, record.workspace_request_id);
   }
@@ -218,6 +266,12 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
       !HEX.test(record.root_sha256) || (record.branch !== null && typeof record.branch !== 'string') ||
       !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.head) || typeof record.requested_base_ref !== 'string' ||
       !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.resolved_base_commit) || !HEX.test(record.prompt_sha256) ||
+      (commitBinding !== undefined && (
+        !shared || record.work_kind !== 'review' || record.branch !== null ||
+        record.head !== commitBinding.head_commit ||
+        record.requested_base_ref !== commitBinding.requested_base_ref ||
+        record.resolved_base_commit !== commitBinding.base_commit
+      )) ||
       !HEX.test(record.request_key) || record.request_key !== expectedRequestKey ||
       (sharedCount !== 0 && sharedCount !== 3) ||
       (shared && (!validEpoch(record.share_generation) || typeof record.participant_id !== 'string' ||
@@ -333,9 +387,11 @@ type ObservedReviewTarget = { fingerprint: string; head: string; branch: string 
 
 async function observeSharedReviewTarget(stateDir: string, record: ChatGptRunRecord): Promise<ObservedReviewTarget | undefined> {
   if (!isSharedRun(record)) return undefined;
-  const { computeCurrentReviewTarget, ReviewShareError } = await import('./review-state.js');
+  const { computeCommitReviewTarget, computeCurrentReviewTarget, ReviewShareError } = await import('./review-state.js');
   try {
-    const current = await computeCurrentReviewTarget(stateDir, record.repository_id, record.task_id);
+    const current = record.commit_binding
+      ? await computeCommitReviewTarget(stateDir, record.repository_id, record.task_id, record.commit_binding.head_commit)
+      : await computeCurrentReviewTarget(stateDir, record.repository_id, record.task_id);
     return {
       fingerprint: current.target.fingerprint,
       head: current.target.head,
@@ -457,14 +513,36 @@ async function assertCandidateCurrent(record: ChatGptRunRecord, stateDir: string
   }
   const live = await taskStatus(stateDir, record.task_id, { readOnly: true });
   const identity = await resolveIdentity(repository.root);
-  const base = await resolveGitCommit(repository.root, record.requested_base_ref);
-  if (repository.registration_epoch !== record.registration_epoch || task.binding_epoch !== record.binding_epoch ||
-      task.phase_epoch !== record.phase_epoch || repository.policy_digest !== record.policy_digest ||
-      live.binding_epoch !== record.binding_epoch || live.phase_epoch !== record.phase_epoch || live.completion ||
-      live.root !== identity.root || live.git_dir !== identity.git_dir || live.common_dir !== identity.common_dir ||
-      live.policy_digest !== record.policy_digest || live.head !== identity.head || live.branch !== identity.branch ||
-      identity.head !== record.head || identity.branch !== record.branch || sha256(identity.root) !== record.root_sha256 ||
-      base.commit !== record.resolved_base_commit) {
+  const base = await resolveGitCommit(
+    repository.root,
+    record.commit_binding?.base_commit ?? record.requested_base_ref
+  );
+  const head = record.commit_binding
+    ? await resolveGitCommit(repository.root, record.commit_binding.head_commit)
+    : undefined;
+  const commonChanged =
+    repository.registration_epoch !== record.registration_epoch ||
+    task.binding_epoch !== record.binding_epoch ||
+    task.phase_epoch !== record.phase_epoch ||
+    repository.policy_digest !== record.policy_digest ||
+    live.binding_epoch !== record.binding_epoch ||
+    live.phase_epoch !== record.phase_epoch ||
+    live.completion ||
+    live.root !== identity.root ||
+    live.git_dir !== identity.git_dir ||
+    live.common_dir !== identity.common_dir ||
+    live.policy_digest !== record.policy_digest ||
+    sha256(identity.root) !== record.root_sha256 ||
+    base.commit !== record.resolved_base_commit;
+  const targetChanged = record.commit_binding
+    ? !head || head.commit !== record.commit_binding.head_commit ||
+      record.head !== record.commit_binding.head_commit ||
+      record.branch !== null
+    : live.head !== identity.head ||
+      live.branch !== identity.branch ||
+      identity.head !== record.head ||
+      identity.branch !== record.branch;
+  if (commonChanged || targetChanged) {
     throw new SafeError('ChatGPT run candidate changed; prepare a new run before submission.');
   }
   if (record.work_kind === 'review' && live.phase !== 'review') throw new SafeError('ChatGPT review requires the task review phase.');
@@ -474,7 +552,7 @@ async function assertCandidateCurrent(record: ChatGptRunRecord, stateDir: string
 export async function prepareChatGptRun(options: {
   stateDir?: string; repositoryId: string; taskId: string; coordinator: ChatGptCoordinator;
   workKind: ChatGptWorkKind; profile?: ModelProfile; surface?: ChatSurface; surfaceOverrideReason?: string;
-  conversationId?: string; sessionId?: string; prompt: string; baseRef?: string;
+  conversationId?: string; sessionId?: string; prompt: string; baseRef?: string; headRef?: string; scopePrefix?: string;
   runId?: string; selectionId?: string; now?: Date;
   sharedReview?: { generation: number; participantId: string; workspaceRequestId: string };
 }) {
@@ -485,6 +563,12 @@ export async function prepareChatGptRun(options: {
   if (!['review', 'architecture', 'code'].includes(options.workKind)) throw new SafeError('Invalid ChatGPT work kind.');
   if (options.coordinator === 'claude' && options.workKind === 'code') {
     throw new SafeError('Claude coordinates Repo MCP review and architecture only; coding is a Codex-coordinated workflow.');
+  }
+  if (options.headRef !== undefined && (options.baseRef === undefined || !options.sharedReview || options.workKind !== 'review')) {
+    throw new SafeError('Commit-pinned ChatGPT review requires shared review with explicit base_ref and head_ref.');
+  }
+  if ((options.scopePrefix ?? '').length > 256 || CONTROL.test(options.scopePrefix ?? '')) {
+    throw new SafeError('Review scope prefix is invalid.');
   }
   if (options.sharedReview && (
     options.workKind !== 'review' ||
@@ -532,9 +616,19 @@ export async function prepareChatGptRun(options: {
   }
   if (options.workKind === 'review' && live.phase !== 'review') throw new SafeError('ChatGPT review requires the task review phase.');
   if (options.workKind === 'code' && live.phase !== 'coding') throw new SafeError('ChatGPT coding requires the task coding phase.');
-  // Validate the requested base against the preliminary snapshot, then repeat all
+  // Validate requested revisions against the preliminary snapshot, then repeat all
   // authorization-sensitive reads under the task coordinator gate before publication.
-  await resolveGitCommit(identity.root, options.baseRef);
+  if (options.headRef !== undefined) {
+    await resolveCommitReviewBinding({
+      root: identity.root,
+      policyDigest: repository.policy_digest,
+      baseRef: options.baseRef!,
+      headRef: options.headRef,
+      scopePrefix: options.scopePrefix
+    });
+  } else {
+    await resolveGitCommit(identity.root, options.baseRef);
+  }
   const profile = profileFor(options.workKind, options.profile);
   const runId = options.runId ?? randomUUID();
   assertRunId(runId);
@@ -577,7 +671,16 @@ export async function prepareChatGptRun(options: {
       throw new SafeError('ChatGPT coding requires the task coding phase.');
     }
 
-    const currentBase = await resolveGitCommit(currentIdentity.root, options.baseRef);
+    const currentCommitBinding = options.headRef !== undefined ? await resolveCommitReviewBinding({
+      root: currentIdentity.root,
+      policyDigest: currentRepository.policy_digest,
+      baseRef: options.baseRef!,
+      headRef: options.headRef,
+      scopePrefix: options.scopePrefix
+    }) : undefined;
+    const currentBase = currentCommitBinding
+      ? { requested: currentCommitBinding.requested_base_ref, commit: currentCommitBinding.base_commit }
+      : await resolveGitCommit(currentIdentity.root, options.baseRef);
     if (options.sharedReview) {
       const { assertSharedPreparationAuthorizedUnderGate } = await import('./review-state.js');
       await assertSharedPreparationAuthorizedUnderGate({
@@ -594,18 +697,22 @@ export async function prepareChatGptRun(options: {
         promptDigest: sha256(options.prompt),
         browserContextDigest: sha256(JSON.stringify(browserContext)),
         requestedBaseRef: currentBase.requested,
-        resolvedBaseCommit: currentBase.commit
+        resolvedBaseCommit: currentBase.commit,
+        commitBinding: currentCommitBinding
       });
     }
     const store = await StateStore.open(stateDir, { forbiddenRoots: [currentIdentity.root, currentIdentity.common_dir] });
     if (await store.read<unknown>(recordPath(runId), KIND)) throw new SafeError(`ChatGPT run ${runId} already exists.`);
     const at = nowIso(options.now);
+    const runHead = currentCommitBinding?.head_commit ?? currentIdentity.head;
+    const runBranch = currentCommitBinding ? null : currentIdentity.branch;
     const requestParts: unknown[] = [
       options.repositoryId, options.taskId, currentRepository.registration_epoch,
       currentTask.binding_epoch, currentTask.phase_epoch, currentRepository.policy_digest,
-      currentIdentity.head, currentBase.commit, sha256(options.prompt), browserContext,
+      runHead, currentBase.commit, sha256(options.prompt), browserContext,
       options.coordinator, options.workKind, profile
     ];
+    if (currentCommitBinding) requestParts.push(currentCommitBinding);
     if (options.sharedReview) requestParts.push(
       options.sharedReview.generation,
       options.sharedReview.participantId,
@@ -649,8 +756,9 @@ export async function prepareChatGptRun(options: {
           repository_id: options.repositoryId, task_id: options.taskId,
           registration_epoch: currentRepository.registration_epoch, binding_epoch: currentTask.binding_epoch,
           phase_epoch: currentTask.phase_epoch, policy_digest: currentRepository.policy_digest,
-          root_sha256: sha256(currentIdentity.root), branch: currentIdentity.branch, head: currentIdentity.head,
+          root_sha256: sha256(currentIdentity.root), branch: runBranch, head: runHead,
           requested_base_ref: currentBase.requested, resolved_base_commit: currentBase.commit,
+          ...(currentCommitBinding ? { commit_binding: currentCommitBinding } : {}),
           prompt_sha256: sha256(options.prompt), request_key: requestKey, selection,
           ...(options.sharedReview ? {
             share_generation: options.sharedReview.generation,

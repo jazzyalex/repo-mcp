@@ -53,6 +53,7 @@ Profiles:
 
 RECEIPT_FLAGS:
   --repository ID --task ID --prompt-sha256 SHA256 --base-commit COMMIT
+  [--head-commit COMMIT --candidate-digest SHA256]
   --browser-event-id ID --observed-at ISO (--session-id ID|--conversation-id ID)
 `;
 
@@ -82,7 +83,8 @@ const { positionals, values } = parseArgs({
     'session-id': { type: 'string' }, 'prompt-file': { type: 'string' }, 'base-ref': { type: 'string' },
     'contract-file': { type: 'string' }, 'evidence-file': { type: 'string' },
     'output-file': { type: 'string' }, outcome: { type: 'string' }, 'failure-code': { type: 'string' },
-    'prompt-sha256': { type: 'string' }, 'base-commit': { type: 'string' }, 'browser-event-id': { type: 'string' },
+    'prompt-sha256': { type: 'string' }, 'base-commit': { type: 'string' }, 'head-commit': { type: 'string' },
+    'candidate-digest': { type: 'string' }, 'browser-event-id': { type: 'string' },
     'selection-id': { type: 'string' }, 'control-label': { type: 'string' },
     'model-label': { type: 'string' }, 'selected-at': { type: 'string' }, 'observed-at': { type: 'string' },
     resolution: { type: 'string' }, 'request-key': { type: 'string' },
@@ -100,7 +102,7 @@ const need = (name: keyof typeof values) => {
 };
 const receiptOptions = [
   'state-dir', 'run', 'repository', 'task', 'prompt-sha256', 'base-commit',
-  'browser-event-id', 'observed-at', 'conversation-id', 'session-id'
+  'head-commit', 'candidate-digest', 'browser-event-id', 'observed-at', 'conversation-id', 'session-id'
 ] as const;
 const assertOnly = (...allowed: string[]) => {
   const allow = new Set(allowed);
@@ -141,7 +143,10 @@ const validateCommandOptions = () => {
 };
 const receipt = (): TrustedChatGptRunReceipt => ({
   repositoryId: need('repository'), taskId: need('task'), promptSha256: need('prompt-sha256'),
-  baseCommit: need('base-commit'), browserEventId: need('browser-event-id'), observedAt: need('observed-at'),
+  baseCommit: need('base-commit'),
+  ...(values['head-commit'] !== undefined ? { headCommit: values['head-commit'] } : {}),
+  ...(values['candidate-digest'] !== undefined ? { candidateDigest: values['candidate-digest'] } : {}),
+  browserEventId: need('browser-event-id'), observedAt: need('observed-at'),
   conversationId: values['conversation-id'], sessionId: values['session-id']
 });
 

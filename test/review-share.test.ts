@@ -94,7 +94,7 @@ function deferred<T = void>() {
 
 async function fixture(
   t: { after(fn: () => Promise<void>): void },
-  options: { task?: boolean; phase?: 'coding' | 'review'; extraCommit?: boolean } = {}
+  options: { task?: boolean; phase?: 'coding' | 'review'; extraCommit?: boolean; trackedSymlink?: boolean } = {}
 ) {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-review-share-')));
   const root = path.join(base, 'repo');
@@ -106,7 +106,23 @@ async function fixture(
     await git(root, 'add', '--', 'src/share-target.txt');
     await git(root, 'commit', '-m', 'share target');
   }
-  await writeFile(policyPath, JSON.stringify(migrateV1(defaultPolicy)));
+  if (options.trackedSymlink) {
+    await writeFile(path.join(root, 'src', 'symlink-target-a.txt'), 'A\n');
+    await writeFile(path.join(root, 'src', 'symlink-target-b.txt'), 'B\n');
+    await symlink('symlink-target-a.txt', path.join(root, 'src', 'tracked-link.txt'));
+    await git(root, 'add', '--', 'src/symlink-target-a.txt', 'src/symlink-target-b.txt', 'src/tracked-link.txt');
+    await git(root, 'commit', '-m', 'tracked review symlink');
+  }
+  const fixturePolicy = options.trackedSymlink ? {
+    ...defaultPolicy,
+    files: [
+      ...defaultPolicy.files,
+      'src/symlink-target-a.txt',
+      'src/symlink-target-b.txt',
+      'src/tracked-link.txt'
+    ]
+  } : defaultPolicy;
+  await writeFile(policyPath, JSON.stringify(migrateV1(fixturePolicy)));
   await registerRepository({ stateDir, repositoryId: 'repo', root, policyPath });
   if (options.task !== false) {
     await bindRegisteredTask({ stateDir, repositoryId: 'repo', taskId: 'task' });
@@ -130,6 +146,7 @@ function prepareOptions(
     taskId: string;
     profile: 'review' | 'review-critical';
     baseRef: string;
+    headRef: string;
     scopePrefix: string;
     ttlSeconds: number;
   }> = {}
@@ -192,6 +209,10 @@ function submissionReceipt(run: ChatGptRunRecord, sessionId: string, event: stri
     taskId: run.task_id,
     promptSha256: run.prompt_sha256,
     baseCommit: run.resolved_base_commit,
+    ...(run.commit_binding ? {
+      headCommit: run.commit_binding.head_commit,
+      candidateDigest: run.commit_binding.candidate_digest
+    } : {}),
     browserEventId: event,
     observedAt: SUBMITTED.toISOString(),
     sessionId
@@ -227,13 +248,19 @@ async function submitPrepared(stateDir: string, prepared: any, sessionId: string
 }
 
 async function openForParticipant(stateDir: string, prepared: any, requestId?: string) {
+  const binding = prepared.participant.commit_binding;
   return openWorkspace({
     stateDir,
     repositoryId: 'repo',
     taskId: prepared.participant.task_id,
     mode: 'review',
     requestId: requestId ?? prepared.participant.workspace_request_id,
-    ttlMs: prepared.participant.workspace_ttl_ms
+    ttlMs: prepared.participant.workspace_ttl_ms,
+    ...(binding ? {
+      baseRef: binding.requested_base_ref,
+      headRef: binding.requested_head_ref,
+      scopePrefix: binding.scope_prefix
+    } : {})
   });
 }
 
@@ -1259,6 +1286,178 @@ test('blocker regression: pending invalidated workspace ledger survives future G
     assert.ok(after.workspaces[opened.selection.workspace_id]);
     assert.ok(after.requests[requestEntry![0]]);
   });
+});
+
+test('working shared review accepts an unchanged tracked symlink and invalidates when its link text changes', async t => {
+  const { root, stateDir } = await fixture(t, { phase: 'review', trackedSymlink: true });
+  const first = await prepareOrJoinReview(prepareOptions(stateDir, 'codex', 'tracked-link-first'));
+  assert.equal(first.generation.target_assurance, 'phase_only');
+  assert.equal(first.participant.commit_binding, undefined);
+
+  const link = path.join(root, 'src', 'tracked-link.txt');
+  await rm(link);
+  await symlink('symlink-target-b.txt', link);
+  await expectCode(
+    prepareOrJoinReview(prepareOptions(stateDir, 'claude', 'tracked-link-changed')),
+    'TARGET_CHANGED'
+  );
+});
+
+test('commit-pinned shared review binds base head scope workspace and trusted receipt while ignoring dirty checkout state', async t => {
+  const { root, stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  await writeFile(path.join(root, 'src', 'share-target.txt'), 'dirty working bytes\n');
+  await writeFile(path.join(root, 'src', 'unrelated-untracked.txt'), 'untracked\n');
+
+  const options = prepareOptions(stateDir, 'codex', 'commit-pinned', {
+    baseRef: 'HEAD^',
+    headRef: 'HEAD',
+    scopePrefix: 'src/'
+  });
+  const prepared = await prepareOrJoinReview(options);
+  const binding = prepared.participant.commit_binding;
+  assert.ok(binding);
+  assert.equal(prepared.generation.target_assurance, 'commit_pinned');
+  assert.equal(binding.assurance, 'commit_pinned');
+  assert.equal(binding.scope_prefix, 'src/');
+  assert.match(binding.base_commit, /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+  assert.match(binding.head_commit, /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+  assert.match(binding.candidate_digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(prepared.run.commit_binding, binding);
+  assert.equal(prepared.run.branch, null);
+  assert.equal(prepared.run.head, binding.head_commit);
+
+  const opened = await openForParticipant(stateDir, prepared);
+  assert.deepEqual(opened.selection.review_binding, binding);
+  const openRetry = await openForParticipant(stateDir, prepared);
+  assert.equal(openRetry.already_applied, true);
+  assert.equal(openRetry.selection.workspace_id, opened.selection.workspace_id);
+
+  const reconciled = await reconcileReviewParticipant({
+    stateDir, taskId: 'task', participantId: prepared.participant.participant_id
+  });
+  assert.equal(reconciled.participant.workspace_association, 'bound');
+
+  await assert.rejects(
+    openWorkspace({
+      stateDir,
+      repositoryId: 'repo',
+      taskId: 'task',
+      mode: 'review',
+      requestId: prepared.participant.workspace_request_id,
+      ttlMs: prepared.participant.workspace_ttl_ms,
+      baseRef: binding.requested_base_ref,
+      headRef: binding.base_commit,
+      scopePrefix: binding.scope_prefix
+    }),
+    /request_id.*different workspace arguments/i
+  );
+
+  const reserved = await reservePrepared(stateDir, prepared, options.sessionId);
+  assert.equal(reserved.submission_authorized, true);
+  await assert.rejects(
+    markChatGptRunSubmitted({
+      stateDir,
+      runId: prepared.run.run_id,
+      receipt: {
+        ...submissionReceipt(reserved, options.sessionId, 'commit-pinned-submit-bad'),
+        candidateDigest: '0'.repeat(64)
+      },
+      now: SUBMITTED
+    }),
+    /receipt does not match/i
+  );
+  const submitted = await markChatGptRunSubmitted({
+    stateDir,
+    runId: prepared.run.run_id,
+    receipt: submissionReceipt(reserved, options.sessionId, 'commit-pinned-submit-good'),
+    now: SUBMITTED
+  });
+  assert.equal(submitted.state, 'submitted');
+
+  const retry = await prepareOrJoinReview(options);
+  assert.equal(retry.already_applied, true);
+  assert.equal(retry.participant.participant_id, prepared.participant.participant_id);
+  assert.deepEqual(retry.participant.commit_binding, binding);
+});
+
+test('commit-pinned target and trusted receipt ignore replacement-ref changes', async t => {
+  const { root, stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const target = 'src/share-target.txt';
+  const head = (await git(root, 'rev-parse', 'HEAD')).trim();
+  const base = (await git(root, 'rev-parse', `${head}^`)).trim();
+
+  const replacementCommit = async (content: string, label: string) => {
+    await git(root, 'reset', '--hard', base);
+    await writeFile(path.join(root, target), content);
+    await git(root, 'add', '--', target);
+    await git(root, 'commit', '-m', label);
+    const commit = (await git(root, 'rev-parse', 'HEAD')).trim();
+    await git(root, 'reset', '--hard', head);
+    return commit;
+  };
+  const replacementOne = await replacementCommit('replacement target one\n', 'replacement target one');
+  const replacementTwo = await replacementCommit('replacement target two\n', 'replacement target two');
+
+  await git(root, 'replace', head, replacementOne);
+  assert.equal(await git(root, 'show', `${head}:${target}`), 'replacement target one\n');
+
+  const options = prepareOptions(stateDir, 'codex', 'commit-replace-stable', {
+    baseRef: base,
+    headRef: head,
+    scopePrefix: 'src/'
+  });
+  const prepared = await prepareOrJoinReview(options);
+  const binding = prepared.participant.commit_binding;
+  assert.ok(binding);
+  const receipt = submissionReceipt(prepared.run, options.sessionId, 'commit-replace-stable-submit');
+
+  await git(root, 'replace', '-f', head, replacementTwo);
+  assert.equal(await git(root, 'show', `${head}:${target}`), 'replacement target two\n');
+
+  const retry = await prepareOrJoinReview(options);
+  assert.equal(retry.already_applied, true);
+  assert.deepEqual(retry.participant.commit_binding, binding);
+  assert.deepEqual(retry.run.commit_binding, binding);
+
+  const reserved = await reservePrepared(stateDir, prepared, options.sessionId);
+  assert.equal(reserved.submission_authorized, true);
+  const submitted = await markChatGptRunSubmitted({
+    stateDir,
+    runId: prepared.run.run_id,
+    receipt,
+    now: SUBMITTED
+  });
+  assert.equal(submitted.state, 'submitted');
+});
+
+test('commit-pinned reconciliation rejects a workspace opened with a different bound scope', async t => {
+  const { stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const options = prepareOptions(stateDir, 'codex', 'commit-reconcile-mismatch', {
+    baseRef: 'HEAD^',
+    headRef: 'HEAD',
+    scopePrefix: 'src/'
+  });
+  const prepared = await prepareOrJoinReview(options);
+  const binding = prepared.participant.commit_binding;
+  assert.ok(binding);
+
+  await openWorkspace({
+    stateDir,
+    repositoryId: 'repo',
+    taskId: 'task',
+    mode: 'review',
+    requestId: prepared.participant.workspace_request_id,
+    ttlMs: prepared.participant.workspace_ttl_ms,
+    baseRef: binding.requested_base_ref,
+    headRef: binding.requested_head_ref,
+    scopePrefix: 'test/'
+  });
+  await expectCode(
+    reconcileReviewParticipant({
+      stateDir, taskId: 'task', participantId: prepared.participant.participant_id
+    }),
+    'WORKSPACE_RECONCILIATION_MISMATCH'
+  );
 });
 
 test('sanitized review status exposes counts/provenance but no bearer secrets or raw browser/prompt data', async t => {

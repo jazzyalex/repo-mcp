@@ -1,23 +1,23 @@
-import { lstat, open, realpath, rename, link, unlink, mkdtemp, mkdir, writeFile, appendFile, rm, readdir, rmdir, stat as statFile } from 'node:fs/promises';
+import { lstat, open, realpath, rename, link, unlink, mkdtemp, mkdir, writeFile, appendFile, rm, readdir, rmdir, stat as statFile, readFile } from 'node:fs/promises';
 import { constants, type BigIntStats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createPatch } from 'diff';
 import { pythonCommand, type PythonRunner } from './python-runner.js';
 import { SafeError, NotAppliedError, NotTextError, sha256 } from './errors.js';
-import { execute, runGit, runGitToFile } from './exec.js';
+import { execute, runGit, runGitToFile, runGitRawToFile } from './exec.js';
 import { CaptureStore, TEMP_PREFIX, removeOrphanedTempDirs, type CaptureMeta } from './capture.js';
 import { DEFAULT_LIMITS, OPERATION_BUDGET_MS, GIT_CAPTURE_BYTES, GIT_BUFFERED_BYTES, type Limits } from './limits.js';
 import { pageText, countNewlines, jsonBytes, encodeCursor, decodeCursor, staleCursor, formatBytes } from './paging.js';
 import { Deadline } from './deadline.js';
 import { resolveIdentity, identityDrift, type RepoIdentity } from './identity.js';
-import { resolveGitCommit } from './git-ref.js';
+import { resolveGitCommit, resolveGitHeadCommit, resolveGitReadCommit } from './git-ref.js';
 import { TaskContext, type TaskOptions, type MutationResult, type Publication, type Outcome } from './task.js';
 import { PathPolicy } from './path-policy.js';
 import { Inventory, walk, fingerprint, emptySkipped, type Entry, type WalkContext } from './inventory.js';
 import { fold, nfc, pathProblem } from './glob.js';
-import { openVerified, assertNoSymlinks, dirIdentity, assertSameDir, verifyPublished, removeIfSame, diffInput, type PathHook, type DiffInput } from './safe-fs.js';
+import { openVerified, assertNoSymlinks, dirIdentity, assertSameDir, verifyPublished, removeIfSame, diffInput, readSymlinkVerified, type PathHook, type DiffInput } from './safe-fs.js';
 import { batchPaths } from './git-batches.js';
 import type { CompiledPolicy } from './policy.js';
 
@@ -26,6 +26,70 @@ export const files = ['AGENTS.md', 'README.md', 'package.json', 'src/clamp.js', 
 
 export type RepoPolicy = { files: string[]; editable: string[]; tests: string[]; creatable?: string[]; runner?: PythonRunner };
 export const defaultPolicy: RepoPolicy = { files, editable: ['src/clamp.js'], tests: ['test/clamp.test.js'] };
+
+export type LegacyReadPage = {
+  path: string;
+  sha256: string;
+  mode: number;
+  content: string;
+  start_line: number;
+  end_line: number;
+  total_lines: number;
+  total_bytes: number;
+  next_cursor: string | null;
+  complete: boolean;
+  truncated: boolean;
+};
+
+type CommittedReadCommon = {
+  path: string;
+  ref: string;
+  commit: string;
+  git_blob_id: string;
+  raw_sha256: string;
+  mode: string;
+  bytes: number;
+  content: string;
+  start_line: number;
+  end_line: number;
+  total_lines: number;
+  total_bytes: number;
+  next_cursor: string | null;
+  complete: boolean;
+  truncated: boolean;
+};
+
+export type CommittedReadPage =
+  | (CommittedReadCommon & {
+      text_supported: true;
+      unsupported_reason?: never;
+      symlink?: never;
+    })
+  | (CommittedReadCommon & {
+      text_supported: false;
+      unsupported_reason: string;
+      symlink?: { link_text: string };
+    });
+
+export type LegacyDiffPage = {
+  base_ref: string;
+  base_commit: string;
+  diff: string;
+  offset: number;
+  total_bytes: number;
+  next_cursor: string | null;
+  complete: boolean;
+  truncated: boolean;
+  captured_at: string;
+};
+
+export type CommittedDiffPage = LegacyDiffPage & {
+  head_ref: string;
+  head_commit: string;
+  capture_sha256: string;
+  review_limitations: string[];
+};
+
 /** Test seams: `monotonicClock` drives operation deadlines, `captureHook` observes capture stages. */
 export type OperationPreflight = () => Promise<void>;
 export type RepoOptions = {
@@ -186,11 +250,39 @@ export class RepoWorkspace {
     } catch (error) { await repo.task?.close(); throw error; }
     return repo;
   }
-  /** Exact mode: every listed file is validated now, exactly as in v1. */
+  /** Accept only a leaf symlink whose current raw link text still equals the stage-0 HEAD/index symlink blob. */
+  private async unchangedTrackedSymlink(rel: string, deadline: Deadline = this.startupDeadline()) {
+    let link: Buffer;
+    try { ({ link } = await readSymlinkVerified(this.root, rel)); }
+    catch { return false; }
+    deadline.check(() => new SafeError('Tracked symlink validation timed out.'));
+    const [head, index] = await Promise.all([
+      this.git(['--literal-pathspecs', 'ls-tree', '-z', 'HEAD', '--', rel], deadline.timeout()),
+      this.git(['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', rel], deadline.timeout())
+    ]);
+    deadline.check(() => new SafeError('Tracked symlink validation timed out.'));
+    const parseHead = /^120000 blob ([a-f0-9]{40}|[a-f0-9]{64})\t([^\0]+)\0$/.exec(head.stdout);
+    const parseIndex = /^120000 ([a-f0-9]{40}|[a-f0-9]{64}) 0\t([^\0]+)\0$/.exec(index.stdout);
+    if (!parseHead || !parseIndex || parseHead[2] !== rel || parseIndex[2] !== rel || parseHead[1] !== parseIndex[1]) return false;
+    const algorithm = parseHead[1].length === 40 ? 'sha1' : 'sha256';
+    const oid = createHash(algorithm)
+      .update(Buffer.from(`blob ${link.byteLength}\0`, 'utf8'))
+      .update(link)
+      .digest('hex');
+    return oid === parseHead[1];
+  }
+  /** Exact mode: every listed regular file is validated now; unchanged tracked symlink leaves stay non-readable. */
   private async validateExact(policy: RepoPolicy) {
-    for (const file of policy.files) if (await this.exists(file)) await this.readResolved(file);
+    const deadline = this.startupDeadline();
+    for (const file of policy.files) {
+      try { if (await this.exists(file)) await this.readResolved(file); }
+      catch (error) {
+        if (!policy.tests.includes(file) && await this.unchangedTrackedSymlink(file, deadline)) continue;
+        throw error;
+      }
+    }
     for (const file of policy.tests.filter(f => !policy.editable.includes(f))) this.testHashes.set(file, (await this.readResolved(file)).sha256);
-    await this.requireEditableTracked(policy.editable, this.startupDeadline());
+    await this.requireEditableTracked(policy.editable, deadline);
   }
   /** Glob mode cannot read every file at startup; it validates structure and the protected checks. */
   private async validateGlob() {
@@ -248,9 +340,16 @@ export class RepoWorkspace {
   private async current(deadline?: Deadline): Promise<Inventory> {
     if (!this.legacy) return (await this.touch(deadline))!;
     const entries: Entry[] = [];
+    const exactDeadline = deadline ?? this.newDeadline();
     for (const file of this.legacy.files) {
       // A listed file that was deleted after startup is simply absent: its deletion must stay visible in diffs.
-      const present = await this.exists(file).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; });
+      let present: boolean;
+      try { present = await this.exists(file); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') present = false;
+        else if (await this.unchangedTrackedSymlink(file, exactDeadline)) continue;
+        else throw error;
+      }
       if (!present) continue;
       const stat = await lstat(path.join(this.root, file), { bigint: true });
       entries.push({ path: file, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
@@ -390,8 +489,19 @@ export class RepoWorkspace {
     }
     return { text, bytes, result, offset, cursor: (next: number) => encodeCursor({ k: 'read', p: rel, h: result.sha256, o: next }) };
   }
-  async readRange(file: string, start = 1, limit = this.limits.page_lines, cursor?: string) {
+  async readRange(file: string, start?: number, limit?: number, cursor?: string): Promise<LegacyReadPage>;
+  async readRange(file: string, start: number | undefined, limit: number | undefined, cursor: string | undefined, ref: string, responseBudget?: number): Promise<CommittedReadPage>;
+  async readRange(file: string, start?: number, limit?: number, cursor?: string, ref?: string, responseBudget?: number): Promise<LegacyReadPage | CommittedReadPage>;
+  async readRange(
+    file: string,
+    start = 1,
+    limit = this.limits.page_lines,
+    cursor?: string,
+    ref?: string,
+    responseBudget = this.limits.page_bytes
+  ): Promise<LegacyReadPage | CommittedReadPage> {
     await this.guard();
+    if (ref !== undefined) return this.readCommittedRange(file, start, limit, cursor, ref, responseBudget);
     if (!Number.isInteger(start) || start < 1 || !Number.isInteger(limit) || limit < 1 || limit > this.limits.page_lines) throw new SafeError(`Invalid line bounds (1-${this.limits.page_lines} lines per page).`);
     await this.touch();
     const { text, bytes, result, offset, cursor: nextCursor } = await this.readWindow(file, start, limit, cursor);
@@ -408,10 +518,182 @@ export class RepoWorkspace {
       complete: page.next === null, truncated: offset > 0 || page.next !== null
     };
   }
-  /** Bytes of page_bytes left for variable content after the fixed shape of a response. */
-  private room(shell: unknown) {
-    const left = this.limits.page_bytes - jsonBytes(shell);
-    if (left < 0) throw new SafeError(`page_bytes (${this.limits.page_bytes}) is too small for this response's metadata.`);
+
+  private committedPath(file: string) {
+    if (pathProblem(file) || !this.paths.decide(file, 'read').ok || (this.legacy && !this.legacy.files.includes(file))) {
+      throw new SafeError(NOT_EXPOSED);
+    }
+    return file;
+  }
+
+  private async committedEntry(file: string, commit: string) {
+    const rel = this.committedPath(file);
+    const out = (await this.git(['--literal-pathspecs', 'ls-tree', '-z', commit, '--', rel])).stdout;
+    const entries = out.split('\0').filter(Boolean).map(record => {
+      const tab = record.indexOf('\t');
+      const header = tab < 0 ? '' : record.slice(0, tab);
+      const name = tab < 0 ? '' : record.slice(tab + 1);
+      const match = /^([0-7]{6}) (blob|tree|commit) ([a-f0-9]{40}|[a-f0-9]{64})$/.exec(header);
+      if (!match || !name) throw new SafeError('Git tree entry could not be inspected safely.');
+      return { mode: match[1], type: match[2], oid: match[3], path: name };
+    });
+    const exact = entries.filter(entry => entry.path === rel);
+    if (exact.length !== 1) {
+      if (exact.length === 0) throw new SafeError('Committed path does not exist at the resolved ref.');
+      throw new SafeError('Committed path is ambiguous.');
+    }
+    return exact[0];
+  }
+
+  private async rawCommittedBlob(oid: string, timeout = this.operationBudgetMs) {
+    const sizeText = (await this.git(['cat-file', '-s', oid], timeout)).stdout.trim();
+    const bytes = Number(sizeText);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new SafeError('Git returned an invalid committed blob size.');
+    if (bytes > GIT_CAPTURE_BYTES) throw new SafeError(`Committed blob exceeds the ${formatBytes(GIT_CAPTURE_BYTES)} bounded read limit.`);
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-blob-'));
+    const target = path.join(dir, 'blob');
+    try {
+      this.gitHook?.(['cat-file', 'blob', oid], timeout);
+      const result = await runGitRawToFile(this.root, ['cat-file', 'blob', oid], target, {
+        maxBytes: GIT_CAPTURE_BYTES,
+        timeout
+      });
+      if (result.timed_out) throw new SafeError('Git committed blob read timed out.');
+      if (result.truncated) throw new SafeError(`Committed blob exceeds the ${formatBytes(GIT_CAPTURE_BYTES)} bounded read limit.`);
+      if (result.exit_code !== 0) throw new SafeError('Git committed blob read failed.');
+      const raw = await readFile(target);
+      if (raw.byteLength !== bytes) throw new SafeError('Committed blob size changed while it was read.');
+      return { raw, bytes, sha256: createHash('sha256').update(raw).digest('hex') };
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  private async readCommittedRange(
+    file: string,
+    start: number,
+    limit: number,
+    cursor: string | undefined,
+    ref: string,
+    responseBudget: number
+  ): Promise<CommittedReadPage> {
+    if (!Number.isInteger(start) || start < 1 || !Number.isInteger(limit) || limit < 1 || limit > this.limits.page_lines) throw new SafeError(`Invalid line bounds (1-${this.limits.page_lines} lines per page).`);
+    if (!Number.isSafeInteger(responseBudget) || responseBudget <= 0 || responseBudget > this.limits.page_bytes) {
+      throw new SafeError(`Committed read response budget must be between 1 and ${this.limits.page_bytes} bytes.`);
+    }
+    const finish = (value: CommittedReadPage) => {
+      if (jsonBytes(value) > responseBudget) {
+        throw new SafeError(`Committed read response exceeds its ${responseBudget}-byte page_bytes budget.`);
+      }
+      return value;
+    };
+    const resolved = await resolveGitReadCommit(this.root, ref, args => this.git(args));
+    const entry = await this.committedEntry(file, resolved.commit);
+    if (entry.type !== 'blob') {
+      throw new SafeError('Committed path is not a regular file blob.');
+    }
+    const blob = await this.rawCommittedBlob(entry.oid);
+    const argsKey = sha256(JSON.stringify(['commit-read', entry.path, resolved.requested, resolved.commit, entry.oid]));
+    let offset = 0;
+    if (cursor) {
+      const c = this.readCursor('commit-read', cursor, { a: argsKey });
+      if (c.i !== blob.sha256 || !isIndex(c.o) || c.o > blob.raw.byteLength) {
+        throw new SafeError('Invalid cursor for this committed read. Start again without a cursor.');
+      }
+      offset = c.o as number;
+    }
+
+    const identity = {
+      path: entry.path,
+      ref: resolved.requested,
+      commit: resolved.commit,
+      git_blob_id: entry.oid,
+      raw_sha256: blob.sha256,
+      mode: entry.mode,
+      bytes: blob.bytes
+    };
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(blob.raw); }
+    catch {
+      return finish({
+        ...identity,
+        content: '',
+        text_supported: false,
+        unsupported_reason: 'Committed blob is not valid UTF-8 text; semantic text review is unsupported.',
+        start_line: 1, end_line: 0, total_lines: 0, total_bytes: blob.bytes,
+        next_cursor: null, complete: true, truncated: false
+      });
+    }
+    if (cursor && offset > text.length) {
+      throw new SafeError('Invalid cursor for this committed read. Start again without a cursor.');
+    }
+    if (entry.mode === '120000') {
+      if (blob.bytes > responseBudget) {
+        throw new SafeError(`Committed read response exceeds its ${responseBudget}-byte page_bytes budget.`);
+      }
+      return finish({
+        ...identity,
+        content: '',
+        text_supported: false,
+        symlink: { link_text: text },
+        unsupported_reason: 'Committed symlink blob is exposed as link metadata only; links are never followed.',
+        start_line: 1, end_line: 0, total_lines: 0, total_bytes: blob.bytes,
+        next_cursor: null, complete: true, truncated: false
+      });
+    }
+    if (entry.mode !== '100644' && entry.mode !== '100755') {
+      return finish({
+        ...identity,
+        content: '',
+        text_supported: false,
+        unsupported_reason: 'Committed blob mode is not a supported regular source-file mode.',
+        start_line: 1, end_line: 0, total_lines: 0, total_bytes: blob.bytes,
+        next_cursor: null, complete: true, truncated: false
+      });
+    }
+    if (text.includes('\0')) {
+      return finish({
+        ...identity,
+        content: '',
+        text_supported: false,
+        unsupported_reason: 'Committed blob contains NUL bytes; semantic text review is unsupported.',
+        start_line: 1, end_line: 0, total_lines: 0, total_bytes: blob.bytes,
+        next_cursor: null, complete: true, truncated: false
+      });
+    }
+    if (!cursor) {
+      offset = 0;
+      for (let line = 1; line < start && offset < text.length; line++) {
+        const nl = text.indexOf('\n', offset);
+        offset = nl === -1 ? text.length : nl + 1;
+      }
+    }
+    const startLine = 1 + countNewlines(text, 0, offset);
+    const totalLines = countNewlines(text) + 1;
+    const shell = {
+      ...identity, content: '', text_supported: true,
+      start_line: startLine, end_line: totalLines, total_lines: totalLines, total_bytes: blob.bytes,
+      next_cursor: this.cursorShell('commit-read', { o: MAX_INT }), complete: false, truncated: true
+    };
+    const page = pageText(text, offset, this.room(shell, responseBudget), limit);
+    const endLine = startLine + countNewlines(page.content) - (page.content.endsWith('\n') ? 1 : 0);
+    return finish({
+      ...identity,
+      content: page.content,
+      text_supported: true,
+      start_line: startLine,
+      end_line: endLine,
+      total_lines: totalLines,
+      total_bytes: blob.bytes,
+      next_cursor: page.next === null ? null : this.makeCursor('commit-read', { i: blob.sha256, a: argsKey, o: page.next }),
+      complete: page.next === null,
+      truncated: offset > 0 || page.next !== null
+    });
+  }
+  /** Bytes of the selected response budget left for variable content after the fixed shape. */
+  private room(shell: unknown, budget = this.limits.page_bytes) {
+    const left = budget - jsonBytes(shell);
+    if (left < 0) throw new SafeError(`page_bytes (${budget}) is too small for this response's metadata.`);
     return left;
   }
   /** Discovered paths in byte order, one page at a time, with the inventory's identity. */
@@ -808,8 +1090,8 @@ export class RepoWorkspace {
             const result = await runGitToFile(repo.root, args, pending.path, { maxBytes: max - soFar, timeout: left(), append });
             if (result.timed_out) throw expired();
             if (result.truncated) throw new SafeError(`Git output exceeded the ${formatBytes(max)} capture limit (retained_output_bytes ${formatBytes(repo.limits.retained_output_bytes)}); narrow the prefix.`);
-            if (result.exit_code !== 0) throw new SafeError('Git inspection failed.');
             if (result.invalid_utf8) throw new SafeError('Git output is not valid UTF-8 and is never returned with replacement characters; inspect the change locally.');
+            if (result.exit_code !== 0) throw new SafeError('Git inspection failed.');
           },
           async names(args) {
             await guarded();
@@ -1027,9 +1309,164 @@ export class RepoWorkspace {
       refused: refused.map(name => ({ name, reason: (inputs.get(name) as { reason: string }).reason })), unchanged
     };
   }
-  async diff(prefix = '', cursor?: string, baseRef?: string) {
+  private async openCommitDiffCapture(cursor: string, argsKey: string) {
+    const c = decodeCursor<{ c: string; s: string; o: number }>(cursor, 'commit-diff');
+    if (typeof c.c !== 'string' || typeof c.s !== 'string' || !Number.isInteger(c.o) || c.o < 0) {
+      throw new SafeError('Invalid cursor for commit diff. Start again without a cursor.');
+    }
+    const meta = await this.captures.get(c.c);
+    if (meta.sha256.slice(0, 16) !== c.s || meta.kind !== 'commit-diff' || meta.args !== argsKey || meta.task_id !== this.taskId) {
+      throw new SafeError('Invalid cursor for these commit diff arguments. Start again without a cursor.');
+    }
+    if (c.o > meta.bytes) throw new SafeError('Invalid cursor for commit diff. Start again without a cursor.');
+    return { meta, offset: c.o };
+  }
+
+  private commitDiffCursor(meta: CaptureMeta, offset: number) {
+    return encodeCursor({ k: 'commit-diff', c: meta.id, s: meta.sha256.slice(0, 16), o: offset });
+  }
+
+  private async committedBlobSummary(oid: string, mode: string, deadline: Deadline) {
+    if (/^0+$/.test(oid)) return null;
+    deadline.check(() => new SafeError('Git commit diff capture timed out.'));
+    const sizeText = (await this.git(['cat-file', '-s', oid], deadline.timeout())).stdout.trim();
+    const bytes = Number(sizeText);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new SafeError('Git returned an invalid committed blob size.');
+    if (mode === '160000') return { oid, mode, bytes, text: false, raw_sha256: null };
+    if (bytes > this.limits.edit_file_bytes) return { oid, mode, bytes, text: false, raw_sha256: null };
+    const blob = await this.rawCommittedBlob(oid, deadline.timeout());
+    let text = false;
+    if (mode === '100644' || mode === '100755' || mode === '120000') {
+      try {
+        const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(blob.raw);
+        text = !decoded.includes('\0');
+      } catch {}
+    }
+    deadline.check(() => new SafeError('Git commit diff capture timed out.'));
+    return { oid, mode, bytes, text, raw_sha256: blob.sha256 };
+  }
+
+  private async commitDiff(prefix: string, cursor: string | undefined, baseRef: string | undefined, headRef: string): Promise<CommittedDiffPage> {
+    if (baseRef === undefined) throw new SafeError('Commit-pinned git_diff requires explicit base_ref when head_ref is supplied.');
+    const base = await resolveGitCommit(this.root, baseRef, args => this.git(args));
+    const head = await resolveGitHeadCommit(this.root, headRef, args => this.git(args));
+    const argsKey = sha256(JSON.stringify(['commit-diff', prefix, base.requested, base.commit, head.requested, head.commit]));
+    let meta: CaptureMeta, offset = 0;
+    if (cursor) ({ meta, offset } = await this.openCommitDiffCapture(cursor, argsKey));
+    else {
+      const deadline = new Deadline(this.operationBudgetMs, this.monotonicClock);
+      const expired = () => new SafeError(`Git commit diff capture timed out (${this.operationBudgetMs} ms operation budget); narrow the prefix or retry.`);
+      const raw = (await this.git([
+        'diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-textconv', '--no-renames', '-z',
+        base.commit, head.commit
+      ], deadline.timeout())).stdout;
+      const changed: Array<{ path: string; old_mode: string; new_mode: string; old_oid: string; new_oid: string; status: string }> = [];
+      for (let pos = 0; pos < raw.length;) {
+        deadline.check(expired);
+        const end = raw.indexOf('\0', pos);
+        if (end === -1) throw new SafeError('Git commit diff path listing was not understood.');
+        const header = raw.slice(pos, end);
+        pos = end + 1;
+        if (!header) continue;
+        const match = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]{40}|[a-f0-9]{64}) ([a-f0-9]{40}|[a-f0-9]{64}) ([A-Z][0-9]*)$/.exec(header);
+        if (!match) throw new SafeError('Git commit diff metadata was not understood.');
+        const pathEnd = raw.indexOf('\0', pos);
+        if (pathEnd === -1) throw new SafeError('Git commit diff path listing was not understood.');
+        const name = raw.slice(pos, pathEnd);
+        pos = pathEnd + 1;
+        if (match[5].startsWith('R') || match[5].startsWith('C')) throw new SafeError('Git unexpectedly reported a rename or copy despite --no-renames.');
+        if (pathProblem(name) || !name.startsWith(prefix) || !this.paths.decide(name, 'read').ok ||
+            (this.legacy && !this.legacy.files.includes(name))) continue;
+        changed.push({ path: name, old_mode: match[1], new_mode: match[2], old_oid: match[3], new_oid: match[4], status: match[5] });
+        if (changed.length > this.limits.inventory_paths) throw new SafeError('Commit diff contains too many policy-permitted changed paths; narrow the prefix.');
+      }
+      const pending = await this.captures.begin();
+      try {
+        await writeFile(pending.path, '', { flag: 'wx', mode: 0o600 });
+        const append = async (text: string) => {
+          const current = (await statFile(pending.path)).size;
+          if (current + Buffer.byteLength(text) > this.captures.maxCaptureBytes) {
+            throw new SafeError(`Git output exceeded the ${formatBytes(this.captures.maxCaptureBytes)} capture limit; narrow the prefix.`);
+          }
+          await appendFile(pending.path, text, 'utf8');
+        };
+        for (const change of changed) {
+          deadline.check(expired);
+          const oldBlob = await this.committedBlobSummary(change.old_oid, change.old_mode, deadline);
+          const newBlob = await this.committedBlobSummary(change.new_oid, change.new_mode, deadline);
+          const textReviewable = (!oldBlob || oldBlob.text) && (!newBlob || newBlob.text);
+          if (!textReviewable) {
+            await append([
+              `diff --git a/${change.path} b/${change.path}`,
+              `# committed binary/non-text change; semantic text review is unsupported`,
+              `# status ${change.status}`,
+              `# old mode=${change.old_mode} blob=${change.old_oid} size=${oldBlob?.bytes ?? 0}`,
+              `# new mode=${change.new_mode} blob=${change.new_oid} size=${newBlob?.bytes ?? 0}`,
+              ''
+            ].join('\n'));
+            continue;
+          }
+          this.gitHook?.(['--literal-pathspecs', 'diff', '--text', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', base.commit, head.commit, '--', change.path], deadline.timeout());
+          const current = (await statFile(pending.path)).size;
+          const result = await runGitToFile(this.root, [
+            '--literal-pathspecs', 'diff', '--text', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames',
+            base.commit, head.commit, '--', change.path
+          ], pending.path, {
+            maxBytes: this.captures.maxCaptureBytes - current,
+            timeout: deadline.timeout(),
+            append: true
+          });
+          if (result.timed_out) throw expired();
+          if (result.truncated) throw new SafeError(`Git output exceeded the ${formatBytes(this.captures.maxCaptureBytes)} capture limit; narrow the prefix.`);
+          if (result.invalid_utf8) throw new SafeError('Git commit diff is not valid UTF-8; inspect the non-text change from its reported blob identity.');
+          if (result.exit_code !== 0) throw new SafeError('Git commit diff failed.');
+        }
+        meta = await pending.commit({
+          kind: 'commit-diff',
+          args: argsKey,
+          task_id: this.taskId,
+          identity: this.identity,
+          fingerprint: sha256(JSON.stringify(['commit-diff', this.paths.digest, base.commit, head.commit, prefix])),
+          index: sha256('commit-pinned-no-index')
+        });
+      } catch (error) {
+        await pending.abort();
+        throw error;
+      }
+    }
+    const captured_at = new Date(meta.created_at).toISOString();
+    const fields = {
+      base_ref: base.requested,
+      base_commit: base.commit,
+      head_ref: head.requested,
+      head_commit: head.commit,
+      capture_sha256: meta.sha256,
+      review_limitations: [
+        'Coverage is limited to policy-permitted paths under the requested prefix.',
+        'Binary/non-UTF8/oversized blobs are identity-only and are not semantically reviewed as text.'
+      ]
+    };
+    const shell = { ...fields, diff: '', offset: meta.bytes, total_bytes: meta.bytes, next_cursor: this.captureCursorReserve('commit-diff'), complete: false, truncated: true, captured_at };
+    const page = await this.pageCapture(meta, offset, this.room(shell));
+    return {
+      ...fields,
+      diff: page.content,
+      offset,
+      total_bytes: meta.bytes,
+      next_cursor: page.next === null ? null : this.commitDiffCursor(meta, page.next),
+      complete: page.next === null,
+      truncated: page.next !== null,
+      captured_at
+    };
+  }
+
+  async diff(prefix?: string, cursor?: string, baseRef?: string): Promise<LegacyDiffPage>;
+  async diff(prefix: string | undefined, cursor: string | undefined, baseRef: string | undefined, headRef: string): Promise<CommittedDiffPage>;
+  async diff(prefix?: string, cursor?: string, baseRef?: string, headRef?: string): Promise<LegacyDiffPage | CommittedDiffPage>;
+  async diff(prefix = '', cursor?: string, baseRef?: string, headRef?: string): Promise<LegacyDiffPage | CommittedDiffPage> {
     await this.guard();
     if (prefix.length > 256) throw new SafeError('Prefix is limited to 256 characters.');
+    if (headRef !== undefined) return this.commitDiff(prefix, cursor, baseRef, headRef);
     const base = await this.resolveDiffBase(baseRef);
     const argsKey = sha256(JSON.stringify(['diff', prefix, base.requested, base.commit]));
     let meta: CaptureMeta, offset = 0;

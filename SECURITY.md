@@ -94,11 +94,13 @@ GC does not read or delete ChatGPT or Claude conversation history.
 
 ## Review assurance
 
-The v0.2 review phase is a task-wide mutation/check drain plus read-only phase.
-It is **not** yet the content-verified candidate manifest specified in the future
-hardening roadmap. Production `repo_info` reports
-`review_assurance: "phase_only"` and `candidate_digest: null` until that separate
-feature is implemented.
+The v0.2 review phase by itself is a task-wide mutation/check drain plus read-only
+phase; legacy working-target review therefore reports `review_assurance: "phase_only"`
+and `candidate_digest: null`. Bounded commit-pinned review is the explicit exception:
+server-verified base/head/scope selection reports `commit_pinned` plus a
+domain-separated candidate digest for that policy/scope and immutable commit pair.
+This is **not** the future whole-candidate manifest, and it does not expand semantic
+coverage beyond the bounded committed paths actually reviewed.
 
 Report vulnerabilities privately through GitHub's **Report a vulnerability** form:
 https://github.com/jazzyalex/repo-mcp/security/advisories/new

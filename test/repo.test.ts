@@ -6,7 +6,7 @@ import os from 'node:os';
 import { request } from 'node:http';
 import { exercise } from '../scripts/exercise.js';
 import { prepareFixture } from '../src/fixture.js';
-import { execute, RepoWorkspace, defaultPolicy } from '../src/repo.js';
+import { execute, RepoWorkspace, defaultPolicy, type LegacyReadPage } from '../src/repo.js';
 import { auditedEdit } from '../src/audit.js';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { startServer } from '../src/server.js';
@@ -41,6 +41,35 @@ test('path, write and HTTP boundaries', async () => {
     assert.equal(tooLarge.status, 413);
   } finally { await service.close(); await rm(base, { recursive: true, force: true }); }
 });
+test('exact policy tolerates only unchanged tracked symlink leaves and committed read never follows them', async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-tracked-link-'));
+  const root = path.join(base, 'repo');
+  await prepareFixture(root);
+  const linked = path.join(root, 'src/linked.js');
+  await symlink('clamp.js', linked);
+  assert.equal((await execute('/usr/bin/git', ['add', '--', 'src/linked.js'], root)).exit_code, 0);
+  assert.equal((await execute('/usr/bin/git', ['-c', 'user.name=Trial', '-c', 'user.email=trial@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'Track source symlink'], root)).exit_code, 0);
+  const policy = { ...defaultPolicy, files: [...defaultPolicy.files, 'src/linked.js'] };
+  const repo = await RepoWorkspace.create(root, policy);
+  try {
+    const listed = await repo.listFiles();
+    assert.equal(listed.files.some(item => item.path === 'src/linked.js'), false, 'live inventory must not expose a symlink as readable');
+    await assert.rejects(repo.read('src/linked.js'), /Symlinks|not exposed/i);
+    const committed = await repo.readRange('src/linked.js', 1, 1, undefined, 'HEAD');
+    assert.equal(committed.text_supported, false);
+    assert.ok(committed.symlink);
+    assert.equal(committed.symlink.link_text, 'clamp.js');
+    assert.match(committed.git_blob_id, /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+  } finally {
+    await repo.close();
+  }
+
+  await unlink(linked);
+  await symlink('../README.md', linked);
+  await assert.rejects(RepoWorkspace.create(root, policy), /Symlinks|symlink/i);
+  await rm(base, { recursive: true, force: true });
+});
+
 test('command timeout and output limits', async () => {
   const timed = await execute(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], os.tmpdir(), 100);
   assert.equal(timed.timed_out, true);
@@ -194,7 +223,7 @@ test('repo_info reads lowercase exact-policy instructions and continues that pat
     let assembled = info.instructions;
     let cursor: string | null = info.instructions_next_cursor;
     while (cursor) {
-      const page = await repo.readRange(info.instructions_path!, 1, 200, cursor);
+      const page: LegacyReadPage = await repo.readRange(info.instructions_path!, 1, 200, cursor);
       assembled += page.content;
       cursor = page.next_cursor;
     }

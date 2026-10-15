@@ -42,7 +42,7 @@ Existing 120-second selection TTL and 10-second observation age remain exact.
 
 ## 5. Review task resolution
 Command:
-    npm run --silent coord -- review prepare-or-join --repository REPOSITORY_ID [--task TASK_ID] --coordinator codex|claude --profile review|review-critical --surface chat --session-id SESSION_ID --prompt-file PROMPT_FILE --base-ref BASE_REF [--scope-prefix PREFIX] [--ttl-seconds N]
+    npm run --silent coord -- review prepare-or-join --repository REPOSITORY_ID [--task TASK_ID] --coordinator codex|claude --profile review|review-critical --surface chat --session-id SESSION_ID --prompt-file PROMPT_FILE --base-ref BASE_REF [--head-ref HEAD_REF] [--scope-prefix PREFIX] [--ttl-seconds N]
 --task is optional. If supplied, it must be an unfinished task for the repository and is revalidated under its share gate.
 If omitted: acquire a short repository review-selection gate; resolve unfinished repository tasks; require exactly one; zero => REVIEW_TASK_REQUIRED; multiple => REVIEW_TASK_AMBIGUOUS; capture its ID, acquire its task share gate, and re-read catalog/live task before participant publication.
 A coding-phase candidate returns OWNER_ACTION_REQUIRED. prepare-or-join never binds a task or changes phase.
@@ -51,8 +51,8 @@ Safe zero-task path is explicit owner lifecycle preparation, then retry:
     npm run --silent coord -- task phase --task FRESH_TASK_ID --phase review
 No-task prepare-or-join never reports success. Concurrent taskless first preparations converge through repository-selection then task-share gating.
 
-## 6. Target-only compatibility fingerprint
-Basic sharing does not depend on the large-diff manifest or committed-target comparison.
+## 6. Target compatibility
+Legacy working-target sharing uses TargetFingerprintV1 and does not depend on the large-diff manifest. Commit-pinned sharing instead resolves explicit base/head commits and uses the server-verified commit binding; it does not invoke the live working-target fingerprint.
 TargetFingerprintV1 is independent of participant, prompt, base_ref/resolved base, scope/prefix, and diff pagination; two reviewers of the same live target with different bases/scopes get the same value.
 Canonical inputs: bound branch/HEAD; existing bounded Git index digest (mode/object/stage/intent-to-add/skip-worktree/assume-unchanged); sorted policy-visible tracked changes/deletions; safe content SHA-256 for each policy-visible changed regular file; sorted policy-visible untracked regular files plus safe content SHA-256; safe replacement-race metadata; and an owner-keyed domain-separated opaque token over bounded denied/unsafe Git-status name/status/metadata without reading denied contents. Additionally, every policy-visible tracked index entry carrying assume-unchanged or skip-worktree is independently safe-statted and, when present as a safe bounded regular file, read/hashed from the worktree even when Git status/diff suppresses it; missing worktree state is included as a deletion/missing marker. Unsafe, changing, linked, unreadable, or over-cap flagged entries fail TARGET_FINGERPRINT_UNAVAILABLE.
 Unchanged tracked bytes without assume-unchanged/skip-worktree are covered by HEAD plus index/object identity; no requirement is added to hash every tracked file. Flagged policy-visible tracked entries use the independent worktree check above, so with HEAD/index unchanged, changing their worktree bytes or making them missing changes the fingerprint. Policy-visible changed and untracked source bytes are content-hashed. Denied content is never opened and denied names/subdigests are never returned/logged; because denied bytes are not read, assurance remains phase_only rather than cryptographic candidate immutability.
@@ -64,11 +64,11 @@ Any policy-visible worktree byte change, index change, readable-untracked byte c
 A generation is compatible only when repository/canonical checkout, registration epoch, task ownership, binding epoch, phase epoch, policy digest, phase=review, branch/HEAD, and TargetFingerprintV1 match.
 Different bases/resolved bases/prompts/scopes/coordinators/browser contexts/results do not split a compatible generation.
 Fingerprint change while protected participants exist => TARGET_CHANGED. New generation requires no protected participant/run/workspace and revalidated current task identity.
-Owner-only strict/versioned share state stores no bearer token, write grant, raw prompt/output, raw browser ID, or unrelated private path. Minimum generation fields: schema_version, repository_id, task_id, generation, registration_epoch, binding_epoch, phase_epoch, policy_digest, branch, head, target_fingerprint, target_assurance="phase_only", coding_owner{status,coordinator,provenance,recorded_at}, participants.
+Owner-only strict/versioned share state stores no bearer token, write grant, raw prompt/output, raw browser ID, or unrelated private path. Minimum generation fields include schema_version, repository/task identity and epochs, policy digest, target identity, `target_assurance` (`phase_only` for the legacy working target or `commit_pinned` for an immutable head binding), coding-owner summary, and participants. A commit-pinned generation also carries its exact resolved binding through participant/run/workspace evidence rather than treating a live checkout fingerprint as authority.
 Legacy coding-owner provenance is unknown; current caller/recency never invents ownership.
 
 ## 8. Participant/run/workspace binding
-Each participant immutably binds share generation, participant_id, coordinator, run_id once published, requested/resolved base, scope digest, prompt digest, hashed browser context, workspace_request_id, and created_at.
+Each participant immutably binds share generation, participant_id, coordinator, run_id once published, requested/resolved base, optional commit binding, scope digest, prompt digest, hashed browser context, workspace_request_id, and created_at. Commit-pinned participant/run identity includes requested/resolved base and head, scope prefix and candidate digest.
 New shared-review ChatGPT-run records also immutably bind share_generation + participant_id + workspace_request_id, and those fields participate in validation/exact-request identity. Legacy runs are not rewritten.
 Workspace association is pending|bound|proven-absent. workspace_id starts absent and is write-once after authoritative reconciliation.
 Mandatory command:

@@ -5,6 +5,7 @@ import { SafeError, sha256 } from './errors.js';
 import { StateStore, acquireLock, lockOwnerAlive, validateLockRecord, withShortLock } from './task-state.js';
 import { readMultiRepoCatalog, readWorkspaceOpenOutcome, type RepositoryRegistration, type TaskRegistration } from './multirepo-state.js';
 import { loadPolicy, compilePolicyFor } from './policy.js';
+import { commitReviewCandidateDigest, commitReviewTargetFingerprint, isConservativeGitRevision, type CommitReviewBinding } from './git-ref.js';
 import { computeTargetFingerprintV1 } from './review-target.js';
 
 export const REVIEW_SHARE_KIND = 'review-share-v1';
@@ -39,6 +40,7 @@ export type ReviewParticipant = {
   selection_id: string;
   requested_base_ref: string;
   resolved_base_commit: string;
+  commit_binding?: CommitReviewBinding;
   scope_digest: string;
   prompt_digest: string;
   browser_context_digest: string;
@@ -73,7 +75,7 @@ export type ReviewShareJournal = {
   branch: string | null;
   head: string;
   target_fingerprint: string;
-  target_assurance: 'phase_only';
+  target_assurance: 'phase_only' | 'commit_pinned';
   coding_owner: ReviewCodingOwner;
   participants: ReviewParticipant[];
   created_at: string;
@@ -115,15 +117,41 @@ function parseCodingOwner(raw: unknown): ReviewCodingOwner {
   return value as ReviewCodingOwner;
 }
 
-function parseParticipant(raw: unknown): ReviewParticipant {
+function parseParticipantBinding(raw: unknown, policyDigest: string): CommitReviewBinding {
+  const value = object(raw, 'review participant commit binding');
+  strictKeys(value, [
+    'format_version', 'assurance', 'requested_base_ref', 'base_commit',
+    'requested_head_ref', 'head_commit', 'scope_prefix', 'candidate_digest'
+  ], 'review participant commit binding');
+  if (
+    value.format_version !== 1 || value.assurance !== 'commit_pinned' ||
+    typeof value.requested_base_ref !== 'string' || !isConservativeGitRevision(value.requested_base_ref) ||
+    typeof value.requested_head_ref !== 'string' || !isConservativeGitRevision(value.requested_head_ref) ||
+    typeof value.base_commit !== 'string' || !HEX40_64.test(value.base_commit) ||
+    typeof value.head_commit !== 'string' || !HEX40_64.test(value.head_commit) ||
+    typeof value.scope_prefix !== 'string' || value.scope_prefix.length > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(value.scope_prefix) ||
+    typeof value.candidate_digest !== 'string' || !HEX64.test(value.candidate_digest) ||
+    value.candidate_digest !== commitReviewCandidateDigest(
+      policyDigest, value.base_commit as string, value.head_commit as string, value.scope_prefix as string
+    )
+  ) fail('REVIEW_SHARE_STATE_CORRUPT', 'Corrupt review participant commit binding.');
+  return value as unknown as CommitReviewBinding;
+}
+
+function parseParticipant(raw: unknown, policyDigest?: string): ReviewParticipant {
   const value = object(raw, 'review participant');
   strictKeys(value, [
     'generation', 'participant_id', 'coordinator', 'profile', 'run_id', 'selection_id',
-    'requested_base_ref', 'resolved_base_commit', 'scope_digest', 'prompt_digest',
+    'requested_base_ref', 'resolved_base_commit', 'commit_binding', 'scope_digest', 'prompt_digest',
     'browser_context_digest', 'exact_request_key', 'target_fingerprint',
     'workspace_request_id', 'workspace_ttl_ms',
     'workspace_association', 'workspace_id', 'state', 'created_at', 'updated_at', 'expires_at'
   ], 'review participant');
+  const commitBinding = value.commit_binding === undefined
+    ? undefined
+    : policyDigest ? parseParticipantBinding(value.commit_binding, policyDigest)
+      : fail('REVIEW_SHARE_STATE_CORRUPT', 'Commit-bound participant is missing its journal policy context.');
   if (!integer(value.generation) || typeof value.participant_id !== 'string' || !UUID.test(value.participant_id) ||
       (value.coordinator !== 'codex' && value.coordinator !== 'claude') ||
       (value.profile !== 'review' && value.profile !== 'review-critical') ||
@@ -146,10 +174,19 @@ function parseParticipant(raw: unknown): ReviewParticipant {
       !validDate(value.created_at) || !validDate(value.updated_at) || !validDate(value.expires_at) ||
       Date.parse(value.updated_at as string) < Date.parse(value.created_at as string) ||
       ((value.workspace_association === 'bound') !== (value.workspace_id !== undefined)) ||
-      (value.workspace_association !== 'bound' && value.workspace_id !== undefined)) {
+      (value.workspace_association !== 'bound' && value.workspace_id !== undefined) ||
+      (commitBinding !== undefined && (
+        value.requested_base_ref !== commitBinding.requested_base_ref ||
+        value.resolved_base_commit !== commitBinding.base_commit ||
+        value.scope_digest !== sha256(commitBinding.scope_prefix) ||
+        value.target_fingerprint !== commitReviewTargetFingerprint(policyDigest!, commitBinding.head_commit)
+      ))) {
     fail('REVIEW_SHARE_STATE_CORRUPT', 'Corrupt review participant.');
   }
-  return value as ReviewParticipant;
+  return {
+    ...(value as unknown as ReviewParticipant),
+    ...(commitBinding ? { commit_binding: commitBinding } : {})
+  };
 }
 
 export function parseReviewShareJournal(raw: unknown, taskId?: string): ReviewShareJournal {
@@ -169,17 +206,19 @@ export function parseReviewShareJournal(raw: unknown, taskId?: string): ReviewSh
       (value.branch !== null && typeof value.branch !== 'string') ||
       typeof value.head !== 'string' || !HEX40_64.test(value.head) ||
       typeof value.target_fingerprint !== 'string' || !HEX64.test(value.target_fingerprint) ||
-      value.target_assurance !== 'phase_only' ||
+      (value.target_assurance !== 'phase_only' && value.target_assurance !== 'commit_pinned') ||
       !Array.isArray(value.participants) || value.participants.length > MAX_PARTICIPANTS ||
       !validDate(value.created_at) || !validDate(value.updated_at) ||
       Date.parse(value.updated_at as string) < Date.parse(value.created_at as string)) {
     fail('REVIEW_SHARE_STATE_CORRUPT', 'Corrupt review share journal.');
   }
-  const participants = value.participants.map(parseParticipant);
+  const participants = value.participants.map(participant => parseParticipant(participant, value.policy_digest as string));
   const seenParticipants = new Set<string>();
   const seenRuns = new Set<string>();
   for (const participant of participants) {
     if (participant.generation > (value.generation as number) ||
+        (participant.generation === value.generation &&
+          ((value.target_assurance === 'commit_pinned') !== (participant.commit_binding !== undefined))) ||
         seenParticipants.has(participant.participant_id) || seenRuns.has(participant.run_id)) {
       fail('REVIEW_SHARE_STATE_CORRUPT', 'Corrupt review participant history.');
     }
@@ -245,6 +284,7 @@ export async function assertSharedPreparationAuthorizedUnderGate(options: {
   browserContextDigest: string;
   requestedBaseRef: string;
   resolvedBaseCommit: string;
+  commitBinding?: CommitReviewBinding;
 }) {
   await assertTaskShareGateHeld(options.stateDir, options.taskId);
   const journal = await readReviewShareJournal(options.stateDir, options.taskId, { required: true });
@@ -263,6 +303,7 @@ export async function assertSharedPreparationAuthorizedUnderGate(options: {
       participant.browser_context_digest !== options.browserContextDigest ||
       participant.requested_base_ref !== options.requestedBaseRef ||
       participant.resolved_base_commit !== options.resolvedBaseCommit ||
+      JSON.stringify(participant.commit_binding ?? null) !== JSON.stringify(options.commitBinding ?? null) ||
       participant.target_fingerprint !== journal.target_fingerprint) {
     fail('REVIEW_SHARE_STATE_STALE', 'Shared preparation does not match the durable initializing participant.');
   }
@@ -379,7 +420,7 @@ export async function computeCurrentReviewTarget(
 ): Promise<{
   repository: RepositoryRegistration;
   task: TaskRegistration;
-  target: Awaited<ReturnType<typeof computeTargetFingerprintV1>>;
+  target: Awaited<ReturnType<typeof computeTargetFingerprintV1>> & { assurance: 'phase_only' };
 }> {
   const catalog = await readMultiRepoCatalog(stateDir);
   const repository = catalog.repositories[repositoryId];
@@ -400,7 +441,37 @@ export async function computeCurrentReviewTarget(
     limits: policy.limits,
     deniedMetadataKey: await ownerFingerprintKey(stateDir)
   });
-  return { repository, task, target };
+  return { repository, task, target: { ...target, assurance: 'phase_only' as const } };
+}
+
+export async function computeCommitReviewTarget(
+  stateDir: string,
+  repositoryId: string,
+  taskId: string,
+  headCommit: string
+): Promise<{
+  repository: RepositoryRegistration;
+  task: TaskRegistration;
+  target: { branch: null; head: string; fingerprint: string; assurance: 'commit_pinned' };
+}> {
+  if (!HEX40_64.test(headCommit)) throw new SafeError('Invalid commit-pinned review head commit.');
+  const catalog = await readMultiRepoCatalog(stateDir);
+  const repository = catalog.repositories[repositoryId];
+  const task = catalog.tasks[taskId];
+  if (!repository || !repository.enabled) fail('REVIEW_REPOSITORY_UNAVAILABLE', 'Repository ' + repositoryId + ' is not enabled.');
+  if (!task || task.repository_id !== repositoryId || task.completed) {
+    fail('REVIEW_TASK_REQUIRED', 'Task ' + taskId + ' is not an unfinished task for repository ' + repositoryId + '.');
+  }
+  return {
+    repository,
+    task,
+    target: {
+      branch: null,
+      head: headCommit,
+      fingerprint: commitReviewTargetFingerprint(repository.policy_digest, headCommit),
+      assurance: 'commit_pinned'
+    }
+  };
 }
 
 export function participantProtected(participant: ReviewParticipant) {
@@ -710,6 +781,7 @@ export async function assertAndSyncSharedRunUnderGate(
     profile: string;
     requested_base_ref: string;
     resolved_base_commit: string;
+    commit_binding?: CommitReviewBinding;
     prompt_sha256: string;
     selection: { selection_id: string; browser_context: unknown };
     share_generation?: number;
@@ -741,6 +813,7 @@ export async function assertAndSyncSharedRunUnderGate(
       participant.selection_id !== run.selection.selection_id ||
       participant.requested_base_ref !== run.requested_base_ref ||
       participant.resolved_base_commit !== run.resolved_base_commit ||
+      JSON.stringify(participant.commit_binding ?? null) !== JSON.stringify(run.commit_binding ?? null) ||
       participant.prompt_digest !== run.prompt_sha256 ||
       participant.browser_context_digest !== sha256(JSON.stringify(run.selection.browser_context)) ||
       (currentGeneration && participant.target_fingerprint !== journal!.target_fingerprint)) {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, readFile, stat, mkdir, readdir, lstat, readlink, symlink } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { mkdtemp, rm, writeFile, readFile, stat, mkdir, readdir, lstat, readlink, symlink, realpath } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { StateStore, acquireLock, withShortLock } from '../src/task-state.js';
@@ -26,6 +26,64 @@ test('state reads distinguish an absent pathname from a dangling symlink and pre
     assert.equal(after.ino, before.ino);
     assert.equal(await readlink(path.join(base, rel)), target);
     assert.equal(await store.read('r/absent.json', 'phase'), undefined);
+  } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+test('blocker regression: state read accepts a regular record published after ENOENT before inspection', async () => {
+  const base = await tmp();
+  try {
+    const target = path.join(await realpath(base), 'r', 'race.json');
+    const taskState = path.resolve('src/task-state.ts');
+    const script = `
+import assert from 'node:assert/strict';
+import { mock } from 'node:test';
+const actual = await import('node:fs/promises');
+let armed = false;
+let firstRead = true;
+let published = false;
+let publisher;
+const enoent = () => Object.assign(new Error('synthetic ENOENT'), { code: 'ENOENT' });
+mock.module('node:fs/promises', {
+  namedExports: {
+    lstat: async (...args) => {
+      const file = String(args[0]);
+      if (armed && file === ${JSON.stringify(target)} && !published) {
+        published = true;
+        assert.equal(await publisher.create('r/race.json', 'phase', { phase: 'review' }), true);
+      }
+      return actual.lstat(...args);
+    },
+    mkdir: actual.mkdir,
+    open: actual.open,
+    readFile: async (...args) => {
+      const file = String(args[0]);
+      if (armed && file === ${JSON.stringify(target)} && firstRead) {
+        firstRead = false;
+        throw enoent();
+      }
+      return actual.readFile(...args);
+    },
+    readdir: actual.readdir,
+    realpath: actual.realpath,
+    rename: actual.rename,
+    link: actual.link,
+    unlink: actual.unlink,
+    chmod: actual.chmod
+  }
+});
+const { StateStore } = await import(${JSON.stringify(taskState)});
+publisher = await StateStore.open(${JSON.stringify(base)});
+armed = true;
+assert.deepEqual(await publisher.read('r/race.json', 'phase'), { phase: 'review' });
+assert.equal(published, true);
+`;
+    const child = spawnSync(process.execPath, [
+      '--experimental-test-module-mocks',
+      '--import', 'tsx',
+      '--input-type=module',
+      '-e', script
+    ], { cwd: path.resolve('.'), encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.status, 0, child.stderr || child.stdout);
   } finally { await rm(base, { recursive: true, force: true }); }
 });
 

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { prepareFixture } from '../src/fixture.js';
-import { RepoWorkspace, defaultPolicy } from '../src/repo.js';
+import { RepoWorkspace, defaultPolicy, execute } from '../src/repo.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { migrateV1 } from '../src/policy.js';
 import { coordinatorBind } from '../src/coordinator.js';
@@ -640,6 +640,70 @@ test('broker reauthorizes mutations and checks inside the task gate after contro
     await revokeWorkspace({ stateDir, workspaceId: resumed.data.selection.workspace_id });
   } finally {
     barrier.release.resolve();
+    await client.close();
+    await service.close();
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('commit-pinned repo_info budgets instructions and separates checkout identity from review target', async () => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-pinned-info-')));
+  const stateDir = path.join(base, 'state');
+  const root = await fixture(base, 'repo');
+  const policyPath = await writePolicy(base, 'policy.json');
+  const runGit = async (...args: string[]) => {
+    const result = await execute('/usr/bin/git', [
+      '-c', 'core.hooksPath=/dev/null',
+      '-c', 'user.name=T',
+      '-c', 'user.email=t@example.invalid',
+      '-c', 'commit.gpgsign=false',
+      ...args
+    ], root, 60_000);
+    assert.equal(result.exit_code, 0, result.stderr);
+    return result.stdout;
+  };
+  await writeFile(path.join(root, 'AGENTS.md'), 'Pinned instructions ' + 'x'.repeat(80_000));
+  await runGit('add', '--', 'AGENTS.md');
+  await runGit('commit', '-m', 'large pinned instructions');
+  await registerRepository({ stateDir, repositoryId: 'repo', root, policyPath });
+  await bindRegisteredTask({ stateDir, repositoryId: 'repo', taskId: 'task' });
+  await setRegisteredTaskPhase({ stateDir, taskId: 'task', phase: 'review' });
+
+  const service = await startMultiRepoServer(stateDir, 0);
+  const client = new Client({ name: 'pinned-info-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    const opened = await call(client, 'workspace_open', {
+      repository_id: 'repo',
+      task_id: 'task',
+      mode: 'review',
+      request_id: 'open-pinned-info',
+      base_ref: 'HEAD^',
+      head_ref: 'HEAD',
+      scope_prefix: ''
+    });
+    assert.equal(opened.error, false, String(opened.data));
+    const token = opened.data.workspace_token as string;
+    const info = await call(client, 'repo_info', { workspace_token: token });
+    assert.equal(info.error, false, String(info.data));
+    assert.ok(Buffer.byteLength(JSON.stringify(info.data)) <= DEFAULT_LIMITS.page_bytes, 'pinned repo_info must fit the complete response page bound');
+    assert.equal(info.data.review_assurance, 'commit_pinned');
+    assert.equal(info.data.checkout_identity.head, info.data.task.bound_head);
+    assert.equal(info.data.review_target.head_commit, opened.data.selection.review_binding.head_commit);
+    assert.equal(info.data.head, info.data.checkout_identity.head, 'top-level head keeps checkout identity semantics');
+    assert.equal(info.data.live_status_available, false);
+    assert.equal(Object.hasOwn(info.data, 'status'), false, 'an omitted live status must not look like committed clean-status evidence');
+    assert.match(info.data.instructions, /^Pinned instructions /);
+    assert.ok(info.data.instructions_next_cursor, 'large pinned instructions must continue explicitly');
+
+    const next = await call(client, 'read', {
+      workspace_token: token,
+      path: 'AGENTS.md',
+      cursor: info.data.instructions_next_cursor
+    });
+    assert.equal(next.error, false, String(next.data));
+    assert.ok(Buffer.byteLength(JSON.stringify(next.data)) <= DEFAULT_LIMITS.page_bytes);
+  } finally {
     await client.close();
     await service.close();
     await rm(base, { recursive: true, force: true });

@@ -79,7 +79,7 @@ Review:
   coord review prepare-or-join [--state-dir PATH] --repository ID [--task ID]
     --coordinator codex|claude --profile review|review-critical --surface chat
     --session-id ID --workspace-request-id ID --prompt-file PATH
-    [--base-ref REF] [--scope-prefix PREFIX] [--ttl-seconds N]
+    [--base-ref REF --head-ref REF] [--scope-prefix PREFIX] [--ttl-seconds N]
   coord review reconcile [--state-dir PATH] --task ID --participant ID
   coord review status [--state-dir PATH] --task ID
   coord review close [--state-dir PATH] --task ID --participant ID --request-id ID
@@ -111,6 +111,7 @@ const { positionals, values } = parseArgs({
     'workspace-request-id': { type: 'string' },
     'prompt-file': { type: 'string' },
     'base-ref': { type: 'string' },
+    'head-ref': { type: 'string' },
     'scope-prefix': { type: 'string' },
     participant: { type: 'string' },
     'request-id': { type: 'string' },
@@ -303,7 +304,7 @@ try {
     if (command === 'prepare-or-join') {
       assertOnly(
         'state-dir', 'repository', 'task', 'coordinator', 'profile', 'surface',
-        'session-id', 'workspace-request-id', 'prompt-file', 'base-ref', 'scope-prefix', 'ttl-seconds'
+        'session-id', 'workspace-request-id', 'prompt-file', 'base-ref', 'head-ref', 'scope-prefix', 'ttl-seconds'
       );
       if (!values.repository ||
           (values.coordinator !== 'codex' && values.coordinator !== 'claude') ||
@@ -324,6 +325,7 @@ try {
         workspaceRequestId: values['workspace-request-id'],
         prompt,
         baseRef: values['base-ref'],
+        headRef: values['head-ref'],
         scopePrefix: values['scope-prefix'],
         ttlSeconds: asReviewTtlSeconds()
       }));

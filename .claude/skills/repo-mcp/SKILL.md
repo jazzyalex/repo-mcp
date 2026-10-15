@@ -112,30 +112,47 @@ After successful smoke, the operator may finish this disposable task with
 
 1. Resolve the exact checkout with `git rev-parse --show-toplevel` and read its root
    instructions. Never guess among sibling checkouts or worktrees.
-2. Create an owner-only v2 policy outside the checkout, normally under
-   `~/Library/Application Support/repo-mcp/policies/`. Start from `docs/policy-readonly.json` or `docs/policy-coding.json` in the control
-   checkout and tailor them. Expose only files needed for the requested task. Exclude credentials, generated caches, dependencies, build products,
-   private operator state, and unrelated large data. Grant write and creation only when
-   coding is requested.
-3. Resolve the checkout through `repository resolve`; register it once if missing with a
-   stable collision-resistant repository ID. Bind a fresh internal task ID. Never
-   silently replace an unfinished task. One unfinished task owns one registered checkout;
-   concurrent coding uses separately registered Git worktrees.
-4. For inspection, planning, and architecture, use a read-only workspace. For review,
-   freeze the task in `review` and open a fresh review workspace without a write grant.
-   Claude's maintained Repo MCP paths are read-only; do not issue or consume a coding
-   write grant. Return coding/write work to the Codex Repo MCP operator.
+2. Locate the installed Repo MCP control checkout from launchd `WorkingDirectory`,
+   verify its coordinator, and read `docs/SHARED-REVIEW-WORKFLOW.md` there. Installed
+   skills are standalone; never assume that reference is adjacent to this file.
+3. Resolve the checkout with
+   `npm run --silent coord -- repository resolve --repo CURRENT_ROOT`. Reuse the
+   registration. If it is absent, create a narrow owner-only external policy and stable
+   internal repository ID yourself. Do not ask the user for repository/task/policy/token
+   identifiers.
+4. Preserve the one-unfinished-task/one-coding-owner invariant. Do not bind a second
+   unfinished task, freeze or rebind another coding owner, or revive stale authority.
+5. Claude's maintained Repo MCP paths are read-only. Coding/write work and write grants
+   return to the Codex Repo MCP operator.
 
-The normal user prompt is simply `Use Repo MCP to review this repository` or `Use Repo
-MCP to architect this repository`. Both mean that ChatGPT web performs the semantic
-work through Repo MCP while Claude coordinates local setup and browser control. Do not
-turn them into a request for coordinator identifiers. Keep repository/task IDs internal,
-prepare the read-only task, and use Claude's host-native browser controls plus the
-durable `chatgpt-run` contract to drive the user's signed-in ChatGPT conversation.
-ChatGPT must open the exact Repo MCP workspace and perform the work. Never substitute
-Claude's own analysis or invoke Oracle implicitly. Recover the same submitted browser
-conversation after interruption, and report `Execution surface: ChatGPT web`,
-`Coordinator: Claude Code`, and `Repository evidence: Repo MCP`.
+The normal user prompts `Use Repo MCP to review this repository` and `Use Repo MCP to
+architect this repository` mean **ChatGPT web performs the semantic work** while Claude
+coordinates local setup and Claude's host-native browser controls. Never substitute
+Claude's own analysis, Work, Oracle, or a Claude subagent.
+
+For review use the `repo-mcp-review` skill and `coord review prepare-or-join`.
+Discover the sole safe review task from owner-side repository/catalog status before final
+prompt construction, embed that exact `TASK_ID`, and always prepare with
+`--task TASK_ID`. Zero/multiple/coding/stale or conflicting state requires owner action
+and is never auto-fixed. Omitting `--task` is a separate combined
+selection+durable-preparation API for callers intentionally delegating task selection; it
+is not discovery and the browser handoff never uses it. Profile `review` is Sol Extra
+High; `review-critical` is explicit super-complex Sol Pro. Compatible Codex/Claude
+reviews may share one task/target while keeping distinct participants, normal Chat
+sessions, workspace requests/runs/workspaces, and results. When the user requests review
+of an immutable commit range, use the review skill's commit-pinned
+`--base-ref ... --head-ref ... [--scope-prefix ...]` path; otherwise preserve the
+legacy `phase_only` working-target workflow.
+
+For architecture, planning, or brainstorming intentions, use the implemented generic
+`chatgpt-run prepare --kind architecture --profile architecture --surface chat` route
+with an `inspect` workspace and Sol Pro. Planning/brainstorming do not have separate
+executable work kinds or profiles. Do not use shared-review prepare-or-join or an
+unsolicited review freeze.
+
+Recover the same submitted normal Chat conversation/run after interruption. Report
+`Execution surface: ChatGPT web`, `Coordinator: Claude Code`, and
+`Repository evidence: Repo MCP`.
 
 ## Local state maintenance
 

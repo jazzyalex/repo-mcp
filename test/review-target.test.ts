@@ -217,6 +217,36 @@ test('unsafe, unreadable and over-cap flagged worktree states fail closed', asyn
   });
 });
 
+test('unchanged tracked symlinks are fingerprinted without following and link replacement changes the target', async t => {
+  const m = await makeRepo(t, {
+    'src/target-a.txt': 'A\n',
+    'src/target-b.txt': 'B\n'
+  });
+  const link = path.join(m.root, 'src/link.txt');
+  await symlink('target-a.txt', link);
+  await git(m.root, 'add', '--', 'src/link.txt');
+  await git(m.root, 'commit', '-m', 'tracked symlink');
+
+  const unchanged = await target(m.root);
+  assert.match(unchanged.fingerprint, /^[a-f0-9]{64}$/);
+
+  await rm(link);
+  await symlink('target-b.txt', link);
+  const changed = await target(m.root);
+  assert.notEqual(changed.fingerprint, unchanged.fingerprint, 'link text replacement must invalidate the working target');
+
+  await rm(link);
+  await symlink('target-a.txt', link);
+  const restored = await target(m.root);
+  assert.notEqual(restored.fingerprint, changed.fingerprint);
+});
+
+test('untracked symlinks still make the working target unavailable', async t => {
+  const m = await makeRepo(t, { 'src/target.txt': 'target\n' });
+  await symlink('target.txt', path.join(m.root, 'src/untracked-link.txt'));
+  await expectUnavailable(target(m.root));
+});
+
 test('policy-denied content is never opened or returned; denied metadata stays opaque and owner-keyed', async t => {
   const hidden = 'secret/hidden.txt';
   const m = await makeRepo(t, {

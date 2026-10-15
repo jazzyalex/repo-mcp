@@ -1,5 +1,5 @@
 # Chat Review Handoff and Parallel Sharing Implementation Plan
-Status: Proposed executable plan for owner approval. No source/test/skill/deployment implementation in this docs phase.
+Status: Stages 1-2 shared-review core accepted in source; maintained skills/docs updated in this step; deployment and live smoke pending; large-diff manifest/per-path work deferred.
 Date: 2026-10-13
 Normative contract: docs/CHAT-REVIEW-SHARING-SPEC.md. This plan references that contract instead of restating it.
 

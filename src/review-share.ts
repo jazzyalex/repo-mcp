@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { SafeError, sha256 } from './errors.js';
-import { resolveGitCommit } from './git-ref.js';
+import { resolveCommitReviewBinding, resolveGitCommit, type CommitReviewBinding } from './git-ref.js';
 import { recoverTaskCoordinatorStaleLock, taskStatus } from './task.js';
 import {
   closeReviewWorkspaceUnderGate,
@@ -21,6 +21,7 @@ import {
   ReviewShareError,
   assertAndSyncSharedRunUnderGate,
   codingOwnerSummary,
+  computeCommitReviewTarget,
   computeCurrentReviewTarget,
   currentParticipants,
   findParticipant,
@@ -53,6 +54,7 @@ type PrepareReviewOptions = {
   workspaceRequestId: string;
   prompt: string;
   baseRef?: string;
+  headRef?: string;
   scopePrefix?: string;
   ttlSeconds?: number;
   now?: Date;
@@ -74,6 +76,9 @@ function assertPrepareOptions(options: PrepareReviewOptions) {
   if (!REQUEST_ID.test(options.workspaceRequestId)) throw new SafeError('Invalid workspace request ID.');
   if (!options.prompt.trim() || Buffer.byteLength(options.prompt, 'utf8') > 256 * 1024) throw new SafeError('Shared review prompt must be nonempty and at most 256 KiB.');
   if ((options.scopePrefix ?? '').length > 256 || CONTROL.test(options.scopePrefix ?? '')) throw new SafeError('Review scope prefix is invalid.');
+  if (options.headRef !== undefined && options.baseRef === undefined) {
+    throw new SafeError('Commit-pinned shared review requires explicit base_ref with head_ref.');
+  }
   const ttl = options.ttlSeconds ?? 60;
   if (!Number.isSafeInteger(ttl) || ttl < 60 || ttl > 3600) throw new SafeError('Review TTL must be between 60 and 3600 seconds.');
 }
@@ -114,9 +119,13 @@ function participantView(participant: ReviewParticipant, taskId: string) {
   return { ...participant, task_id: taskId };
 }
 
+type ObservedReviewTarget =
+  | Awaited<ReturnType<typeof computeCurrentReviewTarget>>
+  | Awaited<ReturnType<typeof computeCommitReviewTarget>>;
+
 function currentAuthorizationMatches(
   journal: ReviewShareJournal,
-  current: Awaited<ReturnType<typeof computeCurrentReviewTarget>>
+  current: ObservedReviewTarget
 ) {
   return journal.registration_epoch === current.repository.registration_epoch &&
     journal.binding_epoch === current.task.binding_epoch &&
@@ -127,7 +136,7 @@ function currentAuthorizationMatches(
 async function currentJournalForPrepare(
   options: PrepareReviewOptions,
   taskId: string,
-  current: Awaited<ReturnType<typeof computeCurrentReviewTarget>>,
+  current: ObservedReviewTarget,
   at: string
 ) {
   let journal = await readReviewShareJournal(options.stateDir, taskId);
@@ -147,7 +156,7 @@ async function currentJournalForPrepare(
       branch: current.target.branch,
       head: current.target.head,
       target_fingerprint: current.target.fingerprint,
-      target_assurance: 'phase_only' as const,
+      target_assurance: current.target.assurance,
       coding_owner: await codingOwnerSummary(options.stateDir, current.repository, current.task),
       participants: [],
       created_at: at,
@@ -176,7 +185,7 @@ async function currentJournalForPrepare(
       branch: current.target.branch,
       head: current.target.head,
       target_fingerprint: current.target.fingerprint,
-      target_assurance: 'phase_only',
+      target_assurance: current.target.assurance,
       coding_owner: await codingOwnerSummary(options.stateDir, current.repository, current.task),
       updated_at: at
     };
@@ -187,7 +196,8 @@ async function currentJournalForPrepare(
   const targetChanged =
     journal.branch !== current.target.branch ||
     journal.head !== current.target.head ||
-    journal.target_fingerprint !== current.target.fingerprint;
+    journal.target_fingerprint !== current.target.fingerprint ||
+    journal.target_assurance !== current.target.assurance;
   if (targetChanged) {
     if (protectedNow) {
       if (journal.target_fingerprint !== current.target.fingerprint) {
@@ -201,6 +211,7 @@ async function currentJournalForPrepare(
       branch: current.target.branch,
       head: current.target.head,
       target_fingerprint: current.target.fingerprint,
+      target_assurance: current.target.assurance,
       coding_owner: await codingOwnerSummary(options.stateDir, current.repository, current.task),
       updated_at: at
     };
@@ -254,7 +265,9 @@ async function prepareExistingInitializing(
     surface: 'chat',
     sessionId: options.sessionId,
     prompt: options.prompt,
-    baseRef: options.baseRef,
+    baseRef: participant.commit_binding?.requested_base_ref ?? options.baseRef,
+    headRef: participant.commit_binding?.requested_head_ref,
+    scopePrefix: participant.commit_binding?.scope_prefix ?? options.scopePrefix,
     runId: participant.run_id,
     selectionId: participant.selection_id,
     now: options.now,
@@ -280,8 +293,28 @@ async function prepareExistingInitializing(
 export async function prepareOrJoinReview(options: PrepareReviewOptions) {
   assertPrepareOptions(options);
   const taskId = await resolveTask(options);
-  const observed = await computeCurrentReviewTarget(options.stateDir, options.repositoryId, taskId);
-  const base = await resolveGitCommit(observed.repository.root, options.baseRef);
+  let commitBinding: CommitReviewBinding | undefined;
+  let observed: ObservedReviewTarget;
+  let base: { requested: string; commit: string };
+  if (options.headRef !== undefined) {
+    const catalog = await readMultiRepoCatalog(options.stateDir);
+    const repository = catalog.repositories[options.repositoryId];
+    if (!repository || !repository.enabled) fail('REVIEW_REPOSITORY_UNAVAILABLE', 'Repository is not enabled.');
+    commitBinding = await resolveCommitReviewBinding({
+      root: repository.root,
+      policyDigest: repository.policy_digest,
+      baseRef: options.baseRef!,
+      headRef: options.headRef,
+      scopePrefix: options.scopePrefix
+    });
+    observed = await computeCommitReviewTarget(
+      options.stateDir, options.repositoryId, taskId, commitBinding.head_commit
+    );
+    base = { requested: commitBinding.requested_base_ref, commit: commitBinding.base_commit };
+  } else {
+    observed = await computeCurrentReviewTarget(options.stateDir, options.repositoryId, taskId);
+    base = await resolveGitCommit(observed.repository.root, options.baseRef);
+  }
   return withTaskShareGate(options.stateDir, taskId, async () => {
     const validated = await validateReviewTask(options, taskId);
     if (observed.task.binding_epoch !== validated.task.binding_epoch ||
@@ -294,7 +327,8 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
       fail('REVIEW_SHARE_STATE_STALE', 'Task authority changed during shared review preparation.');
     }
     const priorJournal = await readReviewShareJournal(options.stateDir, taskId);
-    const liveTargetMoved = observed.target.head !== validated.live.head || observed.target.branch !== validated.live.branch;
+    const liveTargetMoved = !commitBinding &&
+      (observed.target.head !== validated.live.head || observed.target.branch !== validated.live.branch);
     if (liveTargetMoved && (!priorJournal || protectedParticipants(priorJournal).length === 0)) {
       fail('REVIEW_SHARE_STATE_STALE', 'Task binding is stale relative to the live checkout.');
     }
@@ -303,12 +337,17 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
     let journal = await currentJournalForPrepare(options, taskId, observed, at);
     const browserContext = trustedBrowserContextBinding({ sessionId: options.sessionId });
     const promptDigest = sha256(options.prompt);
-    const scopeDigest = sha256(options.scopePrefix ?? '');
+    const scopeDigest = sha256(commitBinding?.scope_prefix ?? options.scopePrefix ?? '');
     const browserDigest = sha256(JSON.stringify(browserContext));
-    const exactKey = sha256(JSON.stringify([
-      'review-participant-v1', journal.generation, options.coordinator, options.profile,
-      promptDigest, base.requested, base.commit, scopeDigest, browserDigest, options.workspaceRequestId
-    ]));
+    const exactKey = commitBinding
+      ? sha256(JSON.stringify([
+          'review-participant-commit-v1', journal.generation, options.coordinator, options.profile,
+          promptDigest, commitBinding, browserDigest, options.workspaceRequestId
+        ]))
+      : sha256(JSON.stringify([
+          'review-participant-v1', journal.generation, options.coordinator, options.profile,
+          promptDigest, base.requested, base.commit, scopeDigest, browserDigest, options.workspaceRequestId
+        ]));
     const exact = currentParticipants(journal).find(participant =>
       participant.exact_request_key === exactKey && participantProtected(participant)
     );
@@ -328,6 +367,7 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
       selection_id: selectionId,
       requested_base_ref: base.requested,
       resolved_base_commit: base.commit,
+      ...(commitBinding ? { commit_binding: commitBinding } : {}),
       scope_digest: scopeDigest,
       prompt_digest: promptDigest,
       browser_context_digest: browserDigest,
@@ -357,7 +397,9 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
       surface: 'chat',
       sessionId: options.sessionId,
       prompt: options.prompt,
-      baseRef: options.baseRef,
+      baseRef: commitBinding?.requested_base_ref ?? options.baseRef,
+      headRef: commitBinding?.requested_head_ref,
+      scopePrefix: commitBinding?.scope_prefix ?? options.scopePrefix,
       runId,
       selectionId,
       now: options.now,
@@ -405,7 +447,8 @@ export async function reconcileReviewParticipant(options: {
         repositoryId: journal!.repository_id,
         taskId: journal!.task_id,
         mode: 'review',
-        ttlMs: participant.workspace_ttl_ms
+        ttlMs: participant.workspace_ttl_ms,
+        reviewBinding: participant.commit_binding
       });
     } catch {
       fail('WORKSPACE_RECONCILIATION_MISMATCH', 'Authoritative workspace_open evidence does not match this participant.');
@@ -416,7 +459,8 @@ export async function reconcileReviewParticipant(options: {
         outcome.selection.phase_epoch !== journal!.phase_epoch ||
         outcome.selection.policy_digest !== journal!.policy_digest ||
         outcome.selection.repository_id !== journal!.repository_id ||
-        outcome.selection.task_id !== journal!.task_id || outcome.selection.mode !== 'review') {
+        outcome.selection.task_id !== journal!.task_id || outcome.selection.mode !== 'review' ||
+        JSON.stringify(outcome.selection.review_binding ?? null) !== JSON.stringify(participant.commit_binding ?? null)) {
       fail('WORKSPACE_RECONCILIATION_MISMATCH', 'Workspace selection authority does not match the shared review generation.');
     }
     const at = new Date().toISOString();
@@ -473,10 +517,23 @@ export async function recoverReviewParticipant(options: {
         repositoryId: journal!.repository_id,
         taskId: journal!.task_id,
         mode: 'review',
-        ttlMs: participant.workspace_ttl_ms
+        ttlMs: participant.workspace_ttl_ms,
+        reviewBinding: participant.commit_binding
       });
     } catch {
       fail('WORKSPACE_RECONCILIATION_MISMATCH', 'Authoritative workspace evidence is corrupt or mismatched.');
+    }
+    if (outcome && (
+      outcome.selection.registration_epoch !== journal!.registration_epoch ||
+      outcome.selection.binding_epoch !== journal!.binding_epoch ||
+      outcome.selection.phase_epoch !== journal!.phase_epoch ||
+      outcome.selection.policy_digest !== journal!.policy_digest ||
+      outcome.selection.repository_id !== journal!.repository_id ||
+      outcome.selection.task_id !== journal!.task_id ||
+      outcome.selection.mode !== 'review' ||
+      JSON.stringify(outcome.selection.review_binding ?? null) !== JSON.stringify(participant.commit_binding ?? null)
+    )) {
+      fail('WORKSPACE_RECONCILIATION_MISMATCH', 'Recovered workspace selection does not match the shared review generation.');
     }
     const at = new Date().toISOString();
     const participants = journal!.participants.map(item => {

@@ -229,9 +229,20 @@ The two multi-repository recovery commands verify the lock is on this host, its 
 Phase and rebind changes invalidate prior workspace selections. An old coding token
 therefore cannot become writable again after review/resume.
 
-The review transition waits for admitted MCP mutations and approved fixture checks
-to drain. Current v0.2 review assurance is a task-wide write freeze, not a
-content-verified candidate snapshot; `repo_info` reports that distinction.
+An explicit owner transition to review waits for admitted MCP mutations and approved
+fixture checks to drain. Shared `review prepare-or-join` does not perform that phase
+change automatically and never steals a coding owner. Before the owner freezes an
+existing coding task, its coding workspace must be closed and its ChatGPT coding run
+durably completed/reconciled. Normal phase/rebind/finish is refused while current
+protected participants, active relevant workspaces/admitted operations, or currently
+authorized unresolved runs remain.
+
+A review phase alone still provides legacy `phase_only` assurance: target
+fingerprinting prevents incompatible live working targets from sharing one generation
+but does not freeze a content candidate. Commit-pinned review is the bounded exception:
+an explicit server-verified base/head/scope binding reports `commit_pinned` assurance
+and a scoped candidate digest. The large-diff manifest/per-path feature remains deferred,
+so neither assurance is a blanket whole-repository SHIP certificate.
 
 `edit` and `create_file` require public `request_id` values. The broker namespaces
 them by workspace before using the durable task outcome journal. Retrying the same
@@ -262,13 +273,25 @@ included, fits `page_bytes`. `list_files` and `search` return an explicit error
 an oversized response or a cursor that does not advance. `run_tests` output keeps its
 documented exception until milestone 3.
 
-`git_diff` normally compares the index and working tree to `HEAD`. Its optional
-`base_ref` accepts a conservative commit, branch, tag, or relative commit such as
-`HEAD^`; the server resolves it to an immutable commit ID, returns that `base_commit`,
-and binds it into every continuation cursor. This keeps the latest committed change
-reviewable from a clean checkout. Pass the same `base_ref` on every page. Adding this
-argument changes the MCP tool schema, so deploy the rebuilt service and refresh tools in
-ChatGPT after upgrading.
+`git_diff` without `head_ref` keeps the legacy behavior: it compares the index
+and working tree to `HEAD`, or to optional conservative `base_ref`. With
+`head_ref`, explicit `base_ref` is mandatory. The server resolves both refs to
+immutable commits and compares Git objects only, with ext-diff/textconv/rename detection
+disabled; working-tree bytes, staged/index state, and untracked additions are not inputs.
+The response returns requested/resolved base and head plus `capture_sha256` for the
+full retained capture, and continuation cursors bind the exact arguments and commits.
+Policy filtering happens before scoped blob reads. Binary/non-text changes report
+old/new blob IDs, modes and sizes and explicitly remain semantically unsupported.
+
+`read` also accepts optional conservative `ref`. A committed read resolves that ref
+to a commit, checks read policy before Git tree/blob access, never traverses the
+filesystem or follows symlinks, and returns commit/blob/mode/size plus the full raw-byte
+SHA-256. Regular UTF-8 source is paged normally; symlink blobs return link text as
+metadata only; binary/non-UTF8 content returns identity with an explicit unsupported-text
+reason. Ref/commit/blob identity participates in its continuation cursor.
+
+These schema additions require deploying the rebuilt service and refreshing ChatGPT
+tools after upgrading.
 
 Git status and diff run once. Their output is streamed to a retained capture on disk
 and later pages are read from it by byte offset; Git is not run again. A capture is
@@ -545,14 +568,41 @@ performs the semantic work. A Codex subagent or Claude process that reads and ju
 code itself is outside the Repo MCP review/architecture contract and must never be
 reported as a Repo MCP ChatGPT review.
 
-For the installed Codex operator skill, `Use Repo MCP to review this repository`
-defaults to the token-saving route: freeze the task, use host-native browser control for
-a separate ChatGPT web conversation, and select the `review` profile (Sol Extra High).
-Use `review-critical` (Sol Pro) only for an explicit Pro or critical review. Oracle is
-not part of this default path. A failure to verify the browser model selection, submitted
-prompt, Repo MCP attachment, repository identity, or completed response is
-`NOT TESTABLE`; it is never permission to fall back to a Codex subagent or Oracle.
-Recover a submitted browser run by its existing run/tab rather than submitting it again.
+For the installed Codex or Claude operator skill, `Use Repo MCP to review this
+repository` means shared review preparation through `coord review prepare-or-join`
+and semantic review in a normal ChatGPT web Chat conversation. It does **not** imply an
+automatic freeze/rebind of whatever unfinished task happens to exist. The coordinator
+first discovers the sole safe review `TASK_ID` from owner-side repository/catalog status
+before constructing the final prompt, embeds that exact ID, and then always calls
+prepare-or-join with `--task TASK_ID`.
+Zero/multiple/coding/stale or conflicting state requires owner action and never steals
+another coding owner. If another caller intentionally omits `--task`, that API combines
+task selection with durable participant/run preparation and still requires the final
+prompt/session/workspace-request inputs; it is not the browser handoff discovery path.
+
+The `review` profile is Sol Extra High. `review-critical` uses Sol Pro only for an
+explicitly super-complex/critical Pro review. Work, Oracle, Codex subagents and
+Claude-native semantic review are not fallback execution surfaces. Failure to verify
+Chat surface, the exact live model/effort, Repo MCP attachment/visible chip, repository
+identity, required bounded evidence, or completed response is `NOT TESTABLE`.
+
+Before final prompt construction, choose the review target explicitly. Legacy
+working-tree review pre-resolves its immutable Git base. Commit-pinned review additionally
+chooses `head_ref` and optional `scope_prefix`; `head_ref` is never accepted without
+explicit `base_ref`, and prepare-or-join resolves both server-side to immutable commits.
+Preallocate a unique `workspace_open` request ID plus a stable logical browser session
+ID. Keep a private mapping from that session ID to the normal ChatGPT conversation
+URL/tab; no Temporary Chat. The final prompt must already contain repository/task IDs,
+review mode, request ID, and the requested base/head/scope plus expected resolved commits
+for commit-pinned work before it is hashed/prepared. Do not late-add a conversation ID or
+any handoff text after preparation.
+
+The executable sequence is documented in
+`docs/SHARED-REVIEW-WORKFLOW.md`: prepare-or-join -> persist exact nested
+`prepared.run` -> observe -> reserve -> one send only when authorized -> record
+submitted -> reconcile by task+participant from the authoritative `workspace_open`
+ledger -> trusted completion -> close that participant. Uncertain work recovers the same
+run/conversation instead of submitting a duplicate.
 
 Every result must state the execution surface, verified model/profile when available,
 repository evidence source, selected diff base, and resolved commit. This makes usage
@@ -576,6 +626,47 @@ invalidates older authorization; repeating the current mode is a true no-op. `ch
 rejects Work before model-selection, request-claim, or run state is created. Historical
 run records are not rewritten. `prepare` never stores the prompt or raw browser identity.
 
+Shared review uses `coord review prepare-or-join --task TASK_ID` rather than a direct
+generic `chatgpt-run prepare`. Its output is nested as
+`{ generation, participant, run, already_applied? }`; persist exact `run`, including
+`run.selection`, separately for `observe`, `reserve`, `submitted`, `complete`, and
+`recover`. The reserve CLI accepts that saved run object and extracts `selection`;
+never give it the outer shared-review wrapper. Before observe/reserve/send, compare
+`participant.task_id` and `run.task_id` with the exact task embedded in the final
+prompt and compare the returned resolved base with the commit resolved before final
+prompt construction. For commit-pinned review also require identical
+`participant.commit_binding` / `run.commit_binding`: assurance `commit_pinned`,
+format version, requested/resolved base and head, scope prefix, and candidate digest.
+Stop on any mismatch and never rewrite the hashed prompt.
+
+For commit-pinned review, ChatGPT must open the preallocated review workspace with the
+same requested `base_ref`, `head_ref`, and `scope_prefix` that produced the durable
+binding. The server resolves them again and the authoritative request ledger binds the
+result. Ref movement or any changed target/scope fails reconciliation rather than being
+silently reinterpreted. Once open, `repo_info` reports `review_assurance:
+"commit_pinned"`, the binding and candidate digest; committed instructions/read default
+to the exact bound head, and `git_diff` defaults to the exact bound base/head/scope and
+rejects inconsistent overrides. `list_files` and `search` are intentionally
+unavailable in this bounded commit-pinned mode. Commit-pinned `repo_info` also
+reports `local_test_evidence: false`: local tests/typecheck remain coordinator-supplied
+evidence outside the MCP review workspace. A read-only reviewer does not request
+`run_tests`.
+
+The review participant's preallocated `workspace_open` request ID is immutable.
+`coord review reconcile --task TASK_ID --participant PARTICIPANT_ID` derives
+`workspace_id` only from the authoritative request ledger; it accepts no workspace ID
+argument. A participant must reconcile `bound` before normal run completion. ChatGPT
+may close its workspace before the final response because the authoritative open-request
+outcome remains durable. Normal close then uses a fresh
+`coord review close --task ... --participant ... --request-id ...` and affects only that
+participant.
+
+Architecture, planning, and brainstorming intentions use the implemented generic
+`chatgpt-run prepare --kind architecture --profile architecture --surface chat` path,
+Sol Pro, and an `inspect` workspace. Planning and brainstorming do not have separate
+executable work kinds or profiles. They do not use `coord review prepare-or-join`,
+request a coding grant, or implicitly change task phase.
+
 After the coordinator selects the requested model in the live ChatGPT composer, its
 browser adapter calls `chatgpt-run observe` with the live control label, browser-context
 identity and observation times. This is an operator-only trust boundary, not an MCP
@@ -585,9 +676,13 @@ must submit only when the returned `submission_authorized` field is `true`. A re
 returns `submission_authorized: false` and `recovery_required: true`; it never authorizes
 a second browser submission. The adapter then records `submitted` and eventually
 `complete` with fresh trusted browser receipts binding the repository/task, prompt hash,
-immutable base commit, browser context, event identity, and observation time. Submission
-and completion events are stored separately. Only their hashes, the output digest, and
-bounded outcome are retained. A disconnect after reservation is marked `uncertain` and
+immutable base commit, browser context, event identity, and observation time. For a
+commit-pinned run, trusted submission/completion/recovery receipts additionally carry the
+exact resolved head commit and candidate digest; the CLI uses
+`--head-commit RESOLVED_HEAD_COMMIT --candidate-digest CANDIDATE_DIGEST` and legacy
+working-target runs omit those fields. Submission and completion events are stored
+separately. Only their hashes, the output digest, and bounded outcome are retained. A
+disconnect after reservation is marked `uncertain` and
 recovered through the same run and browser conversation. Uncertainty from
 `submission-reserved` forbids all submission evidence. Every new state is validated
 before durable publication or release of the exact-request claim.
@@ -641,13 +736,14 @@ owns its picker/submission boundary, so `run` relies on Oracle's verified picker
 gate plus strict postflight metadata; it never calls this helper after submission
 and never pretends that a post-submission helper call authorized the prompt.
 
-Supported mappings are exact and never downgrade:
+Supported executable mappings are exact and never downgrade:
 
 - `code` -> Sol High
 - `code-hard` -> Sol Extra High
 - `review` -> Sol Extra High only
-- `review-critical`, `brainstorm`, `plan`, `architecture` -> Sol Pro
+- `review-critical`, `architecture` -> Sol Pro
 
+Planning and brainstorming intentions use the implemented `architecture` work kind/profile.
 Pro is a distinct model/target, not an Extra High alias.
 
 Resolve the requested profile before touching the picker. At least one browser
@@ -728,11 +824,13 @@ Oracle; `run` without a backend fails before launching anything. The supported O
 Oracle v0.21.1 interface. Resolve the executable from absolute PATH entries by default,
 or pass `--oracle-path /absolute/path/to/oracle`. The executable must be a regular,
 executable file owned by the current user or root, without group/world write access;
-symlink installation aliases resolve to that validated executable. Profile mappings are exact:
+symlink installation aliases resolve to that validated executable. Executable profile mappings are exact:
 
 - `code` -> `gpt-5.6-sol` / `high`
 - `code-hard`, `review` -> `gpt-5.6-sol` / `extra-high`
-- `review-critical`, `brainstorm`, `plan`, `architecture` -> `gpt-5-pro` / `pro`
+- `review-critical`, `architecture` -> `gpt-5-pro` / `pro`
+
+Planning or brainstorming intentions map to the implemented `architecture` profile.
 
 There is no fallback. Before any prompt-bearing invocation, the adapter runs a
 non-submitting compatibility preflight against the configured executable and requires
@@ -841,12 +939,15 @@ If a same-name skill is foreign or modified, inspect it and use the documented
 `--replace` option only when replacement is intended; the installer retains a backup.
 
 Open Claude Code in the repository and ask: `Use Repo MCP to review this repository`.
-The review skill resolves or prepares the current checkout, keeps repository/task IDs and
-workspace tokens internal, opens a new review workspace, verifies scoped `repo_info`,
-and requires repository evidence to come only through Repo MCP. If an unfinished coding
-task is still active, it reports that concrete blocker rather than freezing another
-agent's task. Coding grants, task phase, service control, commits and pushes remain
-separate operator/coordinator actions.
+The review skill resolves the current checkout and control installation, keeps generated
+repository/task/request/session authority internal, and follows
+`docs/SHARED-REVIEW-WORKFLOW.md`. It prepares or joins a compatible review participant;
+ChatGPT web then opens the preallocated review workspace itself, while Claude reconciles
+that participant from the authoritative request ledger and records the trusted
+submission/completion lifecycle. If an unfinished coding owner, ambiguous task, stale
+authority, or other protected work exists, the skill reports that concrete blocker
+rather than freezing/rebinding it. Coding grants, task phase, service control, commits
+and pushes remain separate operator/coordinator actions.
 
 ## Local state maintenance
 

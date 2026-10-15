@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
 import { resolveIdentity } from './identity.js';
+import { commitReviewCandidateDigest, isConservativeGitRevision, resolveCommitReviewBinding, type CommitReviewBinding } from './git-ref.js';
 import { compilePolicyFor, loadPolicy, policyDigest, type PolicyV2 } from './policy.js';
 import { StateStore, acquireLock, defaultStateDir, lockOwnerAlive, validateLockRecord, withShortLock } from './task-state.js';
 import { bindTask, completeTask, rebindTask, setTaskPhase, taskStatus, taskWriterLockStatus, withTaskCoordinatorGate, type Phase } from './task.js';
@@ -96,6 +97,7 @@ export type WorkspaceSelection = {
   binding_epoch: number;
   phase_epoch: number;
   policy_digest: string;
+  review_binding?: CommitReviewBinding;
   issued_at: string;
   expires_at: string;
   status: 'open' | 'closed' | 'revoked';
@@ -130,6 +132,7 @@ export type AuthorizedWorkspace = {
     binding_epoch: number;
     phase_epoch: number;
     policy_digest: string;
+    review_binding?: CommitReviewBinding;
     phase: Phase;
     mode: WorkspaceMode;
   };
@@ -300,6 +303,41 @@ function parseGrant(value: unknown, key: string): WorkspaceGrant {
   };
 }
 
+function parseReviewBinding(value: unknown, policyDigest: string): CommitReviewBinding {
+  const v = object(value, 'commit review binding');
+  const allowed = new Set([
+    'format_version', 'assurance', 'requested_base_ref', 'base_commit',
+    'requested_head_ref', 'head_commit', 'scope_prefix', 'candidate_digest'
+  ]);
+  if (Object.keys(v).some(key => !allowed.has(key)) || v.format_version !== 1 || v.assurance !== 'commit_pinned') {
+    throw new SafeError('Corrupt commit review binding.');
+  }
+  const requested_base_ref = stringField(v.requested_base_ref, 'commit review requested_base_ref');
+  const requested_head_ref = stringField(v.requested_head_ref, 'commit review requested_head_ref');
+  const base_commit = stringField(v.base_commit, 'commit review base_commit');
+  const head_commit = stringField(v.head_commit, 'commit review head_commit');
+  const scope_prefix = typeof v.scope_prefix === 'string' ? v.scope_prefix : '';
+  const candidate_digest = stringField(v.candidate_digest, 'commit review candidate_digest');
+  if (
+    !isConservativeGitRevision(requested_base_ref) || !isConservativeGitRevision(requested_head_ref) ||
+    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(base_commit) ||
+    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(head_commit) ||
+    scope_prefix.length > 256 || /[\u0000-\u001f\u007f]/u.test(scope_prefix) ||
+    !HEX64.test(candidate_digest) ||
+    candidate_digest !== commitReviewCandidateDigest(policyDigest, base_commit, head_commit, scope_prefix)
+  ) throw new SafeError('Corrupt commit review binding.');
+  return {
+    format_version: 1,
+    assurance: 'commit_pinned',
+    requested_base_ref,
+    base_commit,
+    requested_head_ref,
+    head_commit,
+    scope_prefix,
+    candidate_digest
+  };
+}
+
 function parseWorkspace(value: unknown, key: string): WorkspaceSelection {
   const v = object(value, `workspace selection ${key}`);
   const workspace_id = stringField(v.workspace_id, 'workspace_id');
@@ -310,6 +348,8 @@ function parseWorkspace(value: unknown, key: string): WorkspaceSelection {
   if (status !== 'open' && status !== 'closed' && status !== 'revoked') throw new SafeError('Corrupt workspace status.');
   const policy_digest = stringField(v.policy_digest, 'workspace policy_digest');
   if (!HEX64.test(policy_digest) || !validDate(v.issued_at) || !validDate(v.expires_at)) throw new SafeError('Corrupt workspace selection.');
+  const review_binding = v.review_binding === undefined ? undefined : parseReviewBinding(v.review_binding, policy_digest);
+  if (review_binding && mode !== 'review') throw new SafeError('Commit review binding is valid only for review workspaces.');
   return {
     workspace_id,
     repository_id: assertId(stringField(v.repository_id, 'workspace repository_id'), 'repository ID'),
@@ -320,6 +360,7 @@ function parseWorkspace(value: unknown, key: string): WorkspaceSelection {
     binding_epoch: integerField(v.binding_epoch, 'workspace binding_epoch', 1),
     phase_epoch: integerField(v.phase_epoch, 'workspace phase_epoch', 1),
     policy_digest,
+    ...(review_binding ? { review_binding } : {}),
     issued_at: v.issued_at as string,
     expires_at: v.expires_at as string,
     status
@@ -700,6 +741,7 @@ function selectionPayload(selection: WorkspaceSelection) {
     binding_epoch: selection.binding_epoch,
     phase_epoch: selection.phase_epoch,
     policy_digest: selection.policy_digest,
+    ...(selection.review_binding ? { review_binding: selection.review_binding } : {}),
     issued_at: selection.issued_at,
     expires_at: selection.expires_at
   });
@@ -1225,6 +1267,9 @@ export async function openWorkspace(options: {
   requestId: string;
   writeGrant?: string;
   ttlMs?: number;
+  baseRef?: string;
+  headRef?: string;
+  scopePrefix?: string;
 }) {
   const stateDir = options.stateDir ?? defaultStateDir();
   const repositoryId = assertId(options.repositoryId, 'repository ID');
@@ -1244,9 +1289,24 @@ export async function openWorkspace(options: {
     }
     if (options.mode === 'code' && live.phase !== 'coding') throw new SafeError('Coding workspace requires the task to be in coding phase.');
     if (options.mode === 'review' && live.phase !== 'review') throw new SafeError('Review workspace requires the task to be frozen in review phase.');
+    const commitRequested = options.baseRef !== undefined || options.headRef !== undefined || options.scopePrefix !== undefined;
+    if (commitRequested && options.mode !== 'review') throw new SafeError('Commit review binding is valid only for review workspaces.');
+    if (commitRequested && (options.baseRef === undefined || options.headRef === undefined)) {
+      throw new SafeError('Commit-pinned review workspace requires explicit base_ref and head_ref.');
+    }
+    const reviewBinding = commitRequested ? await resolveCommitReviewBinding({
+      root: repository.root,
+      policyDigest: repository.policy_digest,
+      baseRef: options.baseRef!,
+      headRef: options.headRef!,
+      scopePrefix: options.scopePrefix
+    }) : undefined;
     const auth = await readAuthStore(store);
     const requestKeyValue = requestKey('workspace_open', options.requestId);
-    const argsDigest = requestDigest('workspace_open', [repositoryId, taskId, options.mode, options.writeGrant ? sha256(options.writeGrant) : null, ttlMs]);
+    const legacyOpenArgs = [
+      repositoryId, taskId, options.mode, options.writeGrant ? sha256(options.writeGrant) : null, ttlMs
+    ];
+    const argsDigest = requestDigest('workspace_open', reviewBinding ? [...legacyOpenArgs, reviewBinding] : legacyOpenArgs);
     const prior = auth.requests[requestKeyValue];
     if (prior) {
       if (prior.operation !== 'workspace_open' || prior.args_digest !== argsDigest) throw new SafeError('request_id was already used with different workspace arguments.');
@@ -1284,6 +1344,7 @@ export async function openWorkspace(options: {
       binding_epoch: task.binding_epoch,
       phase_epoch: task.phase_epoch,
       policy_digest: repository.policy_digest,
+      ...(reviewBinding ? { review_binding: reviewBinding } : {}),
       issued_at: nowIso(),
       expires_at: futureIso(ttlMs),
       status: 'open'
@@ -1305,6 +1366,7 @@ export async function readWorkspaceOpenOutcome(options: {
   taskId: string;
   mode: 'review';
   ttlMs: number;
+  reviewBinding?: CommitReviewBinding;
 }) {
   validateRequestId(options.requestId);
   const repositoryId = assertId(options.repositoryId, 'repository ID');
@@ -1317,7 +1379,11 @@ export async function readWorkspaceOpenOutcome(options: {
     const key = requestKey('workspace_open', options.requestId);
     const prior = auth.requests[key];
     if (!prior) return null;
-    const digest = requestDigest('workspace_open', [repositoryId, taskId, options.mode, null, options.ttlMs]);
+    const legacyOpenArgs = [repositoryId, taskId, options.mode, null, options.ttlMs];
+    const digest = requestDigest(
+      'workspace_open',
+      options.reviewBinding ? [...legacyOpenArgs, options.reviewBinding] : legacyOpenArgs
+    );
     if (prior.operation !== 'workspace_open' || prior.args_digest !== digest) {
       throw new SafeError('workspace_open request ledger entry does not match the expected review arguments.');
     }
@@ -1366,6 +1432,7 @@ function scopeFor(selection: WorkspaceSelection, live: Awaited<ReturnType<typeof
     binding_epoch: selection.binding_epoch,
     phase_epoch: selection.phase_epoch,
     policy_digest: selection.policy_digest,
+    ...(selection.review_binding ? { review_binding: selection.review_binding } : {}),
     phase: (live.phase ?? 'coding') as Phase,
     mode: selection.mode
   };

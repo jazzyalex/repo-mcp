@@ -213,23 +213,59 @@ A phase change or rebind increments durable authorization epochs, invalidating o
 
 ## Review workflow
 
-Freeze the whole task:
+The accepted source implements same-target shared reviews. The running broker may still
+be on an older deployed build until an authorized deployment; validate source first,
+deploy intentionally, and refresh ChatGPT tools only if the deployed MCP schema changed.
 
-```sh
-npm run coord -- task phase --task agent-sessions-20261005 --phase review
-```
+The user can simply ask to review the current repository. The coordinator resolves the
+Git root and internal repository/task authority; it never asks the user for IDs, policy
+paths, tokens, request IDs, or browser-session IDs.
 
-The transition waits for admitted MCP mutations and approved checks to drain. A reviewer opens a new `review` workspace and verifies `repo_info` before reading the full paginated diff.
+First discover the sole safe review task from owner-side repository/catalog status
+before constructing the final browser prompt. Embed that exact `TASK_ID`, then call
+`coord review prepare-or-join --task TASK_ID`. The optional-task API is a combined
+task-selection and durable-preparation path for callers that intentionally delegate task
+selection; it still requires the final prompt, session ID, and workspace request ID and
+is not a discovery step. The browser handoff never uses that form.
+Zero/multiple/coding/stale/conflicting task state requires explicit owner action and never
+binds/freezes/rebinds over an existing coding owner.
+Compatible Codex- and Claude-coordinated reviews can share one task/target generation
+while keeping distinct participants, normal Chat sessions, workspace-open request IDs,
+runs, workspaces, and results.
 
-Current v0.2 review assurance is deliberately limited: review phase is a **write freeze**, not a content-verified frozen candidate. `repo_info` reports `review_assurance: "phase_only"` and no candidate digest until the separate candidate-manifest work is implemented.
+Before preparation, resolve the intended Git base to an immutable commit and preallocate
+a unique `workspace_open` request ID plus a stable logical browser session ID. Construct
+the **final** Chat prompt with repository/task IDs, review mode, request ID, and immutable
+base already present; do not append handoff instructions after the prompt is hashed.
+Persist exact `prepared.run` separately from the outer
+`{generation, participant, run}` result. Before observe/reserve/send, compare
+`participant.task_id` and `run.task_id` with the exact task embedded in the prompt and
+compare the returned resolved base with the pre-resolved commit; stop on any mismatch and
+never rewrite the hashed prompt.
 
-Return to coding with:
+The trusted browser route is: verify Chat + Repo MCP visible chip + exact Sol model/effort,
+observe, reserve once, submit only when `submission_authorized: true`, record the actual
+submission, reconcile the participant by task+participant from the authoritative
+`workspace_open` ledger, complete from a trusted finished-response receipt, then close
+only that participant with a fresh request ID. Reconciliation accepts no caller workspace
+ID and must be bound before normal completion. Uncertain work recovers the same run and
+normal Chat conversation; it is never silently resent.
 
-```sh
-npm run coord -- task phase --task agent-sessions-20261005 --phase coding
-```
+Legacy working-target assurance remains `phase_only`. Commit-pinned review instead
+binds a server-verified immutable base/head and optional scope and reports a scoped
+candidate digest; that digest is not whole-repository coverage. The deferred large-diff
+manifest/per-path feature is still unavailable. Bounded, denied, unsafe, binary/non-UTF-8,
+over-cap, stale, or capture-limited evidence can prevent a complete review and cannot
+justify SHIP.
 
-Open a new coding workspace with a new write grant. The pre-review coding token stays stale.
+Shared review never steals the coding owner. Before an explicit owner transition from
+coding to review, close the coding workspace and durably complete/reconcile the coding
+run. Normal phase/rebind/finish operations refuse protected participants, active relevant
+workspaces/admitted operations, and currently authorized unresolved runs. Returning to
+coding requires explicit owner action, a fresh write grant, and a new coding workspace.
+
+See [docs/SHARED-REVIEW-WORKFLOW.md](docs/SHARED-REVIEW-WORKFLOW.md) for the executable
+Codex/Claude browser protocol.
 
 ## Crash-stale coordinator locks
 
@@ -326,18 +362,19 @@ that judges the code itself is outside this product contract and must not be lab
 Repo MCP review.
 
 The installed Codex operator skill gives `Use Repo MCP to review this repository` a
-specific token-saving meaning: prepare a frozen review task, use host-native browser
-control for an independent ChatGPT web review, and request the `review` profile (Sol
-Extra High). Sol Pro is reserved for an explicitly requested critical review. Oracle is
-an optional legacy backend and is never selected implicitly. The review must report its
-execution surface, verified model/profile, Repo MCP as the repository evidence source,
-and the selected diff base. If the ChatGPT route cannot be verified, it fails as
-`NOT TESTABLE` instead of falling back to a Codex subagent or Oracle.
+specific token-saving meaning: resolve the current checkout internally, use
+`coord review prepare-or-join` without stealing another owner, and drive a normal
+ChatGPT web Chat conversation through the trusted observe/reserve/submit/reconcile/
+complete/close sequence. The `review` profile is Sol Extra High; `review-critical`
+uses Sol Pro only for explicitly super-complex/critical review. Work, Oracle, Codex
+subagents and Claude-native review are not silent fallbacks. If Chat surface, model
+evidence, the Repo MCP chip, repository identity, required bounded evidence, or completion
+cannot be verified, the result is `NOT TESTABLE`.
 
 Claude supports Repo MCP review and architecture as a coordinator: it uses its own
-host-native browser controls to make ChatGPT web perform the XHigh/Pro work through Repo
-MCP. Claude does not perform the semantic Repo MCP review itself. Coding/write access is
-coordinated only through the Codex operator path.
+host-native browser controls to make ChatGPT web perform the Sol Extra High/Pro work
+through Repo MCP. Claude does not perform the semantic Repo MCP review itself.
+Coding/write access is coordinated only through the Codex operator path.
 
 New `chatgpt-run prepare` authorizations default to Chat when `--surface` is omitted:
 code -> Sol High, code-hard/review -> Sol Extra High, and review-critical/architecture ->

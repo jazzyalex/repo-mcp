@@ -1,45 +1,50 @@
 # ChatGPT local coding workflow
 
-Status: proposed implementation contract, 2026-09-30; updated 2026-10-07.
+Status: current operational overlay plus historical workflow/design context; updated 2026-10-14.
 
-**v0.2 lifecycle note:** [MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md) is normative for the current permanent broker, twelve-tool production schema, explicit workspace tokens and concurrent approved repositories. The single-active/sequential workflow below records the v0.1 pilot and older design context; follow it only where it does not conflict with MULTI-REPO-SPEC.md. Real-project check jobs, verified candidate/commit evidence and sandbox hardening remain separate future work.
+**Current contract:** [MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md) is normative for the permanent broker and [SHARED-REVIEW-WORKFLOW.md](SHARED-REVIEW-WORKFLOW.md) is the executable Codex/Claude browser handoff. The accepted source includes explicit workspace authority, durable ChatGPT run/model evidence, target-only review fingerprinting, shared review generations/participants, authoritative workspace reconciliation, lifecycle protection, and recovery/GC evidence preservation. The running broker/dist may still be pre-deployment until an authorized deployment/live smoke.
 
-**Historical accepted baseline (2026-10-02):** milestones 1, 2a and 2b were source-accepted (216 of 216 tests and `tsc` clean independently, final Oracle review CLEAN, SHIP). That v0.1 MCP server had eight repository tools: `repo_info`, `list_files`, `search`, `read`, `edit`, `create_file`, `run_tests` (fixture suites only, synchronous, ten-second timeout, output unpaged up to 32 KiB) and `git_diff`. v0.2 retains those repository operations behind explicit workspaces and adds four bootstrap tools. The deferred real-project check runner/evidence, automatic handoff utility, and macOS sandbox profiles remain future direction.
+The single-active/sequential workflow later in this file records the v0.1 pilot and older future-design context; follow it only where it does not conflict with the current contracts above. Large-diff manifest/per-path review coverage, asynchronous real-project check jobs/evidence, and sandbox hardening remain deferred.
+
+**Historical accepted baseline (2026-10-02):** milestones 1, 2a and 2b were source-accepted (216 of 216 tests and `tsc` clean independently, final Oracle review CLEAN, SHIP). That v0.1 MCP server had eight repository tools. The current permanent broker retains those repository operations behind explicit workspaces and adds four bootstrap tools.
 
 ## Current operating procedure: ChatGPT owns code and review
 
-For the next real task, Codex coordinates execution without semantic code review. The first pilot included a substantive Codex finding; it proves the tools work, not zero Codex review or measured usage savings.
+Codex coordinates coding execution, local checks, Git, and browser control without replacing the requested ChatGPT semantic review. Claude may coordinate Chat review/architecture only; coding/write coordination remains Codex-only.
 
-“ChatGPT review through Repo MCP” names two independent facts: ChatGPT web is the
-execution surface, and Repo MCP is the repository evidence source. Repo MCP alone does
-not launch ChatGPT or select a model. A Codex subagent that calls the same tools remains
-a Codex review and cannot satisfy a token-saving ChatGPT handoff. The coordinator must
-record the actual execution surface and verified model/profile with the verdict.
+“ChatGPT review through Repo MCP” names two independent facts: ChatGPT web Chat is the
+execution surface, and Repo MCP is the repository evidence source. A Codex subagent,
+Claude-native review, Work, Oracle, or another backend is not an equivalent fallback.
 
-1. Record canonical root, branch, HEAD, baseline status, protected-file hashes, task-owned paths, fixed check commands and coding/review chat references. Use existing checkout; branch/worktree changes require separate authorization.
-2. Confirm local MCP, tunnel health and a real ChatGPT `repo_info` call. Verify eight tools, `cursor` on paged tools and, in task mode, `request_id` on mutations. Read instructions at the returned `instructions_path`. If schemas differ, refresh the existing plugin before coding.
-3. Codex runs prescribed baseline checks and records command, cwd, exit code, output and collected test names/counts. ChatGPT writes regressions through MCP; Codex runs them and returns the actual RED result.
-4. ChatGPT implements through MCP. Codex runs the prescribed local checks and returns results. Codex verifies allowed changed paths, protected hashes and test-name/count changes mechanically; it does not decide whether logic or assertions are sufficient. Changed/removed tests and exact diffs go to the ChatGPT reviewer. Unexpected command failures or scope drift pause the handoff and go back to ChatGPT.
-5. Freeze with `npm run task -- phase --task TASK_ID --state-dir STATE_DIR --phase review`. Capture full tracked/staged diff plus approved new-file contents, path/mode/content hashes, deletions, HEAD and validation results. A diff against HEAD alone does not identify new-file contents or separate pre-existing edits.
-6. A separate ChatGPT conversation attaches Repo MCP, verifies frozen identity/hashes, reads the complete paginated diff and all new files, and performs semantic review. It reports confirmed findings with lines and reproduction, validation limits, and SHIP/NO-SHIP. It must distinguish coordinator-executed tests from tests it ran itself.
-7. Route confirmed findings to the coding chat, reopen `coding`, repeat prescribed checks and freeze/review. Never duplicate a submitted browser request after a timeout; recover that chat/tab.
-8. After explicit commit authorization, Codex confirms the index has no unrelated staged content, verifies frozen hashes, stages only owned paths, checks the staged diff, commits, then compares committed blobs/modes and remaining protected files. HEAD changes invalidate the task binding: rebind to the new HEAD while retaining review phase before any later mutation. Push is separate authorization with an exact remote/ref; no force push.
+1. Resolve the user's exact Git root and root instructions, then discover the installed Repo MCP control checkout from launchd `WorkingDirectory`. Resolve/register only that authorized checkout. Do not ask the user for repository/task/policy/token/request/session IDs.
+2. For coding, preserve one unfinished task and one coding owner/workspace. ChatGPT performs semantic edits through Repo MCP; Codex runs the prescribed local checks and records actual command/status/test inventory. Close the coding workspace and durably complete/reconcile its run before any explicit owner transition to review.
+3. For review, discover and record the exact sole safe existing review `TASK_ID` from owner-side repository/catalog status before final prompt construction. Zero/multiple/coding/stale/conflicting task state requires owner action; never auto-bind a second unfinished task or freeze/rebind another coding owner. Omitting `--task` is a different combined selection+durable-preparation API for callers intentionally delegating task selection; it is not the browser handoff discovery step.
+4. Before final prompt construction, choose the target. Legacy working review resolves the requested Git base to an immutable commit. Commit-pinned review chooses explicit `base_ref` + `head_ref` and optional scope; `head_ref` is invalid without `base_ref`. Generate a unique `workspace_open` request ID and one stable logical normal-Chat session ID. Preserve its private conversation URL/tab mapping. No Temporary Chat and no late conversation-ID addition after a session-only binding.
+5. Construct the **final** review prompt with exact repository/task IDs, preallocated request ID, `review` workspace mode, and selected target already present. Run `coord review prepare-or-join --task TASK_ID` with Chat surface and profile `review` (Sol Extra High) or explicit super-complex `review-critical` (Sol Pro), adding `--base-ref ... --head-ref ... [--scope-prefix ...]` for commit-pinned review. Before observe/reserve/send, compare `participant.task_id` and `run.task_id` to the exact embedded task; compare the resolved base; and for commit-pinned review require matching participant/run commit bindings, including head, scope and candidate digest. Stop on any mismatch and never rewrite the hashed prompt.
+6. Persist exact nested `prepared.run` separately. In the normal Chat conversation verify Repo MCP attachment/visible chip and exact live Sol model/effort evidence, then observe and reserve that run. Submit the final prompt exactly once only when `submission_authorized: true`; record the actual submission event.
+7. ChatGPT calls `service_info`, `repository_list`, opens the preallocated `review` workspace, verifies `repo_info` and instructions, and reads the complete bounded evidence required for the selected target. Commit-pinned workspace open uses the same requested base/head/scope; `repo_info` must report `commit_pinned`, committed context/read defaults to the bound head, and diff defaults to the bound base/head/scope while inconsistent overrides fail closed. Read-only review does not request `run_tests`; local checks remain coordinator evidence. Reconcile by task+participant only from the authoritative `workspace_open` ledger; no caller workspace ID. A participant must be bound before normal completion.
+8. Record completion only from a trusted finished-response receipt matching the submission hash and observed output digest, then close only that participant with a fresh request ID. Compatible reviewers may share one target generation while retaining distinct participants/sessions/workspace requests/runs/workspaces/results.
+9. If submission or completion becomes uncertain, recover the **same** run and normal Chat conversation. Do not resend or fabricate completion. Pending submitted/uncertain work remains protected; pre-submit absence recovery applies only to actual failed-pre-submit state.
+10. Route confirmed findings to the coding owner. Normal resume/rebind/finish remains blocked by current protected participants, active relevant workspaces/admitted operations, and current unresolved runs. Security disable/revoke may retire current authority while preserving evidence.
+11. After explicit commit/push authorization, Codex performs the existing Git verification and publication steps. Git operations remain outside MCP.
+
+Legacy working-target review reports `phase_only`. Commit-pinned review reports `commit_pinned` only for its exact policy, scope, immutable base, and immutable head. Its candidate digest is bounded coverage identity rather than whole-repository coverage. Large-diff manifest/per-path support remains deferred, and incomplete bounded evidence cannot justify a complete SHIP verdict.
 
 Coding prompt template:
 
 > Use only Repo MCP for repository reads and writes. First verify TASK_ID, ROOT, BRANCH and HEAD with repo_info, then read instructions_path through all pages. Implement TASK within OWNED_PATHS; preserve PROTECTED_PATHS. Add meaningful regressions first and pause for coordinator execution; do not invent test results. Use fresh file hashes and request IDs. No commit, push, branch change, installs or alternate repository tools. After implementation read the complete diff and pause for local checks.
 
-Review prompt template:
+Review prompt template (construct fully before shared preparation/hashing):
 
-> Use only Repo MCP, read-only. Verify frozen TASK_ID, ROOT, HEAD and CANDIDATE_HASHES. Read the complete paginated candidate diff and approved new files. Review correctness, edge cases and regression quality; distinguish confirmed defects from hypotheses. Supplied CHECK_RESULTS were executed by the coordinator. Report actionable file/line findings, validation limits and SHIP/NO-SHIP. Do not edit, run other tools or approve an incomplete diff.
+> Use only Repo MCP, read-only. First call service_info and repository_list, then open REPOSITORY_ID / TASK_ID in review mode using the exact preallocated WORKSPACE_REQUEST_ID and keep the returned token private. Verify repo_info, ROOT, BRANCH, HEAD, task/policy identity, and the exact immutable BASE_COMMIT. Read the complete root instructions and every required bounded git_diff page using BASE_COMMIT plus needed surrounding files. Supplied CHECK_RESULTS were executed by the coordinator. Review correctness, edge cases and regression quality; distinguish confirmed defects from hypotheses. Report actionable file/line findings, exact validation limits and SHIP/NO-SHIP/NOT TESTABLE. Do not edit or approve incomplete evidence.
 
 ## Outcome and decisions
 
-ChatGPT performs implementation and semantic code review using Repo MCP and, where useful, the connected GitHub tools. Codex coordinates the task, prepares local execution, checks evidence, and performs authorized Git operations. For the first pilot this is direct local Git coordination by Codex; a tested local handoff utility is planned and deferred. “Luna Max” means selecting the Luna model with Max reasoning effort for that coordinator; it is an optional user setting, not an MCP capability. The first workflow is sequential.
+ChatGPT performs implementation and semantic code review using Repo MCP and, where useful, connected remote read context. Codex coordinates coding/write authority, local checks, browser handoff, and authorized Git operations; Claude may coordinate Chat review/architecture. The durable shared-review handoff is implemented in accepted source through the review coordinator plus the existing `chatgpt-run` journal. Compatible parallel reviews are supported on one target generation with distinct participants/runs/workspaces/results; parallel coding still requires separate registered worktrees and coding owners. Large-diff manifest/per-path review coverage remains deferred.
 
 Use an existing checkout or a linked Git worktree. Neither a clone nor a worktree is mandatory. Prefer an existing checkout for a small task with exclusive ownership; prefer a linked worktree when the main checkout is busy or contains unrelated changes. Worktrees isolate working files and indexes but share Git metadata and are not security sandboxes.
 
-MCP accepts an operator-selected checkout. It does not create worktrees, switch branches, or select arbitrary filesystem roots from chat arguments. Codex owns those operations, subject to repository instructions and user authorization. Parallel orchestration is deferred.
+MCP accepts an operator-selected checkout. It does not create worktrees, switch branches, or select arbitrary filesystem roots from chat arguments. Codex owns those operations, subject to repository instructions and user authorization. Compatible parallel review participants are implemented; parallel coding against the same project still uses separately registered worktrees and independent coding owners.
 
 A browser ChatGPT conversation can reach local MCP through the existing private tunnel. Desktop ChatGPT is not required for this route. This design does not promise unlimited ChatGPT usage or free tunnel transport. The server does not make model inference API calls.
 
@@ -48,27 +53,29 @@ A browser ChatGPT conversation can reach local MCP through the existing private 
 | Participant | Responsibility |
 | --- | --- |
 | User | Task scope, repository choice, authorization for external actions |
-| Codex coordinator, optionally Luna Max | Checkout setup, policy, connection health, fixed verification commands, evidence capture, Git and handoffs |
-| ChatGPT coding conversation | Inspect actual source, implement, add tests, run approved checks, explain changes |
-| Separate ChatGPT review conversation | Read-only review of exact candidate contents, tests and coverage limitations |
-| Local MCP | Repository discovery, bounded reads/search/diffs, scoped edits, approved local execution |
-| GitHub connector | Issues, PR discussion, CI and committed source at a specified revision, according to actual available capabilities |
+| Codex coordinator | Checkout/task/policy ownership, coding grants, local checks, browser handoffs, evidence capture, Git and deployment actions |
+| Claude coordinator | Read-only Chat review/architecture preparation and browser handoff; no coding/write grants |
+| ChatGPT coding conversation | Inspect actual source, implement and add tests through Repo MCP; do not invent local check results |
+| ChatGPT review/architecture conversation | Read-only semantic review/architecture through Repo MCP with exact bounded evidence and verified model/profile |
+| Local MCP | Repository discovery, bounded reads/search/diffs, scoped edits, approved fixture checks, durable workspace/review/run authority |
+| Remote read connector, when explicitly useful | Issues, PR discussion, CI and committed source at a specified revision, according to actual available capabilities |
 
-Both connectors may be used in one conversation. Local MCP is authoritative for uncommitted files and local test execution. GitHub is authoritative for remote issue/PR metadata and remote commits. Never treat a GitHub branch result as proof of current local contents. Record repository identity and commit SHA for remote code citations. If the connector cannot retrieve the requested revision, say so and use local MCP for that code.
+Local Repo MCP is authoritative for the current checkout and uncommitted source. Codex is authoritative for the real local build/integration checks it executes outside MCP. A remote read connector, when explicitly used, is authoritative only for the remote issue/PR/CI/commit data it actually returns. Never treat a remote branch result as proof of current local contents.
 
-Review independence is procedural: coding and review conversations share the tunnel credential, so the server does not authenticate them as distinct reviewers. The operator-controlled global review freeze denies all MCP mutations; it cannot prove which model or person authored a verdict.
+Review independence is procedural rather than cryptographic. Coding and review conversations share the tunnel credential, and workspace tokens remain bearer capabilities. Shared review records distinct participants, browser-context hashes, runs, workspace requests and results, while the target fingerprint prevents incompatible live targets from sharing a generation; none of this proves a human/model identity cryptographically.
 
-Version one uses GitHub for reads. Git writes stay with Codex, even if a connector exposes write operations. A remote-writing workflow requires a separate explicit handoff and local synchronization before editing resumes. Never allow concurrent local and remote writers on the task branch.
+Git writes remain with Codex. A remote-writing workflow requires separate explicit authorization and local synchronization before editing resumes. Never allow concurrent local and remote writers on the task branch.
 
 The Codex and Claude coordinator skills use host-native browser control plus Repo MCP's
 provider-neutral `chatgpt-run` journal. ChatGPT web performs every Repo MCP review and
-architecture pass; only Codex coordinates coding/write access. A run requires an
-operator-selected tab with Repo MCP already attached, exact model/profile evidence,
-durable reservation immediately before one submission, and recovery of the same
-conversation after interruption rather than duplicate submission. Oracle remains
-available only through the explicit `--backend oracle` compatibility path when the user
-names it. A manual prompt/result handoff remains a fallback only when the user explicitly
-chooses it; it must not be reported as an adapter-verified run.
+architecture pass using the Chat surface; only Codex coordinates coding/write access. A run uses a stable
+normal-Chat session from the start, an operator-selected conversation with Repo MCP
+attached and visible, exact live model/profile evidence, durable reservation immediately
+before one submission, and recovery of the same run/conversation after interruption.
+Temporary Chat is not a recovery surface. Shared review/architecture never silently
+falls back to Work, Oracle, or a host-model semantic review. Oracle remains a separate
+explicit legacy compatibility command only when the user specifically requests Oracle;
+it is not part of this workflow.
 
 ## Task identity and ownership
 
@@ -87,7 +94,9 @@ Verify root, branch and HEAD before each mutation and check. Unexpected changes 
 
 Pre-existing modifications are preserved. If a task needs to edit a file already modified by someone else, settle ownership before writing. Version one does not automatically split mixed-ownership hunks into a commit. Task state is stored in an operator-owned user-local directory outside served repositories, keyed by repository and task IDs. Versioned records cover policy, binding, phase, lock owner, mutation intents/outcomes, cursor inventories, job metadata and review/check evidence. Use atomic replacement and durable writes for state transitions; reject unknown versions and fail closed on corrupt records. MCP HTTP sessions may remain stateless: application task state persists independently of transport sessions. No automatic stash, reset, clean, rebase or merge.
 
-## Sequential lifecycle
+## Historical sequential lifecycle (non-normative)
+
+The following v0.1/future-design sequence is retained for context only. The current shared-review handoff above and the normative multi-repository contract override any freeze/candidate/job language that is not implemented today.
 
 1. **Prepare:** inspect repository instructions and status; select checkout; optionally create an authorized task branch/worktree; configure scope and check commands. Record baseline and connection health.
 2. **Discover:** ChatGPT calls repo_info and verifies the manifest identity. Search and read locally. Read GitHub issue/PR context when relevant, with source attribution.
@@ -143,23 +152,23 @@ Health has three distinct checks: local MCP responds, tunnel has a recent succes
 
 MCP never exposes .git internals or secrets as file contents. Explicitly configured project dotfiles such as .github workflows may be readable/editable; replace the current blanket dot-path restriction with a deliberate policy. Continue containment and symlink checks. Git operations can access validated metadata internally without making it model-readable.
 
-When tool names, arguments or contracts change, schema refresh means refreshing the connected app/plugin’s cached tool list in ChatGPT settings, then verifying discovery in a new conversation. Changing policy alone does not necessarily change tool schemas.
+Refresh the connected ChatGPT tool list only after a **deployed MCP schema change**, then verify discovery in a compatible new conversation. Source edits, repository/task selection, and policy changes that do not alter the deployed tool schema do not require Refresh tools.
 
-## First acceptance pilot
+## Historical first acceptance pilot
 
-There is no milestone 3 or 4 prerequisite. The first pilot runs on the accepted source (milestones 1, 2a, 2b) and the current eight-tool MCP server:
+The first pilot predates the accepted shared-review coordinator and is retained only as historical evidence:
 
-- **ChatGPT codes** through MCP, within the operator-written scopes.
-- **An independent ChatGPT conversation reviews** the exact candidate through MCP, read-only.
-- **Codex runs the real local tests** with the existing dependencies (the actual agent_watch dependency and appropriate existing integration tests, not the earlier dependency-stub-only pilot), and records command, source identity, exit status and test inventory itself. The current MCP has no asynchronous check runner and cannot do this for the model.
-- **Codex coordinates the authorized Git steps** by hand: no MCP Git tools, no automatic handoff utility.
+- **ChatGPT coded** through MCP within operator-written scopes.
+- **An independent ChatGPT conversation reviewed** the candidate through MCP, read-only.
+- **Codex ran real local tests** with the existing dependencies and recorded command/source/exit/test inventory.
+- **Codex coordinated authorized Git steps** outside MCP.
 
-This document itself authorizes no particular repository, branch, commit or push. Before a real checkout is exposed, verify the selected repository's own instructions, its ownership, and the authorization the user has already given in the current session. Obtain further authorization only for an operation outside that granted scope; do not ask again for what is already authorized. The Agent Sessions baseline-rebuild backlog item (or any other task) is checked against the selected current revision and its ownership before implementing.
+The current workflow replaces the pilot's manual review handoff with the durable shared-review participant/run/request protocol documented above. This document still authorizes no particular repository, branch, commit or push; verify selected repository instructions/ownership and obtain authorization only for operations outside the user's already granted scope.
 
-Prove coding plus separate read-only review, then, only when authorized, a commit/push to a local bare destination. This validates Git mechanics only. A later explicitly targeted GitHub branch proves authentication, connector revision visibility and CI. No publication is implied by preparing this specification. Advanced runner, evidence, sandbox profiles and automatic handoff are planned, deferred work; the pilot may show whether they are needed.
+## Scope excluded from current accepted source
 
-## Scope excluded from version one
+Automatic worktree creation/cleanup, MCP commit/push tools, arbitrary shell, guaranteed hostile-code isolation, automatic browser/account setup, universal OS certification, and subscription-limit claims remain out of scope. Also deferred are asynchronous MCP real-project check jobs/evidence, shared job storage, macOS sandbox profiles, and the large-diff manifest/per-path review feature. Shared review handoff itself is implemented; do not list it as deferred.
 
-Parallel task scheduling, automatic worktree creation/cleanup, MCP commit/push tools, arbitrary shell, guaranteed hostile-code isolation, automatic browser setup or Repo MCP attachment, universal OS certification, and subscription-limit claims. Also not in the accepted source and deferred: asynchronous MCP check jobs, evidence manifests, shared job storage, macOS sandbox profiles and the automatic coding/review state handoff utility (see the status note at the top and the checkpoint it links). Host-native browser control may submit and recover a review only after the operator supplies a safe preattached tab; Repo MCP does not create or configure that tab.
+Host-native browser control must use a normal signed-in ChatGPT conversation with Repo MCP attached through the client tool picker and a visible chip before submission. The Repo MCP service itself does not create a Chat conversation or attach the plugin, and Temporary Chat is not a recovery surface.
 
 Official transport reference: [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels). Connector operations remain capability-checked in the actual conversation rather than inferred from a product name.

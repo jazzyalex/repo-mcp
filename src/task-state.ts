@@ -113,18 +113,30 @@ export class StateStore {
 
   async read<T = unknown>(rel: string, kind: string): Promise<T | undefined> {
     const target = this.resolve(rel);
-    let text: string;
-    try { text = await readFile(target, 'utf8'); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      // readFile follows symlinks, so ENOENT may mean a missing referent.
-      // Only an absent pathname is safe to treat as an absent state record.
-      try { await lstat(target); }
-      catch (inspectionError) {
-        if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-        throw inspectionError;
+    let text: string | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        text = await readFile(target, 'utf8');
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        // readFile follows symlinks, so ENOENT may mean a missing referent.
+        // Only an absent pathname is safe to treat as absent. A regular file
+        // may have been atomically published after readFile lost the race;
+        // retry that bounded contention case without accepting unsafe path types.
+        try {
+          const inspected = await lstat(target);
+          if (!inspected.isFile()) {
+            throw new StateError(`Unsafe task state pathname ${rel}; inspect it before continuing.`);
+          }
+        } catch (inspectionError) {
+          if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw inspectionError;
+        }
       }
-      throw new StateError(`Unsafe task state pathname ${rel}; inspect it before continuing.`);
+    }
+    if (text === undefined) {
+      throw new StateError(`Task state pathname ${rel} changed repeatedly during read; retry.`);
     }
     let record: { version?: unknown; kind?: unknown; data?: unknown };
     try { record = JSON.parse(text); } catch { throw new StateError(`Corrupt task state record ${rel}; inspect it before continuing.`); }

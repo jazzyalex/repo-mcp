@@ -200,27 +200,28 @@ the live picker observation, reserve immediately before the single prompt submis
 
 ## Review handoff
 
-Repo MCP is the repository-access layer; it does not choose or launch the reviewing
-model. In this Codex operator skill, a request to "use Repo MCP review" means an
-independent **ChatGPT web** review. Do not satisfy it with a Codex subagent or the current
-Codex conversation merely calling Repo MCP. Those are Codex reviews, consume Codex
-usage, and are outside the Repo MCP review product contract.
+In this Codex skill, a request to "use Repo MCP review" means **ChatGPT web Chat
+performs the semantic review** and Repo MCP is the repository evidence source. It must
+not be satisfied by a Codex subagent or host-model review.
 
-For the independent route, prepare and freeze the repository task locally, then use
-host-native browser control to drive the user's signed-in ChatGPT web conversation. Use
-the durable `chatgpt-run` prepare/observe/reserve/submitted/complete contract described
-in `SETUP.md`; do not invoke `model-policy run`, Oracle, or another external launcher unless
-the user explicitly names that backend. Use model profile `review` (Sol Extra High) by
-default. Use `review-critical` (Sol Pro) only when the user asks for Pro or the review is
-explicitly classified as critical/architectural. The selected browser tab must already
-have Repo MCP attached; the submitted prompt must make the ChatGPT conversation call
-`service_info` and open the review workspace itself. If host-native browser control,
-model evidence, or Repo MCP attachment cannot be verified, report the review as
-`NOT TESTABLE`; never silently substitute a Codex subagent, Claude, Oracle, or a local
-source review. If a submitted browser run stalls or disconnects, recover that same
-run/tab instead of submitting a duplicate. Record separate trusted browser receipts for
-submission and completion; a local assertion without the matching browser context is not
-completion evidence.
+Resolve the installed control checkout from launchd `WorkingDirectory`, then read
+`docs/SHARED-REVIEW-WORKFLOW.md` there and follow that accepted protocol. Do not
+assume the reference was installed beside this standalone skill.
+
+Use `coord review prepare-or-join`, not an automatic freeze-first handoff. First
+discover the sole safe review task from owner-side repository/catalog status before
+constructing the final browser prompt. Embed that exact `TASK_ID` in the prompt and
+always call prepare-or-join with `--task TASK_ID`. Zero/multiple/coding/stale or
+conflicting state requires owner action and must not be silently rebound/frozen. Omitting
+`--task` is a separate combined selection+durable-preparation API for callers that
+intentionally delegate task selection; it is not discovery and the browser handoff never
+uses it. Compatible reviewers share one target generation but retain distinct
+participants, normal Chat sessions, workspace requests/runs/workspaces, and results.
+
+Use model profile `review` (Sol Extra High) by default and `review-critical` (Sol Pro)
+only for explicitly super-complex/critical Pro review. Verify Chat surface, exact live
+Sol model/effort evidence, Repo MCP attachment and visible chip. Never silently fall back
+to Work, Oracle, a Codex subagent, Claude-native review, or another backend.
 
 For every work kind, completion must use a trusted finished-response receipt with
 `kind: "completion"`, `responseState: "completed"`, the submitted event hash, and
@@ -237,39 +238,54 @@ Codex`, verified model/profile when available, `Repository evidence: Repo MCP`, 
 selected diff base/resolved commit. Never label a Codex or Claude review as a ChatGPT
 Repo MCP review.
 
-Freeze the whole task:
+Before preparing the shared review, choose the target mode. Legacy working review
+resolves the intended Git base to an immutable commit. For commit-pinned review choose
+explicit `base_ref` + `head_ref` and optional `scope_prefix`; never request
+`head_ref` without `base_ref`. Preallocate both a unique `workspace_open` request ID
+and one stable logical browser session ID. Preserve a private mapping from that session ID
+to the normal ChatGPT conversation URL/tab; never use Temporary Chat. Construct the
+**final** browser prompt with repository/task IDs, review workspace mode, request ID and
+selected target already present. For commit-pinned work include requested base/head/scope
+and expected resolved commits, and require browser `workspace_open` to use those same
+requested values. Do not append handoff text or a late conversation ID after prompt
+hashing.
 
-```sh
-npm run --silent coord -- task phase --task TASK_ID --phase review
-```
+Run `coord review prepare-or-join --task TASK_ID` (adding
+`--base-ref ... --head-ref ... [--scope-prefix ...]` for commit-pinned review), persist
+its nested result, and save exact `prepared.run` separately. Before
+observe/reserve/send, compare both returned task IDs (`participant.task_id` and
+`run.task_id`) to the exact task embedded in the final prompt and compare the returned
+resolved base to the pre-resolved commit. For commit-pinned review also require exact
+`participant.commit_binding === run.commit_binding` in value, including resolved head,
+scope and candidate digest. Stop on any mismatch and never rewrite the hashed prompt.
+Observe the live Chat control, reserve the saved run once, and submit only when
+`submission_authorized: true`; the entire outer `{generation, participant, run}`
+object is never a reserve contract.
 
-The transition drains admitted mutations/checks and advances the phase epoch, so every
-older workspace for that task becomes stale. A separate reviewer opens a fresh
-`review` workspace; no write grant is needed.
+After ChatGPT opens the preallocated review workspace, reconcile only by task and
+participant; never pass a caller workspace ID. Commit-pinned browser `workspace_open`
+must use the same requested base/head/scope as preparation. Reconciliation must be bound
+before normal completion. In the pinned workspace, verify `repo_info.review_assurance`
+is `commit_pinned`, read instructions/context from the bound head, and page the bound
+commit `git_diff`; inconsistent read/diff refs or scope must fail closed. Do not request
+`run_tests` from a read-only review workspace: local tests/typecheck are separate
+coordinator evidence. Record actual submission and finished-response receipts, then close
+only that participant with a fresh close request ID. A compatible sibling remains live.
+If submission becomes uncertain, recover the same run and normal Chat conversation
+without resending.
 
-Before the ChatGPT browser launch, the Codex operator must resolve/register the target
-checkout and create or reuse its review task. Keep those identifiers internal to the
-user interaction, but include the exact repository and task IDs in the submitted browser
-prompt so ChatGPT can call `repository_list` and `workspace_open`; no write grant is
-needed. The normal user prompt remains `Use Repo MCP to review this repository`; do not
-send the user elsewhere to obtain IDs. Choose the requested diff base before preparing
-the run: use `HEAD` for uncommitted changes, `HEAD^` for the latest committed change, or
-the user-named branch, tag, or commit. Put the immutable `resolved_base_commit` returned
-by `chatgpt-run prepare` in the browser prompt. ChatGPT must pass that exact commit to
-every `git_diff` page; it must not reinterpret the movable name after preparation. Never
-treat a clean working tree as proof that requested changes were reviewed.
+Legacy working-target review remains `phase_only`. Commit-pinned assurance binds format
+version, policy, immutable base/head and scope through a domain-separated candidate
+digest, but that digest is not a blanket whole-repository SHIP claim and binary/non-text
+identity is not semantic review. The deferred large-diff manifest/per-path feature remains
+unavailable. Incomplete bounded diff/read coverage cannot justify SHIP.
 
-Current review assurance is `phase_only`: it is a task-wide write freeze, not a
-content-verified candidate manifest. Do not present it as stronger evidence.
-
-If repairs are required:
-
-```sh
-npm run --silent coord -- task phase --task TASK_ID --phase coding
-npm run --silent coord -- workspace grant --task TASK_ID
-```
-
-Open a new coding workspace. A pre-review coding token never becomes valid again.
+Shared review never steals the coding owner. Before an explicit owner transition from
+coding to review, close the coding workspace and durably complete/reconcile its run.
+Normal phase/rebind/finish operations refuse protected participants, active relevant
+workspaces/admitted operations, and currently authorized unresolved runs. Returning to
+coding requires explicit owner action, a fresh write grant, and a new coding workspace;
+old coding tokens never revive.
 
 ## Local state maintenance
 
