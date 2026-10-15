@@ -1,6 +1,6 @@
 # Shared Chat Review Operational Workflow
 
-Status: accepted source behavior for Stage 1 and Stage 2 shared-review core. Source validation is green; deployment of the current broker/dist and live smoke are separate authorized steps. Large-diff manifest/per-path coverage remains deferred.
+Status: accepted source behavior for Stage 1 and Stage 2 shared-review core. Source validation is green; the broker was deployed and a bounded commit-pinned Claude-to-ChatGPT smoke passed on 2026-10-14. This does not certify first install on a clean Mac. Large-diff manifest/per-path coverage remains deferred.
 
 This is the detailed operator reference for the maintained Codex and Claude Repo MCP skills. Installed skills are copied as standalone `SKILL.md` files, so they must first discover the Repo MCP control checkout from the launchd service `WorkingDirectory`, then read this file from that checkout. Do not assume this file exists beside an installed skill.
 

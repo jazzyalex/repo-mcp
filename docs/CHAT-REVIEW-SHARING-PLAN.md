@@ -1,5 +1,5 @@
 # Chat Review Handoff and Parallel Sharing Implementation Plan
-Status: Stages 1-2 shared-review core accepted in source; maintained skills/docs updated in this step; deployment and live smoke pending; large-diff manifest/per-path work deferred.
+Status: Stages 1-2 shared-review core deployed and bounded commit-pinned Claude-to-ChatGPT smoke passed on 2026-10-14. Clean-Mac first install remains unproven; large-diff manifest/per-path work remains deferred.
 Date: 2026-10-13
 Normative contract: docs/CHAT-REVIEW-SHARING-SPEC.md. This plan references that contract instead of restating it.
 
@@ -123,7 +123,7 @@ Smoke matrix:
 - Stale target fixture: target fingerprint/cursor becomes invalid on live target change.
 
 ## 7. Deferred follow-up and rollback
-Committed base+target comparison/target_ref is explicitly deferred under SPEC §15. It is not a prerequisite for sharing. Separate registered worktrees remain the manual isolation path for distinct targets.
+Bounded committed base+head comparison is implemented through base_ref/head_ref and committed read.ref. The target_ref synonym and large-diff manifest/per-path coverage remain deferred. Separate registered worktrees remain the manual isolation path for distinct targets.
 Rollback preserves evidence: disable automatic sharing routing, revert/deploy prior code/schema through normal Git/service workflow, refresh client descriptors, reinstall only owned skill versions. Never rollback by deleting uncertain/submitted runs, fabricating completion, resetting epochs to revive stale tokens, or switching to Work/Oracle.
 
 ## 8. Final implementation acceptance gate

@@ -4,7 +4,9 @@ Repo MCP is a local MCP service for policy-bounded coding and review across mult
 
 The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and unrestricted shell commands stay outside MCP.
 
-**Status:** v0.2.1 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
+**Status:** v0.2.2 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
+
+**Release validation:** v0.2.2 is a prerelease. A fresh public clone passed dependency installation, build, typecheck and 568 tests (one optional skip) on an existing Mac installation. First installation on a clean Mac, new tunnel credentials and first client registration remain unproven. See the GitHub release notes for the validation scope.
 
 ## Set up with Codex or Claude
 
@@ -305,7 +307,7 @@ It preserves repository registrations, task binding/phase/protocol/completion re
 intent or publication-bearing outcomes, audits, policies, model-policy and Oracle
 journals, token keys, locks, unknown files, and unfinished or draining tasks. Busy or
 unsafe units are reported and retained. No separate durable runtime-record or retained
-job-log store exists in v0.2.1, so GC does not invent those deletion targets.
+job-log store exists in v0.2.2, so GC does not invent those deletion targets.
 
 ## Policy and repository safety
 
