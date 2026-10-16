@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { SafeError, sha256 } from './errors.js';
 import { resolveCommitReviewBinding, resolveGitCommit, type CommitReviewBinding } from './git-ref.js';
 import { recoverTaskCoordinatorStaleLock, taskStatus } from './task.js';
+import { resolveIdentity } from './identity.js';
 import {
   closeReviewWorkspaceUnderGate,
   readMultiRepoCatalog,
@@ -255,28 +256,36 @@ async function prepareExistingInitializing(
   } catch (error) {
     if (participant.state !== 'initializing') throw error;
   }
-  const run = await prepareChatGptRun({
-    stateDir: options.stateDir,
-    repositoryId: options.repositoryId,
-    taskId,
-    coordinator: options.coordinator,
-    workKind: 'review',
-    profile: options.profile as ModelProfile,
-    surface: 'chat',
-    sessionId: options.sessionId,
-    prompt: options.prompt,
-    baseRef: participant.commit_binding?.requested_base_ref ?? options.baseRef,
-    headRef: participant.commit_binding?.requested_head_ref,
-    scopePrefix: participant.commit_binding?.scope_prefix ?? options.scopePrefix,
-    runId: participant.run_id,
-    selectionId: participant.selection_id,
-    now: options.now,
-    sharedReview: {
-      generation: journal.generation,
-      participantId: participant.participant_id,
-      workspaceRequestId: participant.workspace_request_id
-    }
-  });
+  let run: ChatGptRunRecord;
+  try {
+    run = await prepareChatGptRun({
+      stateDir: options.stateDir,
+      repositoryId: options.repositoryId,
+      taskId,
+      coordinator: options.coordinator,
+      workKind: 'review',
+      profile: options.profile as ModelProfile,
+      surface: 'chat',
+      sessionId: options.sessionId,
+      prompt: options.prompt,
+      baseRef: participant.commit_binding?.requested_base_ref ?? options.baseRef,
+      headRef: participant.commit_binding?.requested_head_ref,
+      scopePrefix: participant.commit_binding?.scope_prefix ?? options.scopePrefix,
+      runId: participant.run_id,
+      selectionId: participant.selection_id,
+      now: options.now,
+      sharedReview: {
+        generation: journal.generation,
+        participantId: participant.participant_id,
+        workspaceRequestId: participant.workspace_request_id
+      }
+    });
+  } catch (error) {
+    await retireUnpreparedParticipantUnderGate(
+      options.stateDir, taskId, participant.participant_id, participant.run_id
+    );
+    throw error;
+  }
   const updatedAt = nowIso(options.now);
   const participants = journal.participants.map(item =>
     item.participant_id === participant.participant_id ? { ...item, state: 'prepared' as const, updated_at: updatedAt } : item
@@ -288,6 +297,59 @@ async function prepareExistingInitializing(
     run,
     already_applied: true as const
   };
+}
+
+/**
+ * Retire a pending participant whose run record was never written: it becomes
+ * invalidated with a proven-absent workspace. It is left unchanged (for explicit
+ * recovery) when the run exists or is corrupt, a request claim is still held by a live
+ * initializer, or any workspace_open outcome exists for its request ID.
+ */
+async function retireUnpreparedParticipantUnderGate(
+  stateDir: string,
+  taskId: string,
+  participantId: string,
+  runId: string
+) {
+  try {
+    await chatGptRunStatus(runId, stateDir);
+    return false;
+  } catch {
+    // No readable run record; fall through to the orphan request check.
+  }
+  try {
+    await recoverChatGptOrphanRequestForRun(runId, stateDir);
+  } catch {
+    return false;
+  }
+  const journal = await readReviewShareJournal(stateDir, taskId, { required: true });
+  const participant = findParticipant(journal!, participantId);
+  if ((participant.state !== 'initializing' && participant.state !== 'invalidated') ||
+      participant.workspace_association !== 'pending' || participant.run_id !== runId) {
+    return false;
+  }
+  try {
+    const outcome = await readWorkspaceOpenOutcome({
+      stateDir,
+      requestId: participant.workspace_request_id,
+      repositoryId: journal!.repository_id,
+      taskId: journal!.task_id,
+      mode: 'review',
+      ttlMs: participant.workspace_ttl_ms,
+      reviewBinding: participant.commit_binding
+    });
+    if (outcome) return false;
+  } catch {
+    return false;
+  }
+  const at = new Date().toISOString();
+  const participants = journal!.participants.map(item =>
+    item.participant_id === participantId
+      ? { ...item, state: 'invalidated' as const, workspace_association: 'proven-absent' as const, updated_at: at }
+      : item
+  );
+  await writeReviewShareJournalUnderGate(stateDir, { ...journal!, participants, updated_at: at });
+  return true;
 }
 
 export async function prepareOrJoinReview(options: PrepareReviewOptions) {
@@ -330,7 +392,7 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
     const liveTargetMoved = !commitBinding &&
       (observed.target.head !== validated.live.head || observed.target.branch !== validated.live.branch);
     if (liveTargetMoved && (!priorJournal || protectedParticipants(priorJournal).length === 0)) {
-      fail('REVIEW_SHARE_STATE_STALE', 'Task binding is stale relative to the live checkout.');
+      fail('REVIEW_SHARE_STATE_STALE', 'Task binding is stale relative to the live checkout; run task rebind before preparing a new review.');
     }
 
     const at = nowIso(options.now);
@@ -352,6 +414,14 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
       participant.exact_request_key === exactKey && participantProtected(participant)
     );
     if (exact) return prepareExistingInitializing(options, journal, exact, taskId);
+
+    // prepareChatGptRun requires the task binding to match the live checkout in both
+    // target modes. Refuse here, before a participant is published, so a stale binding
+    // cannot leave a protected participant behind with no run.
+    const identity = await resolveIdentity(validated.repository.root);
+    if (identity.head !== validated.live.head || identity.branch !== validated.live.branch) {
+      fail('REVIEW_SHARE_STATE_STALE', 'Task binding is stale relative to the live checkout; run task rebind before preparing a new review.');
+    }
 
     if (journal.participants.length >= 512) fail('REVIEW_SHARE_STATE_CORRUPT', 'Review participant retention limit reached.');
     const participantId = randomUUID();
@@ -387,28 +457,34 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
       updated_at: at
     });
 
-    const run = await prepareChatGptRun({
-      stateDir: options.stateDir,
-      repositoryId: options.repositoryId,
-      taskId,
-      coordinator: options.coordinator,
-      workKind: 'review',
-      profile: options.profile,
-      surface: 'chat',
-      sessionId: options.sessionId,
-      prompt: options.prompt,
-      baseRef: commitBinding?.requested_base_ref ?? options.baseRef,
-      headRef: commitBinding?.requested_head_ref,
-      scopePrefix: commitBinding?.scope_prefix ?? options.scopePrefix,
-      runId,
-      selectionId,
-      now: options.now,
-      sharedReview: {
-        generation: journal.generation,
-        participantId,
-        workspaceRequestId: options.workspaceRequestId
-      }
-    });
+    let run: ChatGptRunRecord;
+    try {
+      run = await prepareChatGptRun({
+        stateDir: options.stateDir,
+        repositoryId: options.repositoryId,
+        taskId,
+        coordinator: options.coordinator,
+        workKind: 'review',
+        profile: options.profile,
+        surface: 'chat',
+        sessionId: options.sessionId,
+        prompt: options.prompt,
+        baseRef: commitBinding?.requested_base_ref ?? options.baseRef,
+        headRef: commitBinding?.requested_head_ref,
+        scopePrefix: commitBinding?.scope_prefix ?? options.scopePrefix,
+        runId,
+        selectionId,
+        now: options.now,
+        sharedReview: {
+          generation: journal.generation,
+          participantId,
+          workspaceRequestId: options.workspaceRequestId
+        }
+      });
+    } catch (error) {
+      await retireUnpreparedParticipantUnderGate(options.stateDir, taskId, participantId, runId);
+      throw error;
+    }
     const preparedAt = nowIso(options.now);
     const participants = journal.participants.map(item =>
       item.participant_id === participantId ? { ...item, state: 'prepared' as const, updated_at: preparedAt } : item
@@ -486,11 +562,18 @@ export async function recoverReviewParticipant(options: {
     let journal = await readReviewShareJournal(options.stateDir, options.taskId, { required: true });
     let participant = findParticipant(journal!, options.participantId);
 
-    if (participant.state === 'initializing') {
+    if (participant.state === 'initializing' ||
+        (participant.state === 'invalidated' && participant.workspace_association === 'pending')) {
       let run: ChatGptRunRecord | undefined;
       try { run = await chatGptRunStatus(participant.run_id, options.stateDir); }
       catch {
-        await recoverChatGptOrphanRequestForRun(participant.run_id, options.stateDir);
+        if (await retireUnpreparedParticipantUnderGate(
+          options.stateDir, options.taskId, participant.participant_id, participant.run_id
+        )) {
+          journal = await readReviewShareJournal(options.stateDir, options.taskId, { required: true });
+          participant = findParticipant(journal!, options.participantId);
+          return { generation: generationView(journal!), participant: participantView(participant, options.taskId) };
+        }
         return {
           generation: generationView(journal!),
           participant: participantView(participant, options.taskId),

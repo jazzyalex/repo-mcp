@@ -367,12 +367,13 @@ export async function withCompletedTaskGcLease<T>(
 
 export async function recoverTaskCoordinatorStaleLock(stateDir: string, taskId: string) {
   const { store, binding } = await coordinatorStore(stateDir, taskId);
+  const key = gateKey(taskId);
+  const raw = await store.read<unknown>(`locks/${key}.json`, 'lock');
+  // With no lock there is nothing to recover, so binding drift is irrelevant here.
+  if (raw === undefined) return { recovered: false as const, task_id: taskId };
   const identity = await resolveIdentity(binding.root);
   const drift = identityDrift(binding, identity);
   if (drift) throw new SafeError('Task coordinator-lock recovery refused because the active task binding is no longer current: ' + drift);
-  const key = gateKey(taskId);
-  const raw = await store.read<unknown>(`locks/${key}.json`, 'lock');
-  if (raw === undefined) return { recovered: false as const, task_id: taskId };
   const existing = validateLockRecord(raw, key);
   if (existing.hostname !== os.hostname()) throw new SafeError('Task coordinator lock belongs to another host; recovery is refused.');
   if (lockOwnerAlive(existing.pid)) throw new SafeError('Task coordinator lock is owned by a live process; recovery is refused.');

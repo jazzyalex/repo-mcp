@@ -84,7 +84,10 @@ This bootstrap is local coordinator work, not review evidence.
 7. If browser control stalls or submission/completion is uncertain, recover the same
    durable `chatgpt-run` and normal Chat conversation/session. Never submit a duplicate.
    Submitted/uncertain pending work remains protected. Participant absence recovery is
-   only for an actual terminal failed-pre-submit run.
+   allowed for an actual terminal failed-pre-submit run or for a never-created run after
+   its dead initializer claim is recovered; both require authoritative proof that no
+   workspace_open outcome exists. Existing/corrupt runs and live/foreign initializers
+   remain protected.
 8. If model selection, Repo MCP attachment, repository identity, required bounded
    evidence, or final response cannot be verified, return `NOT TESTABLE`.
    Do not substitute Claude's own review or silently invoke Oracle.

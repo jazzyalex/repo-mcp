@@ -223,7 +223,7 @@ Never duplicate a possibly submitted prompt.
 - Reattach to the **same** normal Chat conversation/session and use `chatgpt-run recover --run RUN_ID --resolution submitted|not-submitted ...` with fresh trusted browser evidence.
 - A historical invalidated participant may recover the same immutable run/evidence without regaining current submission authority or mixing with a newer generation.
 - Submitted or uncertain work remains protected even when workspace reconciliation is pending.
-- `coord review recover-participant --task TASK_ID --participant PARTICIPANT_ID` may prove workspace absence only for an actual terminal `failed-pre-submit` run. If authoritative `workspace_open` evidence exists, it binds that workspace instead.
+- `coord review recover-participant --task TASK_ID --participant PARTICIPANT_ID` may prove workspace absence for an actual terminal `failed-pre-submit` run, or for an orphan participant whose run was never created after its dead initializer claim is recovered. Both paths require the authoritative ledger to contain no `workspace_open` outcome. Existing or corrupt runs, live or foreign initializers, and any authoritative open outcome fail closed.
 - `chatgpt-run recover-request` and `recover-lock` are explicit crash-recovery tools; they do not create replacement authority or fabricated completion.
 
 Security disable/revoke preserves run/share/request evidence. GC cleans eligible local Repo MCP state only; it never removes ChatGPT history, invents completion, or discards protected pending/bound workspace evidence required for recovery.

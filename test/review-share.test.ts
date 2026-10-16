@@ -12,6 +12,7 @@ import {
   issueWorkspaceGrant,
   openWorkspace,
   readMultiRepoCatalog,
+  rebindRegisteredTask,
   registerRepository,
   revokeWorkspace,
   setRegisteredTaskPhase,
@@ -1378,6 +1379,113 @@ test('commit-pinned shared review binds base head scope workspace and trusted re
   assert.equal(retry.already_applied, true);
   assert.equal(retry.participant.participant_id, prepared.participant.participant_id);
   assert.deepEqual(retry.participant.commit_binding, binding);
+});
+
+test('commit-pinned prepare on a stale task binding fails before creating a participant', async t => {
+  const { root, stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  await writeFile(path.join(root, 'src', 'later.txt'), 'moves HEAD past the binding\n');
+  await git(root, 'add', '--', 'src/later.txt');
+  await git(root, 'commit', '-m', 'move HEAD');
+
+  const options = prepareOptions(stateDir, 'claude', 'stale-pinned', { baseRef: 'HEAD~2', headRef: 'HEAD~1' });
+  await assert.rejects(prepareOrJoinReview(options), /run task rebind/i);
+
+  const store = await StateStore.open(stateDir);
+  const journal = await store.read<any>(SHARE_PATH, SHARE_KIND);
+  const live = (journal?.participants ?? []).filter((p: any) => p.state !== 'closed' && p.state !== 'invalidated');
+  assert.deepEqual(live, []);
+  const rebound = await rebindRegisteredTask({ stateDir, taskId: 'task' });
+  assert.equal(rebound.task.binding_epoch, 2);
+});
+
+test('an exact retry that fails on a stale binding retires its missing-run participant', async t => {
+  const { root, stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const head = (await git(root, 'rev-parse', 'HEAD')).trim();
+  const base = (await git(root, 'rev-parse', `${head}^`)).trim();
+  const options = prepareOptions(stateDir, 'claude', 'stale-exact', { baseRef: base, headRef: head });
+  const prepared = await prepareOrJoinReview(options);
+  const participantId = prepared.participant.participant_id;
+
+  const store = await StateStore.open(stateDir);
+  const journal = await store.read<any>(SHARE_PATH, SHARE_KIND);
+  journal.participants = journal.participants.map((p: any) => p.participant_id === participantId
+    ? { ...p, state: 'initializing', run_id: '00000000-0000-4000-8000-000000000004' }
+    : p);
+  await store.write(SHARE_PATH, SHARE_KIND, journal);
+  await writeFile(path.join(root, 'src', 'later.txt'), 'moves HEAD past the binding\n');
+  await git(root, 'add', '--', 'src/later.txt');
+  await git(root, 'commit', '-m', 'move HEAD');
+
+  await assert.rejects(prepareOrJoinReview(options), /run task rebind/i);
+  const retired = await store.read<any>(SHARE_PATH, SHARE_KIND);
+  const participant = retired.participants.find((p: any) => p.participant_id === participantId)!;
+  assert.equal(participant.state, 'invalidated');
+  assert.equal(participant.workspace_association, 'proven-absent');
+  const rebound = await rebindRegisteredTask({ stateDir, taskId: 'task' });
+  assert.equal(rebound.task.binding_epoch, 2);
+});
+
+test('an orphan initializing participant with no run is recoverable while the task binding is stale', async t => {
+  const { root, stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const options = prepareOptions(stateDir, 'claude', 'orphan', { baseRef: 'HEAD^', headRef: 'HEAD' });
+  const prepared = await prepareOrJoinReview(options);
+  const participantId = prepared.participant.participant_id;
+
+  // Reproduce the pre-fix failure: a participant left initializing whose run record never got written.
+  const store = await StateStore.open(stateDir);
+  const journal = await store.read<any>(SHARE_PATH, SHARE_KIND);
+  journal.participants = journal.participants.map((p: any) => p.participant_id === participantId
+    ? { ...p, state: 'initializing', run_id: '00000000-0000-4000-8000-000000000001' }
+    : p);
+  await store.write(SHARE_PATH, SHARE_KIND, journal);
+  await writeFile(path.join(root, 'src', 'later.txt'), 'moves HEAD past the binding\n');
+  await git(root, 'add', '--', 'src/later.txt');
+  await git(root, 'commit', '-m', 'move HEAD');
+  await assert.rejects(rebindRegisteredTask({ stateDir, taskId: 'task' }), /protected shared-review participants/);
+
+  const recovered = await recoverReviewParticipant({ stateDir, taskId: 'task', participantId });
+  assert.equal(recovered.participant.state, 'invalidated');
+  assert.equal(recovered.participant.workspace_association, 'proven-absent');
+  const gc = await garbageCollect({ stateDir, apply: false });
+  assert.equal(gc.complete, true);
+  const rebound = await rebindRegisteredTask({ stateDir, taskId: 'task' });
+  assert.equal(rebound.task.binding_epoch, 2);
+});
+
+test('an invalidated participant with no run and a pending workspace no longer breaks recovery or gc', async t => {
+  const { stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const prepared = await prepareOrJoinReview(prepareOptions(stateDir, 'claude', 'retired', { baseRef: 'HEAD^', headRef: 'HEAD' }));
+  const participantId = prepared.participant.participant_id;
+  const store = await StateStore.open(stateDir);
+  const journal = await store.read<any>(SHARE_PATH, SHARE_KIND);
+  journal.participants = journal.participants.map((p: any) => p.participant_id === participantId
+    ? { ...p, state: 'invalidated', run_id: '00000000-0000-4000-8000-000000000002' }
+    : p);
+  await store.write(SHARE_PATH, SHARE_KIND, journal);
+  await assert.rejects(garbageCollect({ stateDir, apply: false }), /does not exist or is corrupt/);
+
+  const recovered = await recoverReviewParticipant({ stateDir, taskId: 'task', participantId });
+  assert.equal(recovered.participant.workspace_association, 'proven-absent');
+  const gc = await garbageCollect({ stateDir, apply: false });
+  assert.equal(gc.complete, true);
+});
+
+test('a missing-run participant is not retired when its workspace_open outcome exists', async t => {
+  const { stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const prepared = await prepareOrJoinReview(prepareOptions(stateDir, 'claude', 'opened', { baseRef: 'HEAD^', headRef: 'HEAD' }));
+  const participantId = prepared.participant.participant_id;
+  await openForParticipant(stateDir, prepared);
+  const store = await StateStore.open(stateDir);
+  const journal = await store.read<any>(SHARE_PATH, SHARE_KIND);
+  journal.participants = journal.participants.map((p: any) => p.participant_id === participantId
+    ? { ...p, state: 'initializing', run_id: '00000000-0000-4000-8000-000000000003' }
+    : p);
+  await store.write(SHARE_PATH, SHARE_KIND, journal);
+
+  const recovered = await recoverReviewParticipant({ stateDir, taskId: 'task', participantId });
+  assert.equal((recovered as any).recovery_required, true);
+  assert.equal(recovered.participant.state, 'initializing');
+  assert.equal(recovered.participant.workspace_association, 'pending');
 });
 
 test('commit-pinned target and trusted receipt ignore replacement-ref changes', async t => {

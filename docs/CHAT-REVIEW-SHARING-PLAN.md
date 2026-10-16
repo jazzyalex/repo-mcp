@@ -70,7 +70,7 @@ Required two-coordinator tests: concurrent Codex+Claude taskless joins converge 
 Source: src/review-share.ts, src/multirepo-state.ts, scripts/coordinator.ts.
 Tests: review-share + multirepo.
 Implement SPEC §8 reconcile with no workspace-id input. Derive workspace_id from existing workspace_open request ledger and validate selection identity/epochs/mode before write-once binding.
-Red/green: arbitrary workspace ID cannot bind; completion/normal close requires bound; only proven pre-submit terminal can become proven-absent; submitted/uncertain pending association remains protected; one participant closes while sibling continues.
+Red/green: arbitrary workspace ID cannot bind; completion/normal close requires bound; a terminal pre-submit run or a never-created run with a recovered dead initializer claim can become proven-absent only when authoritative workspace-open evidence is absent; submitted/uncertain pending association remains protected; one participant closes while sibling continues.
 
 ### 4.4 Lowest-common lifecycle/run guards
 Source: src/task.ts, src/multirepo-state.ts, src/chatgpt-run.ts, scripts/task.ts compatibility path, scripts/chatgpt-run.ts, src/coordinator.ts, src/gc.ts as needed.

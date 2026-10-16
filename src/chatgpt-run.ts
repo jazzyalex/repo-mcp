@@ -612,7 +612,7 @@ export async function prepareChatGptRun(options: {
   if (identity.root !== live.root || identity.git_dir !== live.git_dir || identity.common_dir !== live.common_dir ||
       identity.branch !== live.branch || identity.head !== live.head || live.policy_digest !== repository.policy_digest ||
       live.binding_epoch !== task.binding_epoch || live.phase_epoch !== task.phase_epoch || live.phase !== task.phase || live.completion) {
-    throw new SafeError('Repository task binding is stale; reconcile it before preparing a ChatGPT run.');
+    throw new SafeError('Repository task binding is stale; run task rebind before preparing a ChatGPT run.');
   }
   if (options.workKind === 'review' && live.phase !== 'review') throw new SafeError('ChatGPT review requires the task review phase.');
   if (options.workKind === 'code' && live.phase !== 'coding') throw new SafeError('ChatGPT coding requires the task coding phase.');
@@ -662,7 +662,7 @@ export async function prepareChatGptRun(options: {
       currentLive.phase !== currentTask.phase ||
       currentLive.completion
     ) {
-      throw new SafeError('Repository task binding is stale; reconcile it before preparing a ChatGPT run.');
+      throw new SafeError('Repository task binding is stale; run task rebind before preparing a ChatGPT run.');
     }
     if (options.workKind === 'review' && currentLive.phase !== 'review') {
       throw new SafeError('ChatGPT review requires the task review phase.');
