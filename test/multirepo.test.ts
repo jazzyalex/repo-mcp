@@ -35,7 +35,7 @@ import {
 import { StateStore, acquireLock } from '../src/task-state.js';
 import { taskWriterLockStatus } from '../src/task.js';
 
-type ToolReply = { error: boolean; data: any };
+type ToolReply = { error: boolean; data: any; structured?: unknown };
 
 function deferred() {
   let resolve!: () => void;
@@ -60,8 +60,8 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   try {
     const result = await client.callTool({ name, arguments: args });
     const text = (result.content as { type: string; text: string }[]).find(item => item.type === 'text')?.text ?? '';
-    if (result.isError) return { error: true, data: text };
-    return { error: false, data: JSON.parse(text) };
+    if (result.isError) return { error: true, data: text, structured: result.structuredContent };
+    return { error: false, data: JSON.parse(text), structured: result.structuredContent };
   } catch (error) {
     return { error: true, data: error instanceof Error ? error.message : String(error) };
   }
@@ -702,6 +702,9 @@ test('commit-pinned repo_info budgets instructions and separates checkout identi
       cursor: info.data.instructions_next_cursor
     });
     assert.equal(next.error, false, String(next.data));
+    assert.equal(typeof next.data.content, 'string');
+    assert.ok(next.data.content.length > 0, 'the committed read page must retain its file content field');
+    assert.deepEqual(next.structured, { result: next.data }, 'successful reads expose the same data through MCP structuredContent');
     assert.ok(Buffer.byteLength(JSON.stringify(next.data)) <= DEFAULT_LIMITS.page_bytes);
   } finally {
     await client.close();

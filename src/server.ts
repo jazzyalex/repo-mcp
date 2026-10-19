@@ -9,6 +9,7 @@ import type { TaskOptions } from './task.js';
 import { auditedEdit } from './audit.js';
 import { sha256 } from './errors.js';
 import { RELEASE_VERSION } from './version.js';
+import { jsonToolResult } from './tool-result.js';
 
 export type ServerOptions = {
   task?: Omit<TaskOptions, 'policyDigest'>;
@@ -50,13 +51,13 @@ export async function startServer(root: string, port = 8787, auditFile?: string,
           const result = await auditedEdit(() => fn(args) as Promise<{ path: string; before_sha256: string | null; after_sha256: string }>, async (phase, data) => {
             await audit(tool, era, true, { phase, ...(data ? { path: data.path, before_sha256: data.before_sha256, after_sha256: data.after_sha256 } : {}) });
           });
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+          return jsonToolResult(result);
         }
         const result = await fn(args);
         const data = result as any;
         const summary = tool === 'run_tests' ? { suite: args.suite ?? 'all', exit_code: data.exit_code, timed_out: data.timed_out, truncated: data.truncated, duration_ms: data.duration_ms } : undefined;
         await audit(tool, era, true, summary);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        return jsonToolResult(result);
       } catch (error) {
         await audit(tool, era, false).catch(() => {});
         return { isError: true, content: [{ type: 'text', text: error instanceof SafeError ? error.message : 'Operation failed. Check the Repo MCP policy and repository state.' }] };

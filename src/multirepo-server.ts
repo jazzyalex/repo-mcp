@@ -11,6 +11,7 @@ import { RepoWorkspace, SafeError, type CommittedReadPage } from './repo.js';
 import { jsonBytes } from './paging.js';
 import { StateStore } from './task-state.js';
 import { RELEASE_VERSION } from './version.js';
+import { jsonToolResult } from './tool-result.js';
 import {
   authorizeWorkspace,
   closeWorkspace,
@@ -302,7 +303,7 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
       try {
         const value = await fn();
         await audit(tool, era, true);
-        return { content: [{ type: 'text', text: JSON.stringify(value) }] };
+        return jsonToolResult(value);
       } catch (error) {
         await audit(tool, era, false).catch(() => {});
         return { isError: true, content: [{ type: 'text', text: error instanceof SafeError ? error.message : 'Operation failed. Inspect Repo MCP operator state.' }] };
@@ -339,7 +340,7 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
         const responseValue = mutation && authorizedForAudit && value && typeof value === 'object' && !Array.isArray(value)
           ? { ...(value as Record<string, unknown>), scope: authorizedForAudit.scope }
           : value;
-        return { content: [{ type: 'text', text: JSON.stringify(responseValue) }] };
+        return jsonToolResult(responseValue);
       } catch (error) {
         await audit(tool, era, false, authorizedForAudit).catch(() => {});
         return { isError: true, content: [{ type: 'text', text: error instanceof SafeError ? error.message : 'Operation failed. Check workspace authorization and repository state.' }] };
@@ -451,7 +452,7 @@ function registerWorkspaceTools(
         scopePrefix: args.scope_prefix
       });
       await deps.audit('workspace_open', era, true);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      return jsonToolResult(result);
     } catch (error) {
       await deps.audit('workspace_open', era, false).catch(() => {});
       return { isError: true, content: [{ type: 'text', text: error instanceof SafeError ? error.message : 'Workspace selection failed.' }] };
@@ -466,7 +467,7 @@ function registerWorkspaceTools(
     try {
       const result = await closeWorkspace({ stateDir, workspaceToken: args.workspace_token, requestId: args.request_id });
       await deps.audit('workspace_close', era, true);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      return jsonToolResult(result);
     } catch (error) {
       await deps.audit('workspace_close', era, false).catch(() => {});
       return { isError: true, content: [{ type: 'text', text: error instanceof SafeError ? error.message : 'Workspace close failed.' }] };
