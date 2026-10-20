@@ -69,9 +69,13 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    Send only when it prints `True`.
 7. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
    cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
-   ends the run. Start again from writing the prompt with a new `WSREQ` (the prompt names it).
-   If the 2-minute window ran out before `observe` was recorded, first close the run
-   with `npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED`.
+   ends the run. A failed `observe` (or an expired 2-minute window) leaves the run
+   open, so always close it first; the command is a no-op after a failed `reserve`,
+   which uses the same failure code:
+   ```bash
+   npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_SELECTION_NOT_VERIFIED
+   ```
+   Then start again from writing the prompt with a new `WSREQ` (the prompt names it).
 8. **Send once.** Close any open picker menu, then click the composer's **Send** button
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
@@ -85,32 +89,32 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
    ```
 10. **Wait for the answer, not for the workspace.** Never use the broker audit log,
-   `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
-   the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-   The page is the only signal. Every 30–60 seconds run this instant check (never wait
-   inside the page: background tabs slow page timers, and the browser call fails after
-   45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
-   with `run_in_background`; Codex: a short wait).
-   ```js
-   (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
-     const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
-     return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
-   ```
-   The answer is done when two checks in a row show `busy: false` with the same `chars`,
-   and `tail` ends with the verdict or the end of the report. A Pro pass usually takes 15–20 minutes.
+    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
+    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
+    The page is the only signal. Every 30–60 seconds run this instant check (never wait
+    inside the page: background tabs slow page timers, and the browser call fails after
+    45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
+    with `run_in_background`; Codex: a short wait).
+    ```js
+    (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+      const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
+      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
+    ```
+    The answer is done when two checks in a row show `busy: false` with the same `chars`,
+    and `tail` ends with the verdict or the end of the report. A Pro pass usually takes 15–20 minutes.
 11. **Capture the answer** into `$R/output.md`: back up the clipboard
-   (`LANG=en_US.UTF-8 pbpaste > "$R/clip.bak"`), click the Copy button under the last
-   answer, then `sleep 1; LANG=en_US.UTF-8 pbpaste > "$R/output.md"; LANG=en_US.UTF-8 pbcopy < "$R/clip.bak"`.
-   Check that the file ends with the verdict. Do not read long answers through
-   JavaScript output; it gets truncated.
+    (`LANG=en_US.UTF-8 pbpaste > "$R/clip.bak"`), click the Copy button under the last
+    answer, then `sleep 1; LANG=en_US.UTF-8 pbpaste > "$R/output.md"; LANG=en_US.UTF-8 pbcopy < "$R/clip.bak"`.
+    Check that the file ends with the verdict. Do not read long answers through
+    JavaScript output; it gets truncated.
 12. **Complete:**
-   ```bash
-   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
-   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
-     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
-     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
-     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
-   ```
+    ```bash
+    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
+      --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+      --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+    ```
 13. If you bound a task for this pass, finish it: `npm run --silent coord -- task finish --task "$TASK"`.
 
 Report `Execution surface: ChatGPT web`, `Coordinator: Claude Code`, verified Pro profile, `Repository evidence: Repo MCP`, and exact scope/limitations.

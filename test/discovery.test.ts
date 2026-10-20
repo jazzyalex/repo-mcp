@@ -355,3 +355,32 @@ test('churn of unrelated ignored files does not make discovery fail', async t =>
   assert.ok(paths.includes('src/visible.txt'));
   assert.ok(!paths.some(p => p.endsWith('.tmp')));
 });
+
+test('an include added while sources are being fingerprinted is still tracked', async t => {
+  const m = await makeRepo(t, {}, { 'notes/local.txt': 'private\n' });
+  const excludes = path.join(m.base, 'late-excludes');
+  await writeFile(excludes, 'notes/local.txt\n');
+  await writeFile(path.join(m.root, '.git', 'late.conf'), '');
+  let added = false;
+  const repo = await openGlob(t, m.root, policyDoc(), {
+    pathHook: async stage => {
+      // An empty include changes no ignore result, so only the source-set re-check can notice it.
+      if (stage === 'walk:sources-listed' && !added) { added = true; await git(m.root, 'config', '--add', 'include.path', 'late.conf'); }
+    }
+  }, m.track);
+  assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
+  assert.ok(added);
+  await writeFile(path.join(m.root, '.git', 'late.conf'), `[core]\n\texcludesFile = ${excludes}\n`);
+  assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'the late include target is a recorded source');
+});
+
+test('NFD names stay hidden when Git also prints NFD (core.precomposeunicode=false)', async t => {
+  const nfdFile = 'notes/café.private';
+  const m = await makeRepo(t, { '.gitignore': '*.private\n' }, { [nfdFile]: 'secret\n', 'notes/plain.txt': 'ok\n' });
+  await git(m.root, 'config', 'core.precomposeunicode', 'false');
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {}, m.track);
+  const paths = (await listAll(repo)).paths.map(p => p.normalize('NFC'));
+  assert.ok(paths.includes('notes/plain.txt'));
+  assert.ok(!paths.includes(nfdFile.normalize('NFC')));
+  await assert.rejects(repo.read(nfdFile), /not exposed/);
+});

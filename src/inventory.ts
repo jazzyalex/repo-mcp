@@ -69,10 +69,11 @@ function ignoredBy(ignored: Ignored, rel: string) {
  * and the file a local core.excludesFile names.
  */
 async function ignoreConfigSources(ctx: WalkContext) {
-  // HEAD decides which includeIf.onbranch: rules apply.
-  const paths = (await gitText(ctx, ['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude', '--git-path', 'config', '--git-path', 'config.worktree', '--git-path', 'HEAD']))
+  // HEAD decides which includeIf.onbranch: rules apply. In a reftable repository HEAD is a fixed stub and a branch
+  // switch changes only reftable/tables.list (which reads as missing, and stays stable, in a files-backend repository).
+  const paths = (await gitText(ctx, ['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude', '--git-path', 'config', '--git-path', 'config.worktree', '--git-path', 'HEAD', '--git-path', 'reftable/tables.list']))
     .split('\n').filter(Boolean).map(p => path.resolve(ctx.root, p));
-  if (paths.length !== 5) throw IGNORE_FAILED();
+  if (paths.length !== 6) throw IGNORE_FAILED();
   // `-z` output alternates `file:ORIGIN` and key names, NUL-separated; keys never start with `file:`.
   for (const token of (await gitText(ctx, ['config', '--list', '--show-origin', '--name-only', '-z'], true)).split('\0')) {
     if (token.startsWith('file:')) paths.push(path.resolve(ctx.root, token.slice(5)));
@@ -194,6 +195,7 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     const ignored = await gitIgnored(ctx);
     const { inventory, gitignores } = await walkOnce(ctx, ignored);
     const configSources = await ignoreConfigSources(ctx);
+    await ctx.hook?.('walk:sources-listed', { path: '' });
     const files = [...configSources, ...gitignores];
     const before = await fingerprintAll(ctx, files);
     const again = await gitIgnored(ctx);

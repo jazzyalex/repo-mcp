@@ -355,57 +355,63 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    Send only when it prints `True`.
 8. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
    cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
-   ends the run. Release the participant with
-   `npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"`,
-   then start again from writing the prompt with a new `WSREQ` (the prompt names it).
-   If the 2-minute window ran out before `observe` was recorded, first close the run
-   with `npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED`.
+   ends the run. A failed `observe` (or an expired 2-minute window) leaves the run
+   open, so always close it first; the command is a no-op after a failed `reserve`,
+   which uses the same failure code:
+   ```bash
+   npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_SELECTION_NOT_VERIFIED
+   npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"
+   npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
+   ```
+   Then start again from writing the prompt with a new `WSREQ` (the prompt names it).
+   Skipping the close leaves a protected participant that blocks later rebind, phase
+   and finish commands.
 9. **Send once.** Close any open picker menu, then click the composer's **Send** button
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
    more seconds and check again before clicking Send again. If you still cannot tell,
    record `chatgpt-run uncertain` and recover; never send twice blindly.
 10. **Record the send**:
-   ```bash
-   NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
-     --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" --candidate-digest "$CDIG" \
-     --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
-   SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
-   ```
+    ```bash
+    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
+      --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" --candidate-digest "$CDIG" \
+      --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
+    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
+    ```
 11. **Reconcile** in the background until ChatGPT has opened the workspace:
-   ```bash
-   for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
-   ```
+    ```bash
+    for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
+    ```
 12. **Wait for the answer, not for the workspace.** Never use the broker audit log,
-   `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
-   the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-   The page is the only signal. Every 30–60 seconds run this instant check (never wait
-   inside the page: background tabs slow page timers, and the browser call fails after
-   45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
-   with `run_in_background`; Codex: a short wait).
-   ```js
-   (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
-     const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
-     return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
-   ```
-   The answer is done when two checks in a row show `busy: false` with the same `chars`,
-   and `tail` ends with the verdict or the end of the report. An Extra High review usually takes 5–15 minutes.
+    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
+    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
+    The page is the only signal. Every 30–60 seconds run this instant check (never wait
+    inside the page: background tabs slow page timers, and the browser call fails after
+    45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
+    with `run_in_background`; Codex: a short wait).
+    ```js
+    (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+      const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
+      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
+    ```
+    The answer is done when two checks in a row show `busy: false` with the same `chars`,
+    and `tail` ends with the verdict or the end of the report. An Extra High review usually takes 5–15 minutes.
 13. **Capture the answer** into `$R/output.md`: read the last assistant message in the
-   page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
-   and write that exact text to the file through the browser runtime's file access. If
-   that selector finds nothing (the page layout changes) or the text comes back
-   truncated, use the Copy button under the last answer and `pbpaste` instead.
+    page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
+    and write that exact text to the file through the browser runtime's file access. If
+    that selector finds nothing (the page layout changes) or the text comes back
+    truncated, use the Copy button under the last answer and `pbpaste` instead.
 14. **Complete and close** (use `--outcome no-ship` when the verdict is NO-SHIP):
-   ```bash
-   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
-   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome ship \
-     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
-     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" \
-     --candidate-digest "$CDIG" \
-     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
-   npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
-   ```
-   Both commands print `"state": "completed"` and `"state": "closed"`.
+    ```bash
+    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome ship \
+      --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" \
+      --candidate-digest "$CDIG" \
+      --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+    npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
+    ```
+    Both commands print `"state": "completed"` and `"state": "closed"`.
 
 ## Command recipes
 
@@ -549,53 +555,56 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    Send only when it prints `True`.
 8. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
    cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
-   ends the run. Revoke the unused grant with
-   `npm run --silent coord -- workspace revoke --grant "$(jget "$R/grant.json" grant_id)"`,
-   then start again from issuing a new grant (the prompt names the grant and `WSREQ`).
-   If the 2-minute window ran out before `observe` was recorded, first close the run
-   with `npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED`.
+   ends the run. A failed `observe` (or an expired 2-minute window) leaves the run
+   open, so always close it first; the command is a no-op after a failed `reserve`,
+   which uses the same failure code:
+   ```bash
+   npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_SELECTION_NOT_VERIFIED
+   npm run --silent coord -- workspace revoke --grant "$(jget "$R/grant.json" grant_id)"
+   ```
+   Then start again from issuing a new grant (the prompt names the grant and `WSREQ`).
 9. **Send once.** Close any open picker menu, then click the composer's **Send** button
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
    more seconds and check again before clicking Send again. If you still cannot tell,
    record `chatgpt-run uncertain` and recover; never send twice blindly.
 10. **Record the send** (no head commit or candidate digest for this kind):
-   ```bash
-   NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
-     --prompt-sha256 "$PSHA" --base-commit "$BASE" \
-     --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
-   SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
-   ```
+    ```bash
+    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
+      --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+      --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
+    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
+    ```
 11. **Wait for the answer, not for the workspace.** Never use the broker audit log,
-   `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
-   the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-   The page is the only signal. Every 30–60 seconds run this instant check (never wait
-   inside the page: background tabs slow page timers, and the browser call fails after
-   45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
-   with `run_in_background`; Codex: a short wait).
-   ```js
-   (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
-     const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
-     return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
-   ```
-   The answer is done when two checks in a row show `busy: false` with the same `chars`,
-   and `tail` ends with the verdict or the end of the report. A coding run usually takes 5–20 minutes.
+    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
+    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
+    The page is the only signal. Every 30–60 seconds run this instant check (never wait
+    inside the page: background tabs slow page timers, and the browser call fails after
+    45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
+    with `run_in_background`; Codex: a short wait).
+    ```js
+    (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+      const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
+      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
+    ```
+    The answer is done when two checks in a row show `busy: false` with the same `chars`,
+    and `tail` ends with the verdict or the end of the report. A coding run usually takes 5–20 minutes.
 12. **Capture the answer** into `$R/output.md`: read the last assistant message in the
-   page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
-   and write that exact text to the file through the browser runtime's file access. If
-   that selector finds nothing (the page layout changes) or the text comes back
-   truncated, use the Copy button under the last answer and `pbpaste` instead.
+    page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
+    and write that exact text to the file through the browser runtime's file access. If
+    that selector finds nothing (the page layout changes) or the text comes back
+    truncated, use the Copy button under the last answer and `pbpaste` instead.
 13. **Complete:**
-   ```bash
-   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
-   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
-     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
-     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
-     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
-   ```
+    ```bash
+    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
+      --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+      --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+    ```
 14. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the project's own
-   tests and build. Commit and push only when the user asks. To move the task to review:
-   `npm run --silent coord -- task phase --task "$TASK" --phase review`.
+    tests and build. Commit and push only when the user asks. To move the task to review:
+    `npm run --silent coord -- task phase --task "$TASK" --phase review`.
 
 ### Recover a run
 
@@ -605,11 +614,12 @@ Use the run's own IDs from its run folder. Never resend a prompt that may have b
 npm run --silent chatgpt-run -- status --run "$RUN"
 ```
 
-- **Not sent yet, and the selection expired before `observe` was recorded:** close the
-  run, then prepare a new one. (After a failed `observe` or `reserve` the run is
-  already closed; do not run `fail-pre-submit` again.)
+- **Not sent yet (a failed `observe` or `reserve`, or an expired selection):** close
+  the run with the failure code `reserve` itself uses, so the command is a no-op when
+  `reserve` already closed it. For a review, also recover and close the participant
+  (see the review recipe), then prepare a new run.
   ```bash
-  npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED
+  npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_SELECTION_NOT_VERIFIED
   ```
 - **Not sure whether it was sent:** mark it, check the ChatGPT conversation, then
   resolve it with the same receipt flags as `submitted`.

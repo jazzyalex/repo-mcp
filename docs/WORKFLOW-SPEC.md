@@ -64,7 +64,7 @@ Local Repo MCP is authoritative for the current checkout and uncommitted source.
 
 Review independence is procedural rather than cryptographic. Coding and review conversations share the tunnel credential, and workspace tokens remain bearer capabilities. Shared review records distinct participants, browser-context hashes, runs, workspace requests and results, while the target fingerprint prevents incompatible live targets from sharing a generation; none of this proves a human/model identity cryptographically.
 
-Git writes remain with Codex. A remote-writing workflow requires separate explicit authorization and local synchronization before editing resumes. Never allow concurrent local and remote writers on the task branch.
+Git writes remain with the local coordinator (Codex or Claude), never with ChatGPT through MCP. A remote-writing workflow requires separate explicit authorization and local synchronization before editing resumes. Never allow concurrent local and remote writers on the task branch.
 
 The Codex and Claude coordinator skills use host-native browser control plus Repo MCP's
 provider-neutral `chatgpt-run` journal. ChatGPT web performs every Repo MCP review and
