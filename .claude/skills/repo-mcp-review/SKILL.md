@@ -156,20 +156,27 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    Check that both task IDs equal `$TASK`, the resolved base equals `$BASE`, and
    `participant.commit_binding` equals `run.commit_binding`. Stop on any mismatch.
 6. **Paste the prompt** into the composer. Do not send yet.
-7. **Select the effort, then observe and reserve.** After preparing, run `SELAT=$(now)`,
+7. **Select the effort, then observe and reserve.** After preparing,
    then open the model picker and click the required effort, even if it already shows
-   it. The selection must happen after preparation, and `--selected-at` must record
-   that click. Read the label, then within 10 seconds run this one command:
+   it. The selection must happen after preparation. Record the selection time right
+   after the click with `SELAT=$(now)` (no browser event time is available, so the
+   moment just after the click is the closest true value). Read the label, then within
+   10 seconds run this one command:
    ```bash
    npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
      --control-label "Extra High" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
    && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
      --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
    ```
-   If the label check fails or the observation is "too old", select the effort again
-   (new `SELAT`) and repeat this one command. If the 2-minute selection window has
+   If the label check fails or the observation is "too old", click the effort again,
+   record a new `SELAT` right after it, and repeat this one command. If the 2-minute selection window has
    expired, use `chatgpt-run fail-pre-submit` and prepare a new run. Send only when it prints `True`.
 8. **Send once**, then record the submission with the conversation ID from the URL:
+   Close any open picker menu, then click the composer's **Send** button (pressing
+   Return after closing a menu may do nothing). Confirm the send before recording it:
+   the URL changed to `/c/CONVERSATION_ID` and the composer is empty. If neither
+   happened, nothing was sent: check the Repo MCP chip and click Send again. If you
+   cannot tell, use `chatgpt-run uncertain` and recover; never send twice blindly.
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
      --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" --candidate-digest "$CDIG" \
@@ -180,9 +187,10 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    ```bash
    for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
    ```
-10. **Wait for the answer, not for the workspace.** ChatGPT often closes the Repo MCP
-    workspace minutes before it finishes writing, so a closed workspace or a quiet audit
-    log does not mean the answer is ready. Every 30–60 seconds run this instant page
+10. **Wait for the answer, not for the workspace.** Never use the broker audit log,
+    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
+    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
+    The page is the only signal. Every 30–60 seconds run this instant page
     check. Never wait inside the page: background tabs slow page timers, and the browser
     call fails after 45 seconds. Wait between checks outside the page (Claude Code: a
     `sleep 45` command with `run_in_background`; Codex: a short wait). The answer is done

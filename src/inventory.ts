@@ -1,4 +1,4 @@
-import { lstat, readdir } from 'node:fs/promises';
+import { lstat, readdir, stat } from 'node:fs/promises';
 import type { BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
@@ -67,17 +67,40 @@ async function ignoreConfigSources(ctx: WalkContext) {
   for (const token of (await gitText(ctx, ['config', '--list', '--show-origin', '--name-only', '-z'], true)).split('\0')) {
     if (token.startsWith('file:')) paths.push(path.resolve(ctx.root, token.slice(5)));
   }
-  const excludes = (await gitText(ctx, ['config', '--path', '--get', 'core.excludesFile'], true)).trim();
+  // include.path / includeIf.*.path targets count even when empty or missing, so a later edit or creation is seen.
+  // Git resolves a relative include against the directory of the file that names it.
+  const includes = (await gitText(ctx, ['config', '--type=path', '--show-origin', '--get-regexp', '-z', '^include(if\\..*)?\\.path$'], true)).split('\0');
+  for (let i = 0; i + 1 < includes.length; i += 2) {
+    if (!includes[i].startsWith('file:')) continue;
+    const origin = path.resolve(ctx.root, includes[i].slice(5));
+    const value = includes[i + 1].slice(includes[i + 1].indexOf('\n') + 1);
+    if (value) paths.push(path.resolve(path.dirname(origin), value));
+  }
+  // Only Git's record terminator is removed: a path may legitimately start or end with spaces.
+  const excludes = (await gitText(ctx, ['config', '--path', '--get', 'core.excludesFile'], true)).replace(/\n$/, '');
   if (excludes) paths.push(path.resolve(ctx.root, excludes));
   return [...new Set(paths)];
 }
 /** What the ignored set depends on besides directory membership: config sources and each walked .gitignore. */
 type IgnoreSource = { path: string; fp: string };
+/** The source itself and, through any symlink, the file Git actually reads. */
 const sourceFingerprint = async (file: string) => {
-  const stat = await lstat(file, { bigint: true }).catch(() => undefined);
-  return stat ? fingerprint(stat) : 'missing';
+  const [link, target] = await Promise.all([lstat(file, { bigint: true }).catch(() => undefined), stat(file, { bigint: true }).catch(() => undefined)]);
+  return `${link ? fingerprint(link) : 'missing'}>${target ? fingerprint(target) : 'missing'}`;
 };
-const fingerprintAll = async (files: string[]) => Promise.all(files.map(async file => ({ path: file, fp: await sourceFingerprint(file) })));
+async function fingerprintAll(ctx: WalkContext, files: string[]) {
+  const out: IgnoreSource[] = [];
+  for (let i = 0; i < files.length; i += 64) {
+    ctx.deadline.check(ctx.expired);
+    out.push(...await Promise.all(files.slice(i, i + 64).map(async file => ({ path: file, fp: await sourceFingerprint(file) }))));
+  }
+  ctx.deadline.check(ctx.expired);
+  return out;
+}
+async function sourcesUnchanged(ctx: WalkContext, sources: IgnoreSource[]) {
+  const now = await fingerprintAll(ctx, sources.map(source => source.path));
+  return sameSources(sources, now);
+}
 const sameSources = (a: IgnoreSource[], b: IgnoreSource[]) => a.length === b.length && a.every((x, i) => x.path === b[i].path && x.fp === b[i].fp);
 
 export class Inventory {
@@ -120,10 +143,8 @@ export class Inventory {
    * re-walk too.
    */
   async refresh(ctx: WalkContext): Promise<Inventory> {
-    for (const source of this.ignoreSources) {
-      ctx.deadline.check(ctx.expired);
-      if (await sourceFingerprint(source.path) !== source.fp) return walk(ctx);
-    }
+    if (!await sourcesUnchanged(ctx, this.ignoreSources)) return walk(ctx);
+    await ctx.hook?.('refresh:sources-checked', { path: '' });
     for (const dir of this.dirs) {
       ctx.deadline.check(ctx.expired);
       const stat = await lstat(abs(ctx.root, dir.path), { bigint: true }).catch(() => undefined);
@@ -141,6 +162,8 @@ export class Inventory {
         if (fp !== entry.fp) { entry.fp = fp; entry.size = Number(stat.size); entry.mode = Number(stat.mode); changed = true; }
       }
     }
+    // Checked again at the end: a rule edited while entries were re-checked must not reach this answer.
+    if (!await sourcesUnchanged(ctx, this.ignoreSources)) return walk(ctx);
     if (changed) this.rehash();
     return this;
   }
@@ -161,9 +184,9 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     const ignored = await gitIgnored(ctx);
     const { inventory, gitignores } = await walkOnce(ctx, ignored);
     const files = [...await ignoreConfigSources(ctx), ...gitignores];
-    const before = await fingerprintAll(files);
+    const before = await fingerprintAll(ctx, files);
     const again = await gitIgnored(ctx);
-    const after = await fingerprintAll(files);
+    const after = await fingerprintAll(ctx, files);
     if (again.listing === ignored.listing && sameSources(before, after)) return inventory.withIgnoreSources(after);
   }
   throw IGNORE_UNSTABLE();

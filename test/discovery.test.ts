@@ -265,3 +265,48 @@ test('a .gitignore edited while discovery runs never yields a stale first answer
   assert.ok(edited);
   assert.ok(!first.includes('config/late.yml'), 'the first answer already reflects the edited rules');
 });
+
+test('a .gitignore edited during a cached refresh never yields a stale answer', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'tmp/\n' }, { 'config/private.yml': 'token: x\n' });
+  let armed = false, edited = false;
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {
+    pathHook: async stage => {
+      // After refresh has accepted the recorded ignore sources, the rules change in place.
+      if (stage === 'refresh:sources-checked' && armed && !edited) { edited = true; await writeFile(path.join(m.root, '.gitignore'), 'tmp/\nconfig/private.yml\n'); }
+    }
+  }, m.track);
+  assert.ok((await listAll(repo)).paths.includes('config/private.yml'));
+  armed = true;
+  const paths = (await listAll(repo)).paths;
+  assert.ok(edited);
+  assert.ok(!paths.includes('config/private.yml'), 'the refreshed answer already reflects the edited rules');
+});
+
+test('an include.path config file, even empty or missing at first, is an ignore source', async t => {
+  const m = await makeRepo(t, {}, { 'notes/local.txt': 'private\n' });
+  const excludes = path.join(m.base, 'extra-excludes');
+  await writeFile(excludes, 'notes/local.txt\n');
+  await writeFile(path.join(m.root, '.git', 'extra.conf'), '');
+  await git(m.root, 'config', '--add', 'include.path', 'extra.conf');
+  await git(m.root, 'config', '--add', 'include.path', 'missing.conf');
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+  assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
+  await writeFile(path.join(m.root, '.git', 'extra.conf'), `[core]\n\texcludesFile = ${excludes}\n`);
+  assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'editing an empty included file applies');
+  await writeFile(path.join(m.root, '.git', 'extra.conf'), '');
+  assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
+  await writeFile(path.join(m.root, '.git', 'missing.conf'), `[core]\n\texcludesFile = ${excludes}\n`);
+  assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'creating a missing included file applies');
+});
+
+test('a symlinked excludes file is tracked through its target', async t => {
+  const m = await makeRepo(t, {}, { 'notes/local.txt': 'private\n' });
+  const target = path.join(m.base, 'real-excludes');
+  await writeFile(target, '\n');
+  await symlink(target, path.join(m.base, 'linked-excludes'));
+  await git(m.root, 'config', 'core.excludesFile', path.join(m.base, 'linked-excludes'));
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+  assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
+  await writeFile(target, 'notes/local.txt\n');
+  assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'editing the link target applies');
+});
