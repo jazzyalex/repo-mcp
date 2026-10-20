@@ -1,6 +1,6 @@
 # Setup and operation
 
-Repo MCP v0.2.2 uses one permanent multi-repository broker for trusted single-user
+Repo MCP v0.2.3 uses one permanent multi-repository broker for trusted single-user
 macOS operation. Normal installation requires Python 3.9+, Node 26+, Git at /usr/bin/git,
 npm, and the official OpenAI tunnel client. Install a supported Python on PATH before
 onboarding; `python3 scripts/check-prerequisites.py` checks normal dependencies without
@@ -994,7 +994,7 @@ it does not replace a fresh dependency installation and full supported-platform 
 clean supported environment before publication; this document does not claim that a
 particular working tree has already passed that release gate.
 
-The v0.2.2 prerelease has fresh-source validation on an existing Mac, isolated installer tests, current-install no-op replay, and a deployed Claude-to-ChatGPT commit-pinned smoke. It has not passed first installation on a clean Mac, new tunnel/key setup, or first client registration. Those remain required evidence before claiming clean-machine certification. The existing service may continue reporting v0.2.1 until an intentional upgrade reload; a release publication alone does not restart it.
+The v0.2.3 prerelease passed dependency installation, build, typecheck and the complete 578-test suite (577 passed, one optional skip) in the release checkout on an existing Mac. Earlier v0.2 validation also covered isolated installer tests, current-install no-op replay, and a deployed Claude-to-ChatGPT commit-pinned smoke. It has not passed first installation on a clean Mac, new tunnel/key setup, or first client registration. Those remain required evidence before claiming clean-machine certification. The existing service may continue reporting an older version until an intentional upgrade reload; release publication alone does not restart it.
 
 MIT licensing, allowlisted packaging and GitHub private vulnerability reporting
 remain enabled. This is not a claim of hostile-code isolation, Linux/Windows support,

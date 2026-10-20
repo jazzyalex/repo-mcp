@@ -4,9 +4,9 @@ Repo MCP is a local MCP service for policy-bounded coding and review across mult
 
 The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and unrestricted shell commands stay outside MCP.
 
-**Status:** v0.2.2 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
+**Status:** v0.2.3 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
 
-**Release validation:** v0.2.2 is a prerelease. A fresh public clone passed dependency installation, build, typecheck and 568 tests (one optional skip) on an existing Mac installation. First installation on a clean Mac, new tunnel credentials and first client registration remain unproven. See the GitHub release notes for the validation scope.
+**Release validation:** v0.2.3 is a prerelease. The release checkout passed dependency installation, build, typecheck and the complete 578-test suite (577 passed, one optional skip) on an existing Mac installation. First installation on a clean Mac, new tunnel credentials and first client registration remain unproven. See the GitHub release notes for the validation scope.
 
 ## Set up with Codex or Claude
 

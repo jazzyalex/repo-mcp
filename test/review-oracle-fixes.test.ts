@@ -227,7 +227,12 @@ const pathspecs = (args: string[]) => args.slice(args.indexOf('--') + 1);
 test('tracking validation hands Git bounded batches: exact policy startup and diff with 6000 long tracked paths', async t => {
   const { m, policy: exact } = await manyTracked(t);
   const calls: string[][] = [];
-  const repo = m.track(await RepoWorkspace.create(m.root, exact, { gitHook: args => { calls.push(args); } }));
+  // This test proves path-count and byte batching, not the production deadline.
+  // Give the large real-Git fixture enough time when the full suite runs in parallel.
+  const repo = m.track(await RepoWorkspace.create(m.root, exact, {
+    operationBudgetMs: 60_000,
+    gitHook: args => { calls.push(args); }
+  }));
   const tracking = calls.filter(a => a[0] === 'ls-tree' || a[0] === 'ls-files');
   assert.ok(tracking.length >= 2 * 30, `real Git calls: ${tracking.length}`);
   for (const args of tracking) {
