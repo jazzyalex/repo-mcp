@@ -85,7 +85,7 @@ test('links, special files, oversize files and unsafe names are skipped and coun
   const repo = await openGlob(t, m.root, policyDoc(), { limits: { edit_file_bytes: 1024 } }, m.track);
   const { paths, last } = await listAll(repo);
   for (const hidden of ['sym.txt', 'symdir/secret.txt', 'linked.txt', 'big.txt', 'weird\u0001name.txt', `${deep}/f.txt`]) assert.ok(!paths.includes(hidden), hidden);
-  assert.deepEqual(last.inventory.skipped, { symlinks: 2, special: 0, linked: 1, too_large: 1, unsafe_name: 1, too_long: 1, other_device: 0, git_ignored: 0 });
+  assert.deepEqual(last.inventory.skipped, { symlinks: 2, special: 0, linked: 1, too_large: 1, unsafe_name: 1, too_long: 1, other_device: 0, git_ignored: 0, nested_repo: 0 });
   await assert.rejects(repo.read('linked.txt'), /not exposed/);
   await assert.rejects(repo.read('big.txt'), /not exposed/);
 });
@@ -309,4 +309,49 @@ test('a symlinked excludes file is tracked through its target', async t => {
   assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
   await writeFile(target, 'notes/local.txt\n');
   assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'editing the link target applies');
+});
+
+test('ignored files and directories with decomposed (NFD) names stay hidden', async t => {
+  const nfdFile = 'notes/café.private', nfdDir = 'resumés';
+  const m = await makeRepo(t, { '.gitignore': '*.private\nresum*/\n' }, { [nfdFile]: 'secret\n', [`${nfdDir}/cv.txt`]: 'private\n', 'notes/plain.txt': 'ok\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {}, m.track);
+  const paths = (await listAll(repo)).paths.map(p => p.normalize('NFC'));
+  assert.ok(paths.includes('notes/plain.txt'));
+  assert.ok(!paths.includes(nfdFile.normalize('NFC')), 'NFD ignored file is hidden');
+  assert.ok(!paths.includes(`${nfdDir}/cv.txt`.normalize('NFC')), 'files in an NFD ignored directory are hidden');
+  await assert.rejects(repo.read(nfdFile), /not exposed/);
+  assert.equal((await repo.search('secret')).matches.length, 0);
+});
+
+test('nested repositories and submodules are not walked, so their ignored files never leak', async t => {
+  const m = await makeRepo(t, {}, { 'nested/.gitignore': 'local.cfg\n', 'nested/local.cfg': 'token\n', 'nested/readme.txt': 'hi\n' });
+  await git(path.join(m.root, 'nested'), 'init', '-q');
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+  const { paths, last } = await listAll(repo);
+  assert.ok(!paths.some(p => p.startsWith('nested/')), paths.join());
+  assert.equal(last.inventory.skipped.nested_repo, 1);
+});
+
+test('a branch-conditional include is re-checked when HEAD moves', async t => {
+  const m = await makeRepo(t, {}, { 'notes/local.txt': 'private\n' });
+  const excludes = path.join(m.base, 'branch-excludes');
+  await writeFile(excludes, 'notes/local.txt\n');
+  await writeFile(path.join(m.root, '.git', 'branch.conf'), `[core]\n\texcludesFile = ${excludes}\n`);
+  await git(m.root, 'config', 'includeIf.onbranch:other.path', 'branch.conf');
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+  assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
+  await git(m.root, 'symbolic-ref', 'HEAD', 'refs/heads/other');
+  assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'rules that apply on the new branch are used');
+});
+
+test('churn of unrelated ignored files does not make discovery fail', async t => {
+  const m = await makeRepo(t, { '.gitignore': '*.tmp\n' }, { 'src/visible.txt': 'ok\n' });
+  let n = 0;
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {
+    // A build writes a new ignored cache file after the root has been listed, on every attempt.
+    pathHook: async (stage, ctx) => { if (stage === 'walk:enter' && ctx.path === 'src') await writeFile(path.join(m.root, `build-${n++}.tmp`), 'x'); }
+  }, m.track);
+  const paths = (await listAll(repo)).paths;
+  assert.ok(paths.includes('src/visible.txt'));
+  assert.ok(!paths.some(p => p.endsWith('.tmp')));
 });

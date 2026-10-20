@@ -14,8 +14,8 @@ import type { Deadline } from './deadline.js';
 
 export type Entry = { path: string; size: number; mode: number; fp: string };
 type Dir = { path: string; fp: string };
-export type Skipped = { symlinks: number; special: number; linked: number; too_large: number; unsafe_name: number; too_long: number; other_device: number; git_ignored: number };
-export const emptySkipped = (): Skipped => ({ symlinks: 0, special: 0, linked: 0, too_large: 0, unsafe_name: 0, too_long: 0, other_device: 0, git_ignored: 0 });
+export type Skipped = { symlinks: number; special: number; linked: number; too_large: number; unsafe_name: number; too_long: number; other_device: number; git_ignored: number; nested_repo: number };
+export const emptySkipped = (): Skipped => ({ symlinks: 0, special: 0, linked: 0, too_large: 0, unsafe_name: 0, too_long: 0, other_device: 0, git_ignored: 0, nested_repo: 0 });
 const MAX_DEPTH = 32;
 const UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\\�]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
@@ -50,19 +50,29 @@ async function gitText(ctx: WalkContext, args: string[], allowMissing = false) {
 }
 async function gitIgnored(ctx: WalkContext): Promise<Ignored> {
   const listing = await gitText(ctx, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory']);
+  // Git on macOS prints precomposed (NFC) names while readdir returns the bytes on disk (often NFD), so both
+  // sides are compared in NFC. Two disk names with one NFC form are then both hidden: that fails closed.
   const files = new Set<string>(), dirs = new Set<string>();
-  for (const name of listing.split('\0')) if (name) (name.endsWith('/') ? dirs : files).add(name.endsWith('/') ? name.slice(0, -1) : name);
+  for (const name of listing.split('\0')) if (name) (name.endsWith('/') ? dirs : files).add(nfc(name.endsWith('/') ? name.slice(0, -1) : name));
   return { files, dirs, listing };
 }
+/** Is this path, or any directory above it, in an ignored listing? */
+function ignoredBy(ignored: Ignored, rel: string) {
+  const name = nfc(rel);
+  if (ignored.files.has(name) || ignored.dirs.has(name)) return true;
+  for (let i = name.indexOf('/'); i !== -1; i = name.indexOf('/', i + 1)) if (ignored.dirs.has(name.slice(0, i))) return true;
+  return false;
+}
 /**
- * Files outside the walked tree that decide what Git ignores: the index (what is untracked), info/exclude, every
+ * Files outside the walked tree that decide what Git ignores: the index (what is untracked), HEAD, info/exclude, every
  * repository-local config file (including include.path targets, and config/config.worktree even before they exist)
  * and the file a local core.excludesFile names.
  */
 async function ignoreConfigSources(ctx: WalkContext) {
-  const paths = (await gitText(ctx, ['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude', '--git-path', 'config', '--git-path', 'config.worktree']))
+  // HEAD decides which includeIf.onbranch: rules apply.
+  const paths = (await gitText(ctx, ['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude', '--git-path', 'config', '--git-path', 'config.worktree', '--git-path', 'HEAD']))
     .split('\n').filter(Boolean).map(p => path.resolve(ctx.root, p));
-  if (paths.length !== 4) throw IGNORE_FAILED();
+  if (paths.length !== 5) throw IGNORE_FAILED();
   // `-z` output alternates `file:ORIGIN` and key names, NUL-separated; keys never start with `file:`.
   for (const token of (await gitText(ctx, ['config', '--list', '--show-origin', '--name-only', '-z'], true)).split('\0')) {
     if (token.startsWith('file:')) paths.push(path.resolve(ctx.root, token.slice(5)));
@@ -175,19 +185,25 @@ const limitError = (what: string) => new SafeError(`Discovery limit: ${what}. Ad
  * Walk the repository from its root under the policy. Never returns a partial inventory.
  *
  * The ignored-path listing and its sources must form one consistent snapshot: the walk uses a first listing, then
- * every source is fingerprinted, Git lists again, and the sources are fingerprinted again. Only when both listings
- * and both fingerprint sets agree did the second listing see exactly the recorded sources, and the walk filtered
- * with that same listing. Otherwise the walk is retried, and it fails closed after a few unstable attempts.
+ * every source is fingerprinted, Git lists again, and the sources are fingerprinted again. The snapshot holds when
+ * both fingerprint sets agree (so the second listing saw exactly the recorded sources) and the second listing hides
+ * nothing the walk exposed. Otherwise the walk is retried, and it fails closed after a few unstable attempts.
  */
 export async function walk(ctx: WalkContext): Promise<Inventory> {
   for (let attempt = 0; attempt < IGNORE_ATTEMPTS; attempt++) {
     const ignored = await gitIgnored(ctx);
     const { inventory, gitignores } = await walkOnce(ctx, ignored);
-    const files = [...await ignoreConfigSources(ctx), ...gitignores];
+    const configSources = await ignoreConfigSources(ctx);
+    const files = [...configSources, ...gitignores];
     const before = await fingerprintAll(ctx, files);
     const again = await gitIgnored(ctx);
     const after = await fingerprintAll(ctx, files);
-    if (again.listing === ignored.listing && sameSources(before, after)) return inventory.withIgnoreSources(after);
+    // The second listing may differ only by ignored files appearing or vanishing (a build writing caches); it must
+    // not hide anything the walk exposed. The set of config sources must also still be the same.
+    const consistent = sameSources(before, after) &&
+      (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path))) &&
+      (await ignoreConfigSources(ctx)).join('\0') === configSources.join('\0');
+    if (consistent) return inventory.withIgnoreSources(after);
   }
   throw IGNORE_UNSTABLE();
 }
@@ -232,12 +248,15 @@ async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory
         if (depth + 1 > MAX_DEPTH) { skipped.too_long++; continue; }
         if (stat.dev !== rootStat.dev) { skipped.other_device++; continue; }
         if (!policy.mayDescend(child)) continue;
-        if (ignored.dirs.has(child)) { skipped.git_ignored++; continue; }
+        if (ignored.dirs.has(nfc(child))) { skipped.git_ignored++; continue; }
+        // A nested repository or submodule has its own index and ignore rules, which this repository's Git never
+        // applies: its files are not walked at all.
+        if (await lstat(path.join(dir, name, '.git')).then(() => true, () => false)) { skipped.nested_repo++; continue; }
         stack.push({ rel: child, depth: depth + 1 });
         continue;
       }
       if (!policy.decide(child, 'read').ok) continue;
-      if (ignored.files.has(child) || ignored.dirs.has(child)) { skipped.git_ignored++; continue; }
+      if (ignored.files.has(nfc(child)) || ignored.dirs.has(nfc(child))) { skipped.git_ignored++; continue; }
       if (stat.isSymbolicLink()) { skipped.symlinks++; continue; }
       if (!stat.isFile()) { skipped.special++; continue; }
       if (stat.nlink > 1n) { skipped.linked++; continue; }

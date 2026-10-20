@@ -18,10 +18,10 @@ Repo MCP architecture means **ChatGPT web performs the architecture work** using
 
 ## Command recipe: architecture pass
 
-This is the exact sequence that completed cleanly on 2026-10-20. Follow it literally;
-do not re-derive commands from SETUP.md, source code or old transcripts. Every command
-runs from the control checkout. Keep run files in a private folder outside the reviewed
-repository.
+This sequence completed cleanly on 2026-10-20. Follow it literally; do not re-derive
+commands from SETUP.md, source code or old transcripts. Every command runs from the
+control checkout. Keep run files in a private folder outside the reviewed repository.
+Resolve `ROOT=$(git rev-parse --show-toplevel)` inside the user's project first.
 
 ```bash
 C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
@@ -33,65 +33,77 @@ for k in sys.argv[2].split("."): o=o[k]
 print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 ```
 
-1. **Resolve and bind.** `npm run --silent coord -- repository resolve --repo "$ROOT"`.
-   If the repository has no unfinished task, bind one:
-   `npm run --silent coord -- task bind --repository "$REPO" --task REPO-architect-DATE`.
-   Choose `SID` and `WSREQ` (fresh, unique each run).
-2. **Prepare the browser.** Normal ChatGPT **Chat** tab, Repo MCP attached and its chip
-   visible, and **Pro** available in the picker (you select it after preparing).
+1. **Resolve and bind.** `npm run --silent coord -- repository resolve --repo "$ROOT"`
+   gives `REPO`. If the repository has no unfinished task, bind one and use it as `TASK`:
+   `npm run --silent coord -- task bind --repository "$REPO" --task "$REPO-architect-$(date +%Y%m%d)"`.
+   Set `SID=codex-$REPO-architect-$(date +%Y%m%dT%H%M%S)` and
+   `WSREQ=$REPO-architect-ws-$(date +%Y%m%dT%H%M%S)`.
+2. **Prepare the browser.** Open a normal ChatGPT **Chat** tab (not Work, not Temporary
+   Chat) and attach Repo MCP through the tool picker. The required effort is `Pro`. Check it in the page:
+   ```js
+   ({chip:[...document.querySelectorAll('button,span,div')].some(e=>e.childElementCount===0&&e.innerText?.trim()==='Repo MCP'),
+     effort:[...document.querySelectorAll('button')].map(b=>b.innerText.trim()).filter(x=>/^(Light|Medium|High|Extra High|Pro)$/.test(x))})
+   ```
 3. **Write the final prompt** to `$R/prompt.txt` with repository ID, task ID, `inspect`
    mode, request ID `$WSREQ`, expected root/branch/HEAD and "make no edits".
-4. **Prepare the run** (2-minute selection window starts now):
+4. **Paste the prompt** into the composer now, before preparing (the prompt file is
+   final, and pasting later wastes the 2-minute selection window). Do not send.
+5. **Prepare the run** (the 2-minute selection window starts now):
    ```bash
    npm run --silent chatgpt-run -- prepare --repository "$REPO" --task "$TASK" --coordinator codex \
      --kind architecture --profile architecture --surface chat --session-id "$SID" --prompt-file "$R/prompt.txt" > "$R/run.json"
    RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
    PSHA=$(jget "$R/run.json" prompt_sha256); BASE=$(jget "$R/run.json" resolved_base_commit)
    ```
-5. **Paste the prompt, select the effort, then observe and reserve.** After preparing,
-   then open the model picker and click the `Pro` effort, even if it already shows
-   it. The selection must happen after preparation. Record the selection time right
-   after the click with `SELAT=$(now)` (no browser event time is available, so the
-   moment just after the click is the closest true value). Read the label, then within
-   10 seconds run this one command:
+6. **Select the effort, then observe and reserve.** Open the model picker and click
+   **Pro**, even if it already shows it (the selection must happen after
+   preparation). Right after the click, record `SELAT=$(now)`. Read the label the page
+   now shows (the `effort` value from the check above) into `LABEL`; it must be exactly
+   `Pro`. Within 10 seconds run this one command:
    ```bash
    npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "Pro" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
+     --control-label "$LABEL" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
    && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
      --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
    ```
-   Send only when it prints `True`. If the observation is "too old", click `Pro` again,
-   record a new `SELAT` right after it, and repeat this one command.
-6. **Send once and record it** (no head commit or candidate digest for this kind):
-   Close any open picker menu, then click the composer's **Send** button (pressing
-   Return after closing a menu may do nothing). Confirm the send before recording it:
-   the URL changed to `/c/CONVERSATION_ID` and the composer is empty. If neither
-   happened, nothing was sent: check the Repo MCP chip and click Send again. If you
-   cannot tell, use `chatgpt-run uncertain` and recover; never send twice blindly.
+   Send only when it prints `True`.
+7. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
+   cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
+   ends the run. Start again from writing the prompt with a new `WSREQ` (the prompt names it).
+   If the 2-minute window ran out before `observe` was recorded, first close the run
+   with `npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED`.
+8. **Send once.** Close any open picker menu, then click the composer's **Send** button
+   (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
+   the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
+   more seconds and check again before clicking Send again. If you still cannot tell,
+   record `chatgpt-run uncertain` and recover; never send twice blindly.
+9. **Record the send** (no head commit or candidate digest for this kind):
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
-     --prompt-sha256 "$PSHA" --base-commit "$BASE" --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" \
-     --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
+     --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+     --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
    ```
-7. **Wait for the answer, not for the workspace.** Never use the broker audit log,
+10. **Wait for the answer, not for the workspace.** Never use the broker audit log,
    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-   The page is the only signal. Every 30–60 seconds run this instant page
-   check. Never wait inside the page: background tabs slow page timers, and the browser
-   call fails after 45 seconds. Wait between checks outside the page (Claude Code: a
-   `sleep 45` command with `run_in_background`; Codex: a short wait). The answer is done
-   when `busy` is false and `tail` ends with the verdict or the end of the report:
+   The page is the only signal. Every 30–60 seconds run this instant check (never wait
+   inside the page: background tabs slow page timers, and the browser call fails after
+   45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
+   with `run_in_background`; Codex: a short wait).
    ```js
-   ({busy:!!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), tail:document.body.innerText.slice(-200)})
+   (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+     const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
+     return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
    ```
-   A Pro pass usually takes 15–20 minutes.
-8. **Capture the answer** into `$R/output.md`: read the last assistant
-   message in the page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
+   The answer is done when two checks in a row show `busy: false` with the same `chars`,
+   and `tail` ends with the verdict or the end of the report. A Pro pass usually takes 15–20 minutes.
+11. **Capture the answer** into `$R/output.md`: read the last assistant message in the
+   page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
    and write that exact text to the file through the browser runtime's file access. If
    that selector finds nothing (the page layout changes) or the text comes back
    truncated, use the Copy button under the last answer and `pbpaste` instead.
-9. **Complete:**
+12. **Complete:**
    ```bash
    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
@@ -99,6 +111,6 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
      --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
    ```
-10. If you bound a task for this pass, finish it: `npm run --silent coord -- task finish --task "$TASK"`.
+13. If you bound a task for this pass, finish it: `npm run --silent coord -- task finish --task "$TASK"`.
 
 Report `Execution surface: ChatGPT web`, `Coordinator: Codex`, the exact verified picker and Pro control, `Repository evidence: Repo MCP`, and exact scope/limitations. If the response self-identifies a backend, label that as self-report rather than UI proof.

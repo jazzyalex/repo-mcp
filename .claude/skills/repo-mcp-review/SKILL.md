@@ -106,10 +106,10 @@ orphan only after the helper proves its initializer is dead on this host.
 
 ## Command recipe: commit-pinned review
 
-This is the exact sequence that completed cleanly on 2026-10-20. Follow it literally;
-do not re-derive commands from SETUP.md, source code or old transcripts. Every command
-runs from the control checkout. Keep run files in a private folder outside the reviewed
-repository.
+This sequence completed cleanly on 2026-10-20. Follow it literally; do not re-derive
+commands from SETUP.md, source code or old transcripts. Every command runs from the
+control checkout. Keep run files in a private folder outside the reviewed repository.
+Resolve `ROOT=$(git rev-parse --show-toplevel)` inside the user's project first.
 
 ```bash
 C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
@@ -124,17 +124,15 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 1. **Resolve.** `npm run --silent coord -- repository resolve --repo "$ROOT"` gives
    `REPO` and the sole unfinished review `TASK`. Pin the target:
    `BASE=$(git -C "$ROOT" rev-parse BASE_REF)`, `HEADC=$(git -C "$ROOT" rev-parse HEAD)`.
-   Choose `SID=claude-REPO-review-STAMP` and `WSREQ=REPO-review-ws-STAMP` (fresh,
-   unique each run).
+   Set `SID=claude-$REPO-review-$(date +%Y%m%dT%H%M%S)` and
+   `WSREQ=$REPO-review-ws-$(date +%Y%m%dT%H%M%S)` (fresh, unique each run).
 2. **Rebind first.** `npm run --silent coord -- task rebind --task "$TASK"`. This clears
    "Task binding is stale" after HEAD moved. It refuses when another reviewer or a
    coding owner is protected; then stop and report that blocker. Mention the rebind in
    the report.
-3. **Prepare the browser before the run.** Open a normal ChatGPT **Chat** tab (not Work,
-   not Temporary Chat), check that the picker offers the required effort (`Extra High`
-   for `review`, `Pro` for `review-critical`; you select it after preparing) and attach
-   Repo MCP through the tool picker. Check it in the
-   page:
+3. **Prepare the browser.** Open a normal ChatGPT **Chat** tab (not Work, not Temporary
+   Chat) and attach Repo MCP through the tool picker. The required effort is `Extra High` for
+   `review`, `Pro` for `review-critical`. Check it in the page:
    ```js
    ({chip:[...document.querySelectorAll('button,span,div')].some(e=>e.childElementCount===0&&e.innerText?.trim()==='Repo MCP'),
      effort:[...document.querySelectorAll('button')].map(b=>b.innerText.trim()).filter(x=>/^(Light|Medium|High|Extra High|Pro)$/.test(x))})
@@ -142,7 +140,9 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 4. **Write the final prompt** to `$R/prompt.txt`: repository ID, task ID, `review`
    mode, `workspace_open` request ID `$WSREQ`, and the requested and resolved base/head.
    Never edit it after this step.
-5. **Prepare the run** (the selection expires 2 minutes after this, so go straight on):
+5. **Paste the prompt** into the composer now, before preparing (the prompt file is
+   final, and pasting later wastes the 2-minute selection window). Do not send.
+6. **Prepare the run** (the 2-minute selection window starts now):
    ```bash
    npm run --silent coord -- review prepare-or-join --repository "$REPO" --task "$TASK" \
      --coordinator claude --profile review --surface chat --session-id "$SID" \
@@ -155,66 +155,71 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    ```
    Check that both task IDs equal `$TASK`, the resolved base equals `$BASE`, and
    `participant.commit_binding` equals `run.commit_binding`. Stop on any mismatch.
-6. **Paste the prompt** into the composer. Do not send yet.
-7. **Select the effort, then observe and reserve.** After preparing,
-   then open the model picker and click the required effort, even if it already shows
-   it. The selection must happen after preparation. Record the selection time right
-   after the click with `SELAT=$(now)` (no browser event time is available, so the
-   moment just after the click is the closest true value). Read the label, then within
-   10 seconds run this one command:
+7. **Select the effort, then observe and reserve.** Open the model picker and click
+   **Extra High**, even if it already shows it (the selection must happen after
+   preparation). Right after the click, record `SELAT=$(now)`. Read the label the page
+   now shows (the `effort` value from the check above) into `LABEL`; it must be exactly
+   `Extra High`. Within 10 seconds run this one command:
    ```bash
    npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "Extra High" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
+     --control-label "$LABEL" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
    && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
      --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
    ```
-   If the label check fails or the observation is "too old", click the effort again,
-   record a new `SELAT` right after it, and repeat this one command. If the 2-minute selection window has
-   expired, use `chatgpt-run fail-pre-submit` and prepare a new run. Send only when it prints `True`.
-8. **Send once**, then record the submission with the conversation ID from the URL:
-   Close any open picker menu, then click the composer's **Send** button (pressing
-   Return after closing a menu may do nothing). Confirm the send before recording it:
-   the URL changed to `/c/CONVERSATION_ID` and the composer is empty. If neither
-   happened, nothing was sent: check the Repo MCP chip and click Send again. If you
-   cannot tell, use `chatgpt-run uncertain` and recover; never send twice blindly.
+   Send only when it prints `True`.
+8. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
+   cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
+   ends the run. Release the participant with
+   `npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"`,
+   then start again from writing the prompt with a new `WSREQ` (the prompt names it).
+   If the 2-minute window ran out before `observe` was recorded, first close the run
+   with `npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED`.
+9. **Send once.** Close any open picker menu, then click the composer's **Send** button
+   (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
+   the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
+   more seconds and check again before clicking Send again. If you still cannot tell,
+   record `chatgpt-run uncertain` and recover; never send twice blindly.
+10. **Record the send**:
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
      --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" --candidate-digest "$CDIG" \
      --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
    ```
-9. **Reconcile** in the background until ChatGPT has opened the workspace:
+11. **Reconcile** in the background until ChatGPT has opened the workspace:
    ```bash
    for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
    ```
-10. **Wait for the answer, not for the workspace.** Never use the broker audit log,
-    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
-    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-    The page is the only signal. Every 30–60 seconds run this instant page
-    check. Never wait inside the page: background tabs slow page timers, and the browser
-    call fails after 45 seconds. Wait between checks outside the page (Claude Code: a
-    `sleep 45` command with `run_in_background`; Codex: a short wait). The answer is done
-    when `busy` is false and `tail` ends with the verdict or the end of the report:
-    ```js
-    ({busy:!!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), tail:document.body.innerText.slice(-200)})
-    ```
-11. **Capture the answer** from the page into `$R/output.md`: back up the clipboard
+12. **Wait for the answer, not for the workspace.** Never use the broker audit log,
+   `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
+   the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
+   The page is the only signal. Every 30–60 seconds run this instant check (never wait
+   inside the page: background tabs slow page timers, and the browser call fails after
+   45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
+   with `run_in_background`; Codex: a short wait).
+   ```js
+   (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+     const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
+     return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
+   ```
+   The answer is done when two checks in a row show `busy: false` with the same `chars`,
+   and `tail` ends with the verdict or the end of the report. An Extra High review usually takes 5–15 minutes.
+13. **Capture the answer** into `$R/output.md`: back up the clipboard
    (`LANG=en_US.UTF-8 pbpaste > "$R/clip.bak"`), click the Copy button under the last
    answer, then `sleep 1; LANG=en_US.UTF-8 pbpaste > "$R/output.md"; LANG=en_US.UTF-8 pbcopy < "$R/clip.bak"`.
    Check that the file ends with the verdict. Do not read long answers through
    JavaScript output; it gets truncated.
-12. **Complete and close:**
-    ```bash
-    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
-    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome ship \
-      --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
-      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" \
-      --candidate-digest "$CDIG" --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" \
-      --observed-at "$NOW" --session-id "$SID"
-    npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "REPO-review-close-STAMP"
-    ```
-    Use `--outcome no-ship` when the verdict is NO-SHIP. Both commands print
-    `"state": "completed"` and `"state": "closed"`.
+14. **Complete and close** (use `--outcome no-ship` when the verdict is NO-SHIP):
+   ```bash
+   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome ship \
+     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" \
+     --candidate-digest "$CDIG" \
+     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+   npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
+   ```
+   Both commands print `"state": "completed"` and `"state": "closed"`.
 
 ## Report contract
 

@@ -40,7 +40,7 @@ Review prompt template (construct fully before shared preparation/hashing):
 
 ## Outcome and decisions
 
-ChatGPT performs implementation and semantic code review using Repo MCP and, where useful, connected remote read context. Codex coordinates coding/write authority, local checks, browser handoff, and authorized Git operations; Claude may coordinate Chat review/architecture. The durable shared-review handoff is implemented in accepted source through the review coordinator plus the existing `chatgpt-run` journal. Compatible parallel reviews are supported on one target generation with distinct participants/runs/workspaces/results; parallel coding still requires separate registered worktrees and coding owners. Large-diff manifest/per-path review coverage remains deferred.
+ChatGPT performs implementation and semantic code review using Repo MCP and, where useful, connected remote read context. Codex or Claude coordinates coding/write authority, local checks, browser handoff, and authorized Git operations, and either may coordinate Chat review/architecture. The durable shared-review handoff is implemented in accepted source through the review coordinator plus the existing `chatgpt-run` journal. Compatible parallel reviews are supported on one target generation with distinct participants/runs/workspaces/results; parallel coding still requires separate registered worktrees and coding owners. Large-diff manifest/per-path review coverage remains deferred.
 
 Use an existing checkout or a linked Git worktree. Neither a clone nor a worktree is mandatory. Prefer an existing checkout for a small task with exclusive ownership; prefer a linked worktree when the main checkout is busy or contains unrelated changes. Worktrees isolate working files and indexes but share Git metadata and are not security sandboxes.
 
@@ -68,7 +68,7 @@ Git writes remain with Codex. A remote-writing workflow requires separate explic
 
 The Codex and Claude coordinator skills use host-native browser control plus Repo MCP's
 provider-neutral `chatgpt-run` journal. ChatGPT web performs every Repo MCP review and
-architecture pass using the Chat surface; only Codex coordinates coding/write access. A run uses a stable
+architecture pass using the Chat surface; Codex or Claude coordinates coding/write access. A run uses a stable
 normal-Chat session from the start, an operator-selected conversation with Repo MCP
 attached and visible, exact live model/profile evidence, durable reservation immediately
 before one submission, and recovery of the same run/conversation after interruption.

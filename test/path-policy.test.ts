@@ -183,7 +183,7 @@ test('common credential and infrastructure-state file names are denied by defaul
     assert.equal(allowed(p, file), false, file);
   }
   for (const file of ['src/secrets.ts', 'src/SecretField.swift', 'docs/secrets.md', 'docs/service-account.md', 'src/kubeconfig.ts', 'terraform/main.tf', 'src/keychain.ts',
-    'schemas/service-account.schema.json', 'test/service_account.fixture.json', 'test/serviceaccount-prod.mock.json']) {
+    'schemas/service-account.schema.json', 'test/service_account.fixture.json', 'test/serviceaccount-prod.mock.json', 'config/service-account.example.json']) {
     assert.equal(allowed(p, file), true, file);
   }
 });
