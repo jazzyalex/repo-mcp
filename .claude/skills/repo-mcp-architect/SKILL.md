@@ -16,4 +16,69 @@ Repo MCP architecture means **ChatGPT web performs the architecture work** using
 7. Observe the exact live Chat model/Pro control, reserve once, submit only when `submission_authorized: true`, record submitted/completed with trusted browser receipts, and recover the same run/conversation after interruption.
 8. If model selection, Repo MCP attachment, repository identity, bounded evidence, or completion cannot be verified, return `NOT TESTABLE` without substituting Claude, Work, or Oracle.
 
+## Command recipe: architecture pass
+
+This is the exact sequence that completed cleanly on 2026-10-20. Follow it literally;
+do not re-derive commands from SETUP.md, source code or old transcripts. Every command
+runs from the control checkout. Keep run files in a private folder outside the reviewed
+repository.
+
+```bash
+C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
+R=$(mktemp -d)  # private run folder (mode 700)
+now(){ python3 -I -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z"))'; }
+jget(){ python3 -I -c 'import json,sys
+o=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): o=o[k]
+print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
+```
+
+1. **Resolve and bind.** `npm run --silent coord -- repository resolve --repo "$ROOT"`.
+   If the repository has no unfinished task, bind one:
+   `npm run --silent coord -- task bind --repository "$REPO" --task REPO-architect-DATE`.
+   Choose `SID` and `WSREQ` (fresh, unique each run).
+2. **Prepare the browser.** Normal ChatGPT **Chat** tab, effort **Pro**, Repo MCP
+   attached and its chip visible.
+3. **Write the final prompt** to `$R/prompt.txt` with repository ID, task ID, `inspect`
+   mode, request ID `$WSREQ`, expected root/branch/HEAD and "make no edits".
+4. **Prepare the run** (2-minute selection window starts now):
+   ```bash
+   npm run --silent chatgpt-run -- prepare --repository "$REPO" --task "$TASK" --coordinator claude \
+     --kind architecture --profile architecture --surface chat --session-id "$SID" --prompt-file "$R/prompt.txt" > "$R/run.json"
+   RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
+   PSHA=$(jget "$R/run.json" prompt_sha256); BASE=$(jget "$R/run.json" resolved_base_commit)
+   ```
+5. **Paste the prompt**, then **observe and reserve in ONE command** right after reading
+   the `Pro` label (the observation must be under 10 seconds old):
+   ```bash
+   NOW=$(now); npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
+     --control-label "Pro" --selected-at "$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/evidence.json" \
+   && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
+     --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
+   ```
+   Send only when it prints `True`. If the observation is "too old", repeat this one command.
+6. **Send once and record it** (no head commit or candidate digest for this kind):
+   ```bash
+   NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
+     --prompt-sha256 "$PSHA" --base-commit "$BASE" --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" \
+     --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
+   SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
+   ```
+7. **Wait** with a page check every 60 seconds until no Stop button remains. A Pro
+   pass usually takes 15–20 minutes.
+8. **Capture the answer** into `$R/output.md`: back up the clipboard
+   (`LANG=en_US.UTF-8 pbpaste > "$R/clip.bak"`), click the Copy button under the last
+   answer, then `sleep 1; LANG=en_US.UTF-8 pbpaste > "$R/output.md"; LANG=en_US.UTF-8 pbcopy < "$R/clip.bak"`.
+   Check that the file ends with the verdict. Do not read long answers through
+   JavaScript output; it gets truncated.
+9. **Complete:**
+   ```bash
+   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
+     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+   ```
+10. If you bound a task for this pass, finish it: `npm run --silent coord -- task finish --task "$TASK"`.
+
 Report `Execution surface: ChatGPT web`, `Coordinator: Claude Code`, verified Pro profile, `Repository evidence: Repo MCP`, and exact scope/limitations.
