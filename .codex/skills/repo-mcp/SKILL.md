@@ -211,8 +211,10 @@ assume the reference was installed beside this standalone skill.
 Use `coord review prepare-or-join`, not an automatic freeze-first handoff. First
 discover the sole safe review task from owner-side repository/catalog status before
 constructing the final browser prompt. Embed that exact `TASK_ID` in the prompt and
-always call prepare-or-join with `--task TASK_ID`. Zero/multiple/coding/stale or
-conflicting state requires owner action and must not be silently rebound/frozen. Omitting
+always call prepare-or-join with `--task TASK_ID`. Zero/multiple/coding or
+conflicting state requires owner action and must not be silently rebound/frozen. A
+binding that is stale only because HEAD moved is refreshed with `coord task rebind` (it
+refuses protected reviewers and coding owners) and reported. Omitting
 `--task` is a separate combined selection+durable-preparation API for callers that
 intentionally delegate task selection; it is not discovery and the browser handoff never
 uses it. Compatible reviewers share one target generation but retain distinct
@@ -382,6 +384,176 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
     ```
     Use `--outcome no-ship` when the verdict is NO-SHIP. Both commands print
     `"state": "completed"` and `"state": "closed"`.
+
+## Command recipes
+
+Run these literally from the control checkout. Do not re-derive commands from SETUP.md,
+source code or old transcripts, and do not hand them to the user to run.
+
+```bash
+ROOT=$(git rev-parse --show-toplevel)   # run first, inside the user's project
+C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
+now(){ python3 -I -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z"))'; }
+```
+
+### Check health
+
+```bash
+npm run --silent coord -- service status          # expect "local_mcp": "ready"
+npm run --silent connection:status                # expect "state": "ready" (ChatGPT tunnel)
+claude mcp get repo-mcp                           # expect "Connected", http://127.0.0.1:8787/mcp
+python3 scripts/install-agent-skills.py --check   # expect "agent skills are current"
+```
+
+Local health is not route proof. Prove a client route with real tool calls: Codex coordinates and is not
+itself a Repo MCP client. The ChatGPT route is proven by the next real run, whose
+conversation must show `service_info`, `repository_list` and `workspace_open`. If Claude
+Code is installed, its route is proven by the Claude skill's tool-call check. After any real run, the broker audit log shows each client call:
+`tail -5 "$HOME/Library/Application Support/repo-mcp/state/multirepo-audit.jsonl"` (`"ok": true`).
+
+### Connect a repository
+
+```bash
+npm run --silent coord -- repository resolve --repo "$ROOT"   # "repository": null means not registered
+```
+
+Reuse an existing registration. Only when it is `null`:
+
+```bash
+REPO=$(basename "$ROOT" | tr 'A-Z_ ' 'a-z--' | tr -cd 'a-z0-9.-')
+P="$HOME/Library/Application Support/repo-mcp/policies/$REPO.json"
+cp -n docs/policy-readonly.json "$P"; chmod 600 "$P"   # add this repo's build, dependency and data folders to read.exclude
+npm run --silent coord -- repository add --repository "$REPO" --repo "$ROOT" --policy "$P"
+```
+
+Then bind a task only if the repository has no unfinished task:
+
+```bash
+npm run --silent coord -- task bind --repository "$REPO" --task "$REPO-review-$(date +%Y%m%d)"
+```
+
+`repository add` refuses nested, duplicate or overlapping checkouts and policies inside
+a served checkout. `task bind` refuses a second unfinished task; reuse that task instead.
+
+### Deploy a Repo MCP change
+
+Only when Repo MCP source changed (an upgrade or a fix). Never just to switch repositories.
+
+```bash
+npm ci                      # only when package-lock.json changed
+npm run build
+npm test                    # run in the background; takes about 5 minutes
+```
+
+Time-limited tests (for example "large trees list and page within budget") can fail when
+the machine is busy. Rerun only the failing tests alone with
+`npx tsx --test --test-name-pattern="TEST NAME" test/FILE.test.ts`; any other failure
+blocks the deploy. Before restarting, prove every stored repository policy still compiles:
+
+```bash
+node --input-type=module -e 'import {readdir,readFile} from "node:fs/promises"; import {loadPolicy,compilePolicy} from "./dist/src/policy.js"; const d=process.env.HOME+"/Library/Application Support/repo-mcp/state/policies"; let bad=0; for (const f of (await readdir(d)).filter(f=>f.endsWith(".json"))) { try { compilePolicy(loadPolicy(JSON.parse(await readFile(d+"/"+f,"utf8")).data)); } catch(e) { bad++; console.log("FAIL",f,e.message); } } console.log("policy snapshots failing:",bad)'
+```
+
+Stop if any fail. Otherwise:
+
+```bash
+python3 scripts/install-agent-skills.py --install
+npm run --silent coord -- service start     # reloads launchd; interrupts in-flight calls
+npm run --silent coord -- service status    # new process_pid, "local_mcp": "ready"
+```
+
+Then run the client route proof above. After an MCP schema change, also refresh the
+Repo MCP app's tools in ChatGPT and start a new ChatGPT conversation.
+
+### Coding run (Codex only)
+
+ChatGPT does the coding through Repo MCP; Codex coordinates. Use the setup block (`C`,
+`R`, `now`, `jget`) from the review recipe in this skill.
+
+```bash
+npm run --silent coord -- task status --task "$TASK"            # phase must be coding
+npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if it is in review; refuses protected reviewers
+```
+
+1. Prepare the browser first: normal ChatGPT **Chat** tab, effort **High** (profile
+   `code`) or **Extra High** (`code-hard`), Repo MCP attached.
+2. Issue the grant right before preparing; it is single-use and expires in 10 minutes:
+   ```bash
+   npm run --silent coord -- workspace grant --task "$TASK" > "$R/grant.json"; GRANT=$(jget "$R/grant.json" write_grant)
+   ```
+3. Write `$R/prompt.txt` with repository ID, task ID, `code` mode, `write_grant` `$GRANT`,
+   a fresh `workspace_open` request ID, the expected HEAD and the coding instructions.
+   The grant goes only into this prompt; never into files in a repository or logs.
+4. Prepare, observe and reserve, send, record the send:
+   ```bash
+   npm run --silent chatgpt-run -- prepare --repository "$REPO" --task "$TASK" --coordinator codex \
+     --kind code --profile code --surface chat --session-id "$SID" --prompt-file "$R/prompt.txt" \
+     --base-ref "$(git -C "$ROOT" rev-parse HEAD)" > "$R/run.json"
+   RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
+   PSHA=$(jget "$R/run.json" prompt_sha256); BASE=$(jget "$R/run.json" resolved_base_commit)
+   NOW=$(now); npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
+     --control-label "High" --selected-at "$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/evidence.json" \
+   && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
+     --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
+   # send once only after "True", then:
+   NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
+     --prompt-sha256 "$PSHA" --base-commit "$BASE" --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" \
+     --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
+   SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
+   ```
+5. Wait (page check every 60 seconds), capture the answer to `$R/output.md` as in the
+   review recipe, then complete:
+   ```bash
+   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
+     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+   ```
+6. Check the result locally, outside MCP: `git -C "$ROOT" diff`, the project's own
+   tests and build. Commit and push only when the user asks. To move the task to review:
+   `npm run --silent coord -- task phase --task "$TASK" --phase review`.
+
+### Recover a run
+
+Use the run's own IDs from its run folder. Never resend a prompt that may have been sent.
+
+```bash
+npm run --silent chatgpt-run -- status --run "$RUN"
+```
+
+- **Not sent yet, but the selection or observation expired:** close the run, then
+  prepare a new one.
+  ```bash
+  npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED
+  ```
+- **Not sure whether it was sent:** mark it, check the ChatGPT conversation, then
+  resolve it with the same receipt flags as `submitted`.
+  ```bash
+  npm run --silent chatgpt-run -- uncertain --run "$RUN" --failure-code SUBMISSION_UNCERTAIN
+  NOW=$(now); npm run --silent chatgpt-run -- recover --run "$RUN" --resolution submitted \
+    --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+    --browser-event-id "chatgpt-recover-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+  # use --resolution not-submitted when the conversation shows no sent prompt
+  ```
+- **A review participant is left behind after a failed run:**
+  `npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"`.
+- **A lock is left by a dead process** (check the recorded PID is gone first):
+  `coord service recover-stale-control`, `coord task recover-stale --task "$TASK"`,
+  `coord workspace recover-stale --workspace WORKSPACE_ID`,
+  `chatgpt-run recover-lock --run "$RUN"`.
+
+Failure codes must be uppercase identifiers. Report what you recovered.
+
+### Clean up local state
+
+```bash
+npm run --silent coord -- gc --dry-run    # read-only plan; explain it
+npm run --silent coord -- gc --apply      # only within the requested scope
+```
+
+Exit 2 or `"complete": false` means a partial cleanup; inspect, never force. GC never
+touches ChatGPT or Claude conversations.
 
 ## Local state maintenance
 

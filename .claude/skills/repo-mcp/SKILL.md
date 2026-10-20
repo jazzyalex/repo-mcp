@@ -133,8 +133,9 @@ Claude's own analysis, Work, Oracle, or a Claude subagent.
 For review use the `repo-mcp-review` skill and `coord review prepare-or-join`.
 Discover the sole safe review task from owner-side repository/catalog status before final
 prompt construction, embed that exact `TASK_ID`, and always prepare with
-`--task TASK_ID`. Zero/multiple/coding/stale or conflicting state requires owner action
-and is never auto-fixed. Omitting `--task` is a separate combined
+`--task TASK_ID`. Zero/multiple/coding or conflicting state requires owner action
+and is never auto-fixed. A binding that is stale only because HEAD moved is refreshed
+with `coord task rebind` (it refuses protected reviewers and coding owners) and reported. Omitting `--task` is a separate combined
 selection+durable-preparation API for callers intentionally delegating task selection; it
 is not discovery and the browser handoff never uses it. Profile `review` is Extra
 High; `review-critical` is explicit super-complex Pro. Compatible Codex/Claude
@@ -160,6 +161,128 @@ When the user asks to clean Repo MCP state, run `coord gc --dry-run` first and e
 the exact plan. Use `coord gc --apply` only within the requested cleanup scope. Treat
 exit 2 or `complete: false` as a partial cleanup that needs inspection; never recover or
 delete a reported lock automatically. GC does not remove ChatGPT or Claude chats.
+
+## Command recipes
+
+Run these literally from the control checkout. Do not re-derive commands from SETUP.md,
+source code or old transcripts, and do not hand them to the user to run.
+
+```bash
+ROOT=$(git rev-parse --show-toplevel)   # run first, inside the user's project
+C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
+now(){ python3 -I -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z"))'; }
+```
+
+### Check health
+
+```bash
+npm run --silent coord -- service status          # expect "local_mcp": "ready"
+npm run --silent connection:status                # expect "state": "ready" (ChatGPT tunnel)
+claude mcp get repo-mcp                           # expect "Connected", http://127.0.0.1:8787/mcp
+python3 scripts/install-agent-skills.py --check   # expect "agent skills are current"
+```
+
+Local health is not route proof. Prove a client route with real tool calls: load the
+`mcp__repo-mcp__*` tools, then call `service_info`, `repository_list`, `workspace_open`
+(repository `repo-mcp-onboarding`, task `repo-mcp-onboarding-smoke`, mode `inspect`, a
+fresh `request_id`), `repo_info`, `read` `README.md`, and `workspace_close` (another
+fresh `request_id`). After any real run, the broker audit log shows each client call:
+`tail -5 "$HOME/Library/Application Support/repo-mcp/state/multirepo-audit.jsonl"` (`"ok": true`).
+
+### Connect a repository
+
+```bash
+npm run --silent coord -- repository resolve --repo "$ROOT"   # "repository": null means not registered
+```
+
+Reuse an existing registration. Only when it is `null`:
+
+```bash
+REPO=$(basename "$ROOT" | tr 'A-Z_ ' 'a-z--' | tr -cd 'a-z0-9.-')
+P="$HOME/Library/Application Support/repo-mcp/policies/$REPO.json"
+cp -n docs/policy-readonly.json "$P"; chmod 600 "$P"   # add this repo's build, dependency and data folders to read.exclude
+npm run --silent coord -- repository add --repository "$REPO" --repo "$ROOT" --policy "$P"
+```
+
+Then bind a task only if the repository has no unfinished task:
+
+```bash
+npm run --silent coord -- task bind --repository "$REPO" --task "$REPO-review-$(date +%Y%m%d)"
+```
+
+`repository add` refuses nested, duplicate or overlapping checkouts and policies inside
+a served checkout. `task bind` refuses a second unfinished task; reuse that task instead.
+
+### Deploy a Repo MCP change
+
+Only when Repo MCP source changed (an upgrade or a fix). Never just to switch repositories.
+
+```bash
+npm ci                      # only when package-lock.json changed
+npm run build
+npm test                    # run in the background; takes about 5 minutes
+```
+
+Time-limited tests (for example "large trees list and page within budget") can fail when
+the machine is busy. Rerun only the failing tests alone with
+`npx tsx --test --test-name-pattern="TEST NAME" test/FILE.test.ts`; any other failure
+blocks the deploy. Before restarting, prove every stored repository policy still compiles:
+
+```bash
+node --input-type=module -e 'import {readdir,readFile} from "node:fs/promises"; import {loadPolicy,compilePolicy} from "./dist/src/policy.js"; const d=process.env.HOME+"/Library/Application Support/repo-mcp/state/policies"; let bad=0; for (const f of (await readdir(d)).filter(f=>f.endsWith(".json"))) { try { compilePolicy(loadPolicy(JSON.parse(await readFile(d+"/"+f,"utf8")).data)); } catch(e) { bad++; console.log("FAIL",f,e.message); } } console.log("policy snapshots failing:",bad)'
+```
+
+Stop if any fail. Otherwise:
+
+```bash
+python3 scripts/install-agent-skills.py --install
+npm run --silent coord -- service start     # reloads launchd; interrupts in-flight calls
+npm run --silent coord -- service status    # new process_pid, "local_mcp": "ready"
+```
+
+Then run the client route proof above. After an MCP schema change, also refresh the
+Repo MCP app's tools in ChatGPT and start a new ChatGPT conversation.
+
+### Recover a run
+
+Use the run's own IDs from its run folder. Never resend a prompt that may have been sent.
+
+```bash
+npm run --silent chatgpt-run -- status --run "$RUN"
+```
+
+- **Not sent yet, but the selection or observation expired:** close the run, then
+  prepare a new one.
+  ```bash
+  npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_OBSERVATION_EXPIRED
+  ```
+- **Not sure whether it was sent:** mark it, check the ChatGPT conversation, then
+  resolve it with the same receipt flags as `submitted`.
+  ```bash
+  npm run --silent chatgpt-run -- uncertain --run "$RUN" --failure-code SUBMISSION_UNCERTAIN
+  NOW=$(now); npm run --silent chatgpt-run -- recover --run "$RUN" --resolution submitted \
+    --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+    --browser-event-id "chatgpt-recover-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+  # use --resolution not-submitted when the conversation shows no sent prompt
+  ```
+- **A review participant is left behind after a failed run:**
+  `npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"`.
+- **A lock is left by a dead process** (check the recorded PID is gone first):
+  `coord service recover-stale-control`, `coord task recover-stale --task "$TASK"`,
+  `coord workspace recover-stale --workspace WORKSPACE_ID`,
+  `chatgpt-run recover-lock --run "$RUN"`.
+
+Failure codes must be uppercase identifiers. Report what you recovered.
+
+### Clean up local state
+
+```bash
+npm run --silent coord -- gc --dry-run    # read-only plan; explain it
+npm run --silent coord -- gc --apply      # only within the requested scope
+```
+
+Exit 2 or `"complete": false` means a partial cleanup; inspect, never force. GC never
+touches ChatGPT or Claude conversations.
 
 ## Handoff and authority
 

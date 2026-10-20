@@ -28,8 +28,10 @@ This bootstrap is local coordinator work, not review evidence.
    register this exact checkout. Do not ask the user to invent an ID.
 4. Discover and record the exact sole safe unfinished review `TASK_ID` from owner-side
    repository/catalog status before final prompt construction. Do not freeze, rebind, or
-   steal an unfinished coding owner. Zero/multiple/coding/stale/conflicting state requires
-   explicit owner action. Omitting `--task` is a separate combined
+   steal an unfinished coding owner. Zero/multiple/coding/conflicting state requires
+   explicit owner action. A binding that is stale only because HEAD moved is
+   refreshed with `coord task rebind` (it refuses protected reviewers and coding owners)
+   and reported. Omitting `--task` is a separate combined
    selection+durable-preparation API for callers intentionally delegating task selection;
    it is not discovery and this browser handoff never uses it.
 5. Choose the review target **before** final prompt construction. Legacy working review

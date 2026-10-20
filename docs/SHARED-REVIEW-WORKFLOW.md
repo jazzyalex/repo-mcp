@@ -39,6 +39,7 @@ construction and then always pass that exact `--task TASK_ID` during preparation
 
 - Discover the current repository's unfinished task authority with owner-side repository/task status before building the prompt. Proceed only when exactly one safe review task is selected.
 - Zero tasks, multiple/conflicting tasks, a coding-phase owner, stale authority, or another protected workflow fails closed without binding, freezing, rebinding, or stealing a task.
+- Exception: when the sole safe review task's binding is stale only because HEAD moved, the coordinator runs `coord task rebind --task TASK_ID` before preparing and reports it. Rebind itself refuses protected participants, active workspaces and unresolved runs.
 - The optional-task CLI form is a combined task-selection **and durable preparation** API for callers that intentionally delegate task selection; it still requires the final prompt, session ID, and workspace request ID. It is not a read-only discovery step and the browser handoff does not use it.
 - Bind a new task only when the operator has established that no unfinished owner is displaced. One registered checkout still has at most one unfinished task.
 - Moving an owned coding task to review is explicit owner lifecycle: first close the coding workspace and durably complete/reconcile the coding run, then request the phase change. Normal phase/rebind/finish operations refuse protected participants, active relevant workspaces/admitted operations, and currently authorized unresolved runs.
