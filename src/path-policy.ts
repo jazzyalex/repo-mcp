@@ -20,8 +20,13 @@ export const MAX_CREATE_DEPTH = 8;
 const NOT_APPROVED = 'Path is not approved for creation.';
 
 const VCS = new Set(['.git', '.hg', '.svn']);
-const SECRET_DIRS = new Set(['.ssh', '.aws', '.gnupg', '.kube', '.docker']);
-const SECRET_FILE = [/^\.env$/, /^\.env\./, /\.(pem|key|p12|pfx|jks|keystore)$/, /^id_(rsa|dsa|ecdsa|ed25519)/, /^\.npmrc$/, /^\.pypirc$/, /^\.netrc$/, /^\.git-credentials$/, /^\.htpasswd$/, /^credentials(\.json)?$/];
+const SECRET_DIRS = new Set(['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azure', '.gcloud', '.terraform.d']);
+const SECRET_FILE = [
+  /^\.env$/, /^\.env\./, /^\.envrc$/, /\.(pem|key|p8|p12|pfx|ppk|jks|keystore|kdbx)$/, /\.keychain(-db)?$/, /^id_(rsa|dsa|ecdsa|ed25519)/,
+  /^\.npmrc$/, /^\.pypirc$/, /^\.netrc$/, /^\.pgpass$/, /^\.s3cfg$/, /^\.boto$/, /^\.vault-token$/, /^\.git-credentials$/, /^\.htpasswd$/,
+  /^credentials(\.json)?$/, /^secrets?\.(ya?ml|json|toml|ini|env|txt|xcconfig|plist)$/, /^service[-_]?account.*\.json$/, /^local\.settings\.json$/,
+  /^kubeconfig(\.ya?ml)?$/, /\.tfstate(\.backup)?$/, /\.tfvars(\.json)?$/
+];
 const TEMP_FILE = /^\.mcp-.*\.tmp$/;
 const EXAMPLE_SUFFIX = /\.(example|sample|template|tmpl|dist)$/;
 

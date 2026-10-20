@@ -107,7 +107,7 @@ test('readable untracked bytes are content-bound', async t => {
   assert.notEqual(second.fingerprint, first.fingerprint);
 });
 
-test('readable ignored untracked files remain content-bound', async t => {
+test('ignored untracked files are not readable evidence and do not move the fingerprint', async t => {
   const m = await makeRepo(t, { '.gitignore': 'ignored.txt\n', 'src/tracked.txt': 'tracked\n' });
   await writeFile(path.join(m.root, 'ignored.txt'), 'ignored one\n');
   assert.equal((await git(m.root, 'status', '--short', '--', 'ignored.txt')).trim(), '');
@@ -115,7 +115,13 @@ test('readable ignored untracked files remain content-bound', async t => {
   const first = await target(m.root);
   await writeFile(path.join(m.root, 'ignored.txt'), 'ignored two\n');
   const second = await target(m.root);
-  assert.notEqual(second.fingerprint, first.fingerprint);
+  assert.equal(second.fingerprint, first.fingerprint, 'discovery hides ignored untracked files, so they are outside the target');
+  // Un-ignoring the file makes it readable evidence again, and its bytes are then bound.
+  await writeFile(path.join(m.root, '.gitignore'), '\n');
+  const exposed = await target(m.root);
+  assert.notEqual(exposed.fingerprint, second.fingerprint);
+  await writeFile(path.join(m.root, 'ignored.txt'), 'ignored three\n');
+  assert.notEqual((await target(m.root)).fingerprint, exposed.fingerprint);
 });
 
 test('branch, HEAD and executable-mode identity change the fingerprint', async t => {

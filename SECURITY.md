@@ -54,6 +54,10 @@ The normative multi-repository requirements are in
   not make hostile filesystem races impossible.
 - Existing denials for VCS metadata, secret names, traversal, symlinks, hard links,
   special files, unsafe names and server-owned paths remain mandatory.
+- Glob discovery hides untracked files that Git ignores, because local secrets,
+  state and build output usually live there. The secret-name denylist covers common
+  credential and infrastructure-state names. Neither is a complete secret scanner:
+  exclude other private paths in the repository policy.
 - Approved tests execute code. The Node/Python fixture runners apply documented
   restrictions, but neither should be described as a complete hostile-code sandbox.
   Real project checks remain trusted local execution outside MCP.

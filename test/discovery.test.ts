@@ -85,7 +85,7 @@ test('links, special files, oversize files and unsafe names are skipped and coun
   const repo = await openGlob(t, m.root, policyDoc(), { limits: { edit_file_bytes: 1024 } }, m.track);
   const { paths, last } = await listAll(repo);
   for (const hidden of ['sym.txt', 'symdir/secret.txt', 'linked.txt', 'big.txt', 'weird\u0001name.txt', `${deep}/f.txt`]) assert.ok(!paths.includes(hidden), hidden);
-  assert.deepEqual(last.inventory.skipped, { symlinks: 2, special: 0, linked: 1, too_large: 1, unsafe_name: 1, too_long: 1, other_device: 0 });
+  assert.deepEqual(last.inventory.skipped, { symlinks: 2, special: 0, linked: 1, too_large: 1, unsafe_name: 1, too_long: 1, other_device: 0, git_ignored: 0 });
   await assert.rejects(repo.read('linked.txt'), /not exposed/);
   await assert.rejects(repo.read('big.txt'), /not exposed/);
 });
@@ -204,4 +204,33 @@ test('a reviewed secret_exceptions entry exposes a conventional example file and
   for (const hidden of ['.env', '.env.local', 'config/.env.sample']) assert.ok(!paths.includes(hidden), hidden);
   assert.equal((await repo.readRange('.env.example')).content, 'API_KEY=changeme\n');
   await assert.rejects(repo.read('.env'), /not exposed/);
+});
+
+test('untracked git-ignored files are hidden from list, read and search; tracked ones stay visible', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'config/local.yml\ntmp/\n*.tfout\nforced.tfout\n', 'config/app.yml': 'app: needle\n' }, {
+    'config/local.yml': 'db_password: needle\n', 'tmp/cache/state.json': '{"needle":1}\n', 'deep/run.tfout': 'needle\n', 'notes.txt': 'needle\n'
+  });
+  await writeFile(path.join(m.root, 'forced.tfout'), 'needle tracked\n');
+  await git(m.root, 'add', '-f', 'forced.tfout');
+  await git(m.root, 'commit', '-m', 'force-track an ignored name');
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {}, m.track);
+  const { paths, last } = await listAll(repo);
+  for (const hidden of ['config/local.yml', 'tmp/cache/state.json', 'deep/run.tfout']) assert.ok(!paths.includes(hidden), hidden);
+  for (const shown of ['config/app.yml', 'notes.txt', 'forced.tfout', '.gitignore']) assert.ok(paths.includes(shown), shown);
+  assert.equal(last.inventory.skipped.git_ignored, 3, 'ignored files and directories are counted');
+  for (const hidden of ['config/local.yml', 'tmp/cache/state.json', 'deep/run.tfout']) await assert.rejects(repo.read(hidden), /not exposed/, hidden);
+  const found = (await repo.search('needle')).matches.map(x => x.path);
+  assert.deepEqual(byteSort([...new Set(found)]), byteSort(['config/app.yml', 'forced.tfout', 'notes.txt']));
+});
+
+test('a .gitignore change without a directory change takes effect on the next call', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'tmp/\n' }, { 'config/secret-ish.yml': 'token: x\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {}, m.track);
+  assert.ok((await listAll(repo)).paths.includes('config/secret-ish.yml'));
+  // Rewriting the same inode does not move any directory's metadata.
+  await writeFile(path.join(m.root, '.gitignore'), 'tmp/\nconfig/secret-ish.yml\n');
+  assert.ok(!(await listAll(repo)).paths.includes('config/secret-ish.yml'), 'newly ignored file is hidden');
+  await assert.rejects(repo.read('config/secret-ish.yml'), /not exposed/);
+  await writeFile(path.join(m.root, '.gitignore'), 'tmp/\n');
+  assert.ok((await listAll(repo)).paths.includes('config/secret-ish.yml'), 'un-ignoring restores it');
 });

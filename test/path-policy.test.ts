@@ -174,3 +174,15 @@ test('policy documents: secret_exceptions is optional and does not change existi
   assert.notEqual(policyDigest(withException), policyDigest(loadPolicy(base)));
   assert.doesNotThrow(() => compilePolicy(withException));
 });
+
+test('common credential and infrastructure-state file names are denied by default', () => {
+  const p = policy({ dotfiles: ['**'] });
+  for (const file of ['terraform.tfstate', 'infra/terraform.tfstate.backup', 'env/prod.tfvars', 'env/prod.tfvars.json', 'config/secrets.yml', 'config/secret.json',
+    'deploy/service-account.json', 'gcp/service_account-prod.json', '.envrc', 'keys/AuthKey_ABC123.p8', 'win/key.ppk', 'local.settings.json', 'kubeconfig',
+    'ops/kubeconfig.yaml', 'login.keychain-db', 'vault.kdbx', '.pgpass', '.s3cfg', '.boto', '.vault-token', '.azure/config', '.gcloud/creds', '.terraform.d/credentials.tfrc.json']) {
+    assert.equal(allowed(p, file), false, file);
+  }
+  for (const file of ['src/secrets.ts', 'src/SecretField.swift', 'docs/secrets.md', 'docs/service-account.md', 'src/kubeconfig.ts', 'terraform/main.tf', 'src/keychain.ts']) {
+    assert.equal(allowed(p, file), true, file);
+  }
+});
