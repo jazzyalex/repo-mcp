@@ -131,8 +131,9 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    coding owner is protected; then stop and report that blocker. Mention the rebind in
    the report.
 3. **Prepare the browser before the run.** Open a normal ChatGPT **Chat** tab (not Work,
-   not Temporary Chat), choose the required effort (`Extra High` for `review`, `Pro`
-   for `review-critical`) and attach Repo MCP through the tool picker. Check it in the
+   not Temporary Chat), check that the picker offers the required effort (`Extra High`
+   for `review`, `Pro` for `review-critical`; you select it after preparing) and attach
+   Repo MCP through the tool picker. Check it in the
    page:
    ```js
    ({chip:[...document.querySelectorAll('button,span,div')].some(e=>e.childElementCount===0&&e.innerText?.trim()==='Repo MCP'),
@@ -155,16 +156,19 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    Check that both task IDs equal `$TASK`, the resolved base equals `$BASE`, and
    `participant.commit_binding` equals `run.commit_binding`. Stop on any mismatch.
 6. **Paste the prompt** into the composer. Do not send yet.
-7. **Observe and reserve in ONE command**, right after reading the effort label (the
-   observation must be under 10 seconds old):
+7. **Select the effort, then observe and reserve.** After preparing, run `SELAT=$(now)`,
+   then open the model picker and click the required effort, even if it already shows
+   it. The selection must happen after preparation, and `--selected-at` must record
+   that click. Read the label, then within 10 seconds run this one command:
    ```bash
-   NOW=$(now); npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "Extra High" --selected-at "$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/evidence.json" \
+   npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
+     --control-label "Extra High" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
    && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
      --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
    ```
-   If the label check fails or the observation is "too old", read the label again and
-   repeat this one command. Send only when it prints `True`.
+   If the label check fails or the observation is "too old", select the effort again
+   (new `SELAT`) and repeat this one command. If the 2-minute selection window has
+   expired, use `chatgpt-run fail-pre-submit` and prepare a new run. Send only when it prints `True`.
 8. **Send once**, then record the submission with the conversation ID from the URL:
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
@@ -176,11 +180,15 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    ```bash
    for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
    ```
-10. **Wait for the answer.** Check the page every 60 seconds; do not use long blind
-    sleeps. The answer is finished when there is no Stop button:
+10. **Wait for the answer, not for the workspace.** ChatGPT often closes the Repo MCP
+    workspace minutes before it finishes writing, so a closed workspace or a quiet audit
+    log does not mean the answer is ready. Every 30–60 seconds run this instant page
+    check. Never wait inside the page: background tabs slow page timers, and the browser
+    call fails after 45 seconds. Wait between checks outside the page (Claude Code: a
+    `sleep 45` command with `run_in_background`; Codex: a short wait). The answer is done
+    when `busy` is false and `tail` ends with the verdict or the end of the report:
     ```js
-    ({busy:!!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'),
-      tail:([...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.innerText||'').slice(-200)})
+    ({busy:!!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), tail:document.body.innerText.slice(-200)})
     ```
 11. **Capture the answer** from the page into `$R/output.md`: back up the clipboard
    (`LANG=en_US.UTF-8 pbpaste > "$R/clip.bak"`), click the Copy button under the last

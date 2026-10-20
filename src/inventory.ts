@@ -30,41 +30,55 @@ const byteOrder = (a: string, b: string) => Buffer.compare(Buffer.from(a), Buffe
 const abs = (root: string, rel: string) => rel ? path.join(root, rel) : root;
 
 /**
- * Untracked paths that Git ignores (repository .gitignore files and .git/info/exclude; global excludes are off in
- * the inspection environment). They are hidden from discovery: ignored files are where local secrets, state and
- * build output usually live. Tracked files are never listed here, so a force-added ignored file stays visible.
- * A directory entry (trailing slash) means everything under it is ignored and untracked.
+ * Untracked paths that Git ignores (repository .gitignore files, .git/info/exclude and a repository-local
+ * core.excludesFile; global and system config are off in the inspection environment). They are hidden from
+ * discovery: ignored files are where local secrets, state and build output usually live. Tracked files are never
+ * listed here, so a force-added ignored file stays visible. A directory entry (trailing slash) means everything
+ * under it is ignored and untracked.
  */
-type Ignored = { files: Set<string>; dirs: Set<string>; sources: string[] };
+type Ignored = { files: Set<string>; dirs: Set<string>; listing: string };
 const IGNORE_FAILED = () => new SafeError('Discovery: unable to list Git-ignored files; check that the checkout is a readable Git repository.');
-async function gitIgnored(ctx: WalkContext): Promise<Ignored> {
-  const git = async (args: string[]) => {
-    ctx.deadline.check(ctx.expired);
-    const result = await runGit(ctx.root, args, { timeout: ctx.deadline.timeout() });
-    ctx.deadline.check(ctx.expired);
-    if (result.exit_code !== 0 || result.timed_out || result.truncated) throw IGNORE_FAILED();
-    return result.stdout;
-  };
-  // The index decides what is untracked; info/exclude adds rules. Both live in the Git directory, not the tree.
-  const sources = (await git(['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude'])).split('\n').filter(Boolean).map(p => path.resolve(ctx.root, p));
-  if (sources.length !== 2) throw IGNORE_FAILED();
-  const files = new Set<string>(), dirs = new Set<string>();
-  for (const name of (await git(['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])).split('\0')) {
-    if (name) (name.endsWith('/') ? dirs : files).add(name.endsWith('/') ? name.slice(0, -1) : name);
-  }
-  return { files, dirs, sources };
+const IGNORE_UNSTABLE = () => new SafeError('Discovery: Git ignore rules kept changing while files were listed; retry when .gitignore and Git config are stable.');
+const IGNORE_ATTEMPTS = 3;
+async function gitText(ctx: WalkContext, args: string[], allowMissing = false) {
+  ctx.deadline.check(ctx.expired);
+  const result = await runGit(ctx.root, args, { timeout: ctx.deadline.timeout() });
+  ctx.deadline.check(ctx.expired);
+  if (allowMissing && result.exit_code === 1 && !result.stdout) return '';
+  if (result.exit_code !== 0 || result.timed_out || result.truncated) throw IGNORE_FAILED();
+  return result.stdout;
 }
-/** What the ignored set depends on besides directory membership: the index, info/exclude and each walked .gitignore. */
-type IgnoreSource = { path: string; fp: string };
+async function gitIgnored(ctx: WalkContext): Promise<Ignored> {
+  const listing = await gitText(ctx, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory']);
+  const files = new Set<string>(), dirs = new Set<string>();
+  for (const name of listing.split('\0')) if (name) (name.endsWith('/') ? dirs : files).add(name.endsWith('/') ? name.slice(0, -1) : name);
+  return { files, dirs, listing };
+}
 /**
- * A source changed at or after `racyAfter` (taken before Git listed ignored paths) may be newer than that listing;
- * it gets a fingerprint that never matches, so the next refresh walks again (the same idea as Git's racy index).
+ * Files outside the walked tree that decide what Git ignores: the index (what is untracked), info/exclude, every
+ * repository-local config file (including include.path targets, and config/config.worktree even before they exist)
+ * and the file a local core.excludesFile names.
  */
-const sourceFingerprint = async (file: string, racyAfter?: bigint) => {
+async function ignoreConfigSources(ctx: WalkContext) {
+  const paths = (await gitText(ctx, ['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude', '--git-path', 'config', '--git-path', 'config.worktree']))
+    .split('\n').filter(Boolean).map(p => path.resolve(ctx.root, p));
+  if (paths.length !== 4) throw IGNORE_FAILED();
+  // `-z` output alternates `file:ORIGIN` and key names, NUL-separated; keys never start with `file:`.
+  for (const token of (await gitText(ctx, ['config', '--list', '--show-origin', '--name-only', '-z'], true)).split('\0')) {
+    if (token.startsWith('file:')) paths.push(path.resolve(ctx.root, token.slice(5)));
+  }
+  const excludes = (await gitText(ctx, ['config', '--path', '--get', 'core.excludesFile'], true)).trim();
+  if (excludes) paths.push(path.resolve(ctx.root, excludes));
+  return [...new Set(paths)];
+}
+/** What the ignored set depends on besides directory membership: config sources and each walked .gitignore. */
+type IgnoreSource = { path: string; fp: string };
+const sourceFingerprint = async (file: string) => {
   const stat = await lstat(file, { bigint: true }).catch(() => undefined);
-  if (!stat) return 'missing';
-  return racyAfter !== undefined && (stat.mtimeNs >= racyAfter || stat.ctimeNs >= racyAfter) ? 'racy' : fingerprint(stat);
+  return stat ? fingerprint(stat) : 'missing';
 };
+const fingerprintAll = async (files: string[]) => Promise.all(files.map(async file => ({ path: file, fp: await sourceFingerprint(file) })));
+const sameSources = (a: IgnoreSource[], b: IgnoreSource[]) => a.length === b.length && a.every((x, i) => x.path === b[i].path && x.fp === b[i].fp);
 
 export class Inventory {
   readonly index = new Map<string, Entry>();
@@ -77,6 +91,7 @@ export class Inventory {
   static of(entries: Entry[], dirs: Dir[], skipped: Skipped, salt: string, ignoreSources?: IgnoreSource[]) {
     return new Inventory([...entries].sort((a, b) => byteOrder(a.path, b.path)), dirs, skipped, salt, ignoreSources);
   }
+  withIgnoreSources(sources: IgnoreSource[]) { return new Inventory(this.entries, this.dirs, this.skipped, this.salt, sources); }
   private rehash() {
     this.digest = sha256([this.salt, ...this.entries.map(e => `${e.path}\0${e.fp}`), '--', ...this.dirs.map(d => `${d.path}\0${d.fp}`)].join('\n'));
   }
@@ -101,7 +116,8 @@ export class Inventory {
    * Bring the inventory up to date for a new call. Membership changes show in directory metadata (one
    * lstat per directory) and trigger a re-walk. In-place edits do not touch the directory, so every entry
    * is also re-lstatted and updated; anything that no longer qualifies triggers a re-walk. An edited .gitignore,
-   * info/exclude or index moves no tree directory either, so a change to any of them triggers a re-walk too.
+   * Git config, excludes file or index moves no tree directory either, so a change to any of them triggers a
+   * re-walk too.
    */
   async refresh(ctx: WalkContext): Promise<Inventory> {
     for (const source of this.ignoreSources) {
@@ -132,14 +148,30 @@ export class Inventory {
 
 const limitError = (what: string) => new SafeError(`Discovery limit: ${what}. Add excludes or narrow read.include so fewer paths are visited.`);
 
-/** Walk the repository from its root under the policy. Never returns a partial inventory. */
+/**
+ * Walk the repository from its root under the policy. Never returns a partial inventory.
+ *
+ * The ignored-path listing and its sources must form one consistent snapshot: the walk uses a first listing, then
+ * every source is fingerprinted, Git lists again, and the sources are fingerprinted again. Only when both listings
+ * and both fingerprint sets agree did the second listing see exactly the recorded sources, and the walk filtered
+ * with that same listing. Otherwise the walk is retried, and it fails closed after a few unstable attempts.
+ */
 export async function walk(ctx: WalkContext): Promise<Inventory> {
+  for (let attempt = 0; attempt < IGNORE_ATTEMPTS; attempt++) {
+    const ignored = await gitIgnored(ctx);
+    const { inventory, gitignores } = await walkOnce(ctx, ignored);
+    const files = [...await ignoreConfigSources(ctx), ...gitignores];
+    const before = await fingerprintAll(files);
+    const again = await gitIgnored(ctx);
+    const after = await fingerprintAll(files);
+    if (again.listing === ignored.listing && sameSources(before, after)) return inventory.withIgnoreSources(after);
+  }
+  throw IGNORE_UNSTABLE();
+}
+
+async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory: Inventory; gitignores: string[] }> {
   const { root, policy } = ctx;
-  // One second of slack covers coarse filesystem timestamps.
-  const racyAfter = BigInt(Date.now() - 1000) * 1_000_000n;
-  const ignored = await gitIgnored(ctx);
-  const sources: IgnoreSource[] = [];
-  for (const file of ignored.sources) sources.push({ path: file, fp: await sourceFingerprint(file, racyAfter) });
+  const gitignores: string[] = [];
   const entries: Entry[] = [], dirs: Dir[] = [], skipped = emptySkipped();
   const visitedCap = 4 * ctx.inventoryPaths;
   let visited = 0;
@@ -164,7 +196,7 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     if (!names || !before) continue;
     dirs.push({ path: rel, fp: dirFingerprint(before) });
     names.sort(byteOrder);
-    if (names.includes('.gitignore')) sources.push({ path: path.join(dir, '.gitignore'), fp: await sourceFingerprint(path.join(dir, '.gitignore'), racyAfter) });
+    if (names.includes('.gitignore')) gitignores.push(path.join(dir, '.gitignore'));
     for (const name of names) {
       if (++visited > visitedCap) throw limitError(`visited more than ${visitedCap} directory entries (4 x inventory_paths)`);
       if (visited % 256 === 0) ctx.deadline.check(ctx.expired);
@@ -191,5 +223,5 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
       if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
     }
   }
-  return Inventory.of(entries, dirs, skipped, policy.digest, sources);
+  return { inventory: Inventory.of(entries, dirs, skipped, policy.digest), gitignores };
 }

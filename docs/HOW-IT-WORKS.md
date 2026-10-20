@@ -107,11 +107,15 @@ project:
 Some protections apply under every policy: `.git` and VCS metadata, secret-like file
 names, Repo MCP state, path traversal, symlinks and hard links.
 
-Discovery also hides untracked files that Git ignores (the repository's `.gitignore`
-files and `.git/info/exclude`). Repo MCP asks Git for this list on every call, so an
-edited `.gitignore` takes effect at once. A tracked file stays visible even when it
-matches an ignore rule. Policies made of exact file paths are not filtered: the operator
-named each file.
+Discovery also hides untracked files that Git ignores: the repository's `.gitignore`
+files, `.git/info/exclude` and a repository-local `core.excludesFile`. Your global Git
+excludes are not applied. Repo MCP asks Git for this list when it walks the tree and
+checks it twice, so the list and the rule files it came from always match. On later calls
+it re-walks as soon as a `.gitignore`, the Git config, the excludes file or the index
+changes, so an edit takes effect on the next call. A tracked file stays visible even when
+it matches an ignore rule. Two cases are not filtered: policies made of exact file paths
+(the operator named each file) and commit-pinned reads and diffs, which show committed
+content only.
 
 ## Reviews
 

@@ -251,8 +251,9 @@ test('Claude can prepare coding work and uncertain runs cannot be resubmitted', 
   const coding = await fixture(t, 'coding');
   const claudeCode = await prepareChatGptRun({
     stateDir: coding.stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'claude', workKind: 'code',
-    surface: 'work', conversationId: 'conversation-1', prompt: 'Code.', now: NOW
+    surface: 'chat', conversationId: 'conversation-1', prompt: 'Code.', now: NOW
   });
+  assert.equal(claudeCode.execution_surface, 'ChatGPT web');
   assert.equal(claudeCode.coordinator, 'claude');
   assert.equal(claudeCode.work_kind, 'code');
   assert.equal((await chatGptRunStatus(claudeCode.run_id, coding.stateDir)).state, 'prepared', 'a stored Claude coding run is valid');

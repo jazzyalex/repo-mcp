@@ -24,7 +24,7 @@ const SECRET_DIRS = new Set(['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azu
 const SECRET_FILE = [
   /^\.env$/, /^\.env\./, /^\.envrc$/, /\.(pem|key|p8|p12|pfx|ppk|jks|keystore|kdbx)$/, /\.keychain(-db)?$/, /^id_(rsa|dsa|ecdsa|ed25519)/,
   /^\.npmrc$/, /^\.pypirc$/, /^\.netrc$/, /^\.pgpass$/, /^\.s3cfg$/, /^\.boto$/, /^\.vault-token$/, /^\.git-credentials$/, /^\.htpasswd$/,
-  /^credentials(\.json)?$/, /^secrets?\.(ya?ml|json|toml|ini|env|txt|xcconfig|plist)$/, /^service[-_]?account.*\.json$/, /^local\.settings\.json$/,
+  /^credentials(\.json)?$/, /^secrets?\.(ya?ml|json|toml|ini|env|txt|xcconfig|plist)$/, /^service[-_]?account(?!.*\.(?:schema|fixture|mock)\.json$).*\.json$/, /^local\.settings\.json$/,
   /^kubeconfig(\.ya?ml)?$/, /\.tfstate(\.backup)?$/, /\.tfvars(\.json)?$/
 ];
 const TEMP_FILE = /^\.mcp-.*\.tmp$/;

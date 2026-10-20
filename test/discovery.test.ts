@@ -234,3 +234,34 @@ test('a .gitignore change without a directory change takes effect on the next ca
   await writeFile(path.join(m.root, '.gitignore'), 'tmp/\n');
   assert.ok((await listAll(repo)).paths.includes('config/secret-ish.yml'), 'un-ignoring restores it');
 });
+
+test('a repository-local core.excludesFile and its target file are ignore sources', async t => {
+  const m = await makeRepo(t, {}, { 'notes/local.txt': 'private\n', 'notes/other.txt': 'other\n' });
+  const excludes = path.join(m.base, 'extra-excludes');
+  await writeFile(excludes, '\n');
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+  assert.ok((await listAll(repo)).paths.includes('notes/local.txt'));
+  // Pointing core.excludesFile at a file changes only .git/config, never a walked directory.
+  await writeFile(excludes, 'notes/local.txt\n');
+  await git(m.root, 'config', 'core.excludesFile', excludes);
+  assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'config change applies on the next call');
+  await assert.rejects(repo.read('notes/local.txt'), /not exposed/);
+  // Editing the external excludes file is tracked too.
+  await writeFile(excludes, 'notes/local.txt\nnotes/other.txt\n');
+  const after = (await listAll(repo)).paths;
+  assert.ok(!after.includes('notes/other.txt'), 'external excludes file edit applies on the next call');
+});
+
+test('a .gitignore edited while discovery runs never yields a stale first answer', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'tmp/\n' }, { 'config/late.yml': 'token: x\n' });
+  let edited = false;
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'] }), {
+    pathHook: async (stage, ctx) => {
+      // After Git has listed ignored paths for the first walk, the rules change in place.
+      if (stage === 'walk:enter' && ctx.path === '' && !edited) { edited = true; await writeFile(path.join(m.root, '.gitignore'), 'tmp/\nconfig/late.yml\n'); }
+    }
+  }, m.track);
+  const first = (await listAll(repo)).paths;
+  assert.ok(edited);
+  assert.ok(!first.includes('config/late.yml'), 'the first answer already reflects the edited rules');
+});

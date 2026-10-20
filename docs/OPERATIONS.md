@@ -375,10 +375,10 @@ subagents and Claude-native review are not silent fallbacks. If Chat surface, mo
 evidence, the Repo MCP chip, repository identity, required bounded evidence, or completion
 cannot be verified, the result is `NOT TESTABLE`.
 
-Claude supports Repo MCP review and architecture as a coordinator: it uses its own
-host-native browser controls to make ChatGPT web perform the Extra High/Pro work
-through Repo MCP. Claude does not perform the semantic Repo MCP review itself.
-Coding/write access is coordinated only through the Codex operator path.
+Claude supports Repo MCP coding, review and architecture as a coordinator: it uses its
+own host-native browser controls to make ChatGPT web perform the work through Repo MCP.
+Claude does not perform the semantic Repo MCP work itself. Coding uses the same
+single-use write grant and `code` workspace for both coordinators.
 
 New `chatgpt-run prepare` authorizations default to Chat when `--surface` is omitted:
 code -> High, code-hard/review -> Extra High, and review-critical/architecture -> Pro.

@@ -182,7 +182,8 @@ test('common credential and infrastructure-state file names are denied by defaul
     'ops/kubeconfig.yaml', 'login.keychain-db', 'vault.kdbx', '.pgpass', '.s3cfg', '.boto', '.vault-token', '.azure/config', '.gcloud/creds', '.terraform.d/credentials.tfrc.json']) {
     assert.equal(allowed(p, file), false, file);
   }
-  for (const file of ['src/secrets.ts', 'src/SecretField.swift', 'docs/secrets.md', 'docs/service-account.md', 'src/kubeconfig.ts', 'terraform/main.tf', 'src/keychain.ts']) {
+  for (const file of ['src/secrets.ts', 'src/SecretField.swift', 'docs/secrets.md', 'docs/service-account.md', 'src/kubeconfig.ts', 'terraform/main.tf', 'src/keychain.ts',
+    'schemas/service-account.schema.json', 'test/service_account.fixture.json', 'test/serviceaccount-prod.mock.json']) {
     assert.equal(allowed(p, file), true, file);
   }
 });

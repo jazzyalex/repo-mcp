@@ -317,8 +317,9 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    coding owner is protected; then stop and report that blocker. Mention the rebind in
    the report.
 3. **Prepare the browser before the run.** Open a normal ChatGPT **Chat** tab (not Work,
-   not Temporary Chat), choose the required effort (`Extra High` for `review`, `Pro`
-   for `review-critical`) and attach Repo MCP through the tool picker. Check it in the
+   not Temporary Chat), check that the picker offers the required effort (`Extra High`
+   for `review`, `Pro` for `review-critical`; you select it after preparing) and attach
+   Repo MCP through the tool picker. Check it in the
    page:
    ```js
    ({chip:[...document.querySelectorAll('button,span,div')].some(e=>e.childElementCount===0&&e.innerText?.trim()==='Repo MCP'),
@@ -341,16 +342,19 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    Check that both task IDs equal `$TASK`, the resolved base equals `$BASE`, and
    `participant.commit_binding` equals `run.commit_binding`. Stop on any mismatch.
 6. **Paste the prompt** into the composer. Do not send yet.
-7. **Observe and reserve in ONE command**, right after reading the effort label (the
-   observation must be under 10 seconds old):
+7. **Select the effort, then observe and reserve.** After preparing, run `SELAT=$(now)`,
+   then open the model picker and click the required effort, even if it already shows
+   it. The selection must happen after preparation, and `--selected-at` must record
+   that click. Read the label, then within 10 seconds run this one command:
    ```bash
-   NOW=$(now); npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "Extra High" --selected-at "$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/evidence.json" \
+   npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
+     --control-label "Extra High" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
    && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
      --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
    ```
-   If the label check fails or the observation is "too old", read the label again and
-   repeat this one command. Send only when it prints `True`.
+   If the label check fails or the observation is "too old", select the effort again
+   (new `SELAT`) and repeat this one command. If the 2-minute selection window has
+   expired, use `chatgpt-run fail-pre-submit` and prepare a new run. Send only when it prints `True`.
 8. **Send once**, then record the submission with the conversation ID from the URL:
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
@@ -362,16 +366,21 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    ```bash
    for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
    ```
-10. **Wait for the answer.** Check the page every 60 seconds; do not use long blind
-    sleeps. The answer is finished when there is no Stop button:
+10. **Wait for the answer, not for the workspace.** ChatGPT often closes the Repo MCP
+    workspace minutes before it finishes writing, so a closed workspace or a quiet audit
+    log does not mean the answer is ready. Every 30–60 seconds run this instant page
+    check. Never wait inside the page: background tabs slow page timers, and the browser
+    call fails after 45 seconds. Wait between checks outside the page (Claude Code: a
+    `sleep 45` command with `run_in_background`; Codex: a short wait). The answer is done
+    when `busy` is false and `tail` ends with the verdict or the end of the report:
     ```js
-    ({busy:!!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'),
-      tail:([...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.innerText||'').slice(-200)})
+    ({busy:!!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), tail:document.body.innerText.slice(-200)})
     ```
 11. **Capture the answer** from the page into `$R/output.md`: read the last assistant
    message in the page (`[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1).innerText`)
    and write that exact text to the file through the browser runtime's file access. If
-   the text comes back truncated, use the Copy button and `pbpaste` instead.
+   that selector finds nothing (the page layout changes) or the text comes back
+   truncated, use the Copy button under the last answer and `pbpaste` instead.
 12. **Complete and close:**
     ```bash
     H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
@@ -475,8 +484,8 @@ npm run --silent coord -- task status --task "$TASK"            # phase must be 
 npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if it is in review; refuses protected reviewers
 ```
 
-1. Prepare the browser first: normal ChatGPT **Chat** tab, effort **High** (profile
-   `code`) or **Extra High** (`code-hard`), Repo MCP attached.
+1. Prepare the browser first: normal ChatGPT **Chat** tab, Repo MCP attached, and
+   **High** (profile `code`) or **Extra High** (`code-hard`) available in the picker.
 2. Issue the grant right before preparing; it is single-use and expires in 10 minutes:
    ```bash
    npm run --silent coord -- workspace grant --task "$TASK" > "$R/grant.json"; GRANT=$(jget "$R/grant.json" write_grant)
@@ -484,15 +493,16 @@ npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if i
 3. Write `$R/prompt.txt` with repository ID, task ID, `code` mode, `write_grant` `$GRANT`,
    a fresh `workspace_open` request ID, the expected HEAD and the coding instructions.
    The grant goes only into this prompt; never into files in a repository or logs.
-4. Prepare, observe and reserve, send, record the send:
+4. Prepare; then run `SELAT=$(now)` and click the required effort in the picker (after
+   preparation); then observe and reserve within 10 seconds, send, record the send:
    ```bash
    npm run --silent chatgpt-run -- prepare --repository "$REPO" --task "$TASK" --coordinator codex \
      --kind code --profile code --surface chat --session-id "$SID" --prompt-file "$R/prompt.txt" \
      --base-ref "$(git -C "$ROOT" rev-parse HEAD)" > "$R/run.json"
    RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
    PSHA=$(jget "$R/run.json" prompt_sha256); BASE=$(jget "$R/run.json" resolved_base_commit)
-   NOW=$(now); npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "High" --selected-at "$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/evidence.json" \
+   npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
+     --control-label "High" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
    && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
      --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
    # send once only after "True", then:
@@ -501,7 +511,8 @@ npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if i
      --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
    ```
-5. Wait (page check every 60 seconds), capture the answer to `$R/output.md` as in the
+5. Wait for the answer, not the workspace (instant page check every 30–60 seconds, as
+   in the review recipe), capture the answer to `$R/output.md` as in the
    review recipe, then complete:
    ```bash
    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)

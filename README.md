@@ -184,8 +184,9 @@ Repo MCP reduces accidental scope expansion. It is **not** a sandbox for hostile
 - Path checks block traversal, symlinks, hard links, VCS metadata, server state and
   common secret file names: `.env*`, private keys, `secrets.yml`, service-account JSON,
   `*.tfstate`, `*.tfvars`, kubeconfig and similar.
-- Untracked files that Git ignores are hidden from listing, reading and search. Local
-  config, state and build output usually live there. Tracked files stay visible even if
+- Untracked files that Git ignores (`.gitignore`, `.git/info/exclude`, a repository-local
+  `core.excludesFile`; not your global excludes) are hidden from listing, reading and
+  search. Local config, state and build output usually live there. Tracked files stay visible even if
   they match `.gitignore`. The filename denylist is still a safety net, not a guarantee:
   add anything else private to `read.exclude`.
 - Read access is not authenticated per user. Any client that can reach the endpoint
