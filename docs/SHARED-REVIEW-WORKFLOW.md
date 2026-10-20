@@ -50,17 +50,22 @@ Compatible reviewers share the same task/generation/target while keeping distinc
 
 For ChatGPT web Chat:
 
-- `code` -> Sol High
-- `code-hard` -> Sol Extra High
-- `review` -> Sol Extra High
-- `review-critical` -> Sol Pro only for explicitly super-complex/critical Pro review
-- `architecture` -> Sol Pro
+- `code` -> High
+- `code-hard` -> Extra High
+- `review` -> Extra High
+- `review-critical` -> Pro only for explicitly super-complex/critical review
+- `architecture` -> Pro
+- `architecture-current-pro` -> Pro (compatibility alias)
+
+Omitting `--profile` for architecture selects `architecture`.
 
 Planning and brainstorming are user intentions mapped to the implemented
 `--kind architecture --profile architecture --surface chat` route; they do not have
 separate executable work kinds or profiles.
 
-Chat model evidence accepts bare Sol/Sol Pro and supported dynamic numeric `GPT-VERSION Sol` / `GPT-VERSION Sol Pro` labels. Never silently downgrade.
+Authorization uses only the exact visible effort control. The model label is optional,
+sanitized evidence; it can change from GPT-5.6 to GPT-6 or a future label without
+changing authorization. Never silently downgrade the required effort.
 
 Review sharing accepts only `review` or `review-critical` on Chat. Architecture,
 planning, and brainstorming intentions use the generic
@@ -131,9 +136,8 @@ npm run --silent chatgpt-run -- observe --selection-id SELECTION_ID --surface ch
 ```
 
 The example is the default `review` profile. For `review-critical`, record the live
-`Pro` / `Sol Pro` evidence instead. Supported dynamic numeric Chat labels such as
-`5.6 Extra High` and `GPT-5.6 Sol` are recorded exactly and must match when both
-picker and effort controls carry a version.
+`Pro` effort instead. If a visible model label exists, record it as informational
+evidence. It is not an authorization input and may be omitted.
 
 Persist the returned sanitized evidence. Immediately before the one browser submission:
 
@@ -240,7 +244,7 @@ After review is cleared, moving back to coding requires a fresh write grant and 
 
 All three intentions use the implemented
 `chatgpt-run prepare --kind architecture --profile architecture --surface chat` path,
-not shared-review prepare-or-join. Use an `inspect` workspace, Sol Pro, no write grant,
+not shared-review prepare-or-join. Use an `inspect` workspace, `Pro` control, no write grant,
 and no unsolicited phase freeze. There are no separate executable `plan` or
 `brainstorm` work kinds/profiles. The coordinator still records
 observe/reserve/submitted/complete evidence and recovers the same conversation after

@@ -136,8 +136,8 @@ prompt construction, embed that exact `TASK_ID`, and always prepare with
 `--task TASK_ID`. Zero/multiple/coding/stale or conflicting state requires owner action
 and is never auto-fixed. Omitting `--task` is a separate combined
 selection+durable-preparation API for callers intentionally delegating task selection; it
-is not discovery and the browser handoff never uses it. Profile `review` is Sol Extra
-High; `review-critical` is explicit super-complex Sol Pro. Compatible Codex/Claude
+is not discovery and the browser handoff never uses it. Profile `review` is Extra
+High; `review-critical` is explicit super-complex Pro. Compatible Codex/Claude
 reviews may share one task/target while keeping distinct participants, normal Chat
 sessions, workspace requests/runs/workspaces, and results. When the user requests review
 of an immutable commit range, use the review skill's commit-pinned
@@ -146,7 +146,7 @@ legacy `phase_only` working-target workflow.
 
 For architecture, planning, or brainstorming intentions, use the implemented generic
 `chatgpt-run prepare --kind architecture --profile architecture --surface chat` route
-with an `inspect` workspace and Sol Pro. Planning/brainstorming do not have separate
+with an `inspect` workspace and Pro. Planning/brainstorming do not have separate
 executable work kinds or profiles. Do not use shared-review prepare-or-join or an
 unsolicited review freeze.
 

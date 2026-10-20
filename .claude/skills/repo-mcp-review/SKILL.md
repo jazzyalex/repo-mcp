@@ -45,8 +45,8 @@ This bootstrap is local coordinator work, not review evidence.
    conversation. Verify Chat surface, Repo MCP attachment and visible chip; do not use
    Temporary Chat, Work, Oracle, or Claude-native semantic review as fallback.
 2. Run `coord review prepare-or-join --task TASK_ID` with the exact task embedded in
-   the final prompt, coordinator `claude`, profile `review` for Sol Extra High, or
-   `review-critical` only for explicitly super-complex Sol Pro review. Add
+   the final prompt, coordinator `claude`, profile `review` for Extra High, or
+   `review-critical` only for explicitly super-complex Pro review. Add
    `--base-ref ... --head-ref ... [--scope-prefix ...]` for commit-pinned review. The
    **final** prompt must already contain repository/task IDs, `review` workspace mode,
    preallocated workspace request ID, and selected target. For commit-pinned work include

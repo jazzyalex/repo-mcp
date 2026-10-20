@@ -23,12 +23,12 @@ Gate:
 ## 3. Stage 1 — Chat model, surface policy, and CLI unblock
 Implements SPEC §§3-4 and §13 first so real Chat handoff is usable before sharing work.
 
-### 3.1 Dynamic Sol evidence
+### 3.1 Capability-only effort evidence
 Source: src/model-policy.ts.
 Tests: test/model-policy.test.ts.
-Red gate: add the complete SPEC §4 accept/reject matrix, explicitly accepting GPT-6 Sol + 6 Extra High and GPT-6 Sol Pro + 6 Pro while still rejecting plain GPT-6; also cover future valid versions, bare-Sol/versioned-control, version mismatch, MODEL_UNPROVEN, Astra/Light/localized/control chars, invalid grammar, and evidence retaining both versions.
-Expected current red: the existing draft cannot satisfy future-version acceptance plus cross-version agreement.
-Green: replace finite hard-coded Chat prefix stripping with strict dynamic parsing; preserve actual observed picker/control/version fields through validation.
+Red gate: add the complete SPEC §4 accept/reject matrix for High, Extra High, and Pro; cover missing, current, and future safe model labels, model/control version disagreement, unsafe labels, localized/malformed controls, and exact effort mismatches.
+Expected current red: the prior implementation required a specific Sol-family picker label and therefore failed when ChatGPT changed its visible model family.
+Green: authorize only the exact visible effort control. Preserve a visible model label as optional sanitized evidence without using it to authorize or reject the run.
 Targeted gate: model-policy tests + npx tsc --noEmit; independent Chat Extra High review of this delta.
 
 ### 3.2 Durable Chat-only/default surface policy

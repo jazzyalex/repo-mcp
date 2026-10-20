@@ -105,15 +105,26 @@ const REQUEST_KIND = 'chatgpt-run-request-v1';
 const SURFACE_OVERRIDE_KIND = 'chatgpt-run-surface-override-v1';
 const RECEIPT_MAX_AGE_MS = 60_000;
 const STATES = new Set<ChatGptRunState>(['prepared', 'verification-pending', 'submission-reserved', 'submitted', 'completed', 'failed-pre-submit', 'uncertain']);
-const PROFILES = new Set<ModelProfile>(['code', 'code-hard', 'review', 'review-critical', 'brainstorm', 'plan', 'architecture']);
+const PROFILES = new Set<ModelProfile>(['code', 'code-hard', 'review', 'review-critical', 'brainstorm', 'plan', 'architecture', 'architecture-current-pro']);
 const PROFILE_SELECTION = {
-  code: ['High', 'Sol', 'High'],
-  'code-hard': ['XHigh', 'Sol', 'Extra High'],
-  review: ['XHigh', 'Sol', 'Extra High'],
-  'review-critical': ['Pro', 'Sol Pro', 'Pro'],
-  brainstorm: ['Pro', 'Sol Pro', 'Pro'],
-  plan: ['Pro', 'Sol Pro', 'Pro'],
-  architecture: ['Pro', 'Sol Pro', 'Pro']
+  code: ['High', null, 'High'],
+  'code-hard': ['XHigh', null, 'Extra High'],
+  review: ['XHigh', null, 'Extra High'],
+  'review-critical': ['Pro', null, 'Pro'],
+  brainstorm: ['Pro', null, 'Pro'],
+  plan: ['Pro', null, 'Pro'],
+  architecture: ['Pro', null, 'Pro'],
+  'architecture-current-pro': ['Pro', null, 'Pro']
+} as const;
+const LEGACY_PROFILE_MODEL_LABEL = {
+  code: 'Sol',
+  'code-hard': 'Sol',
+  review: 'Sol',
+  'review-critical': 'Sol Pro',
+  brainstorm: 'Sol Pro',
+  plan: 'Sol Pro',
+  architecture: 'Sol Pro',
+  'architecture-current-pro': 'GPT-6'
 } as const;
 const RECORD_KEYS = new Set([
   'schema_version', 'run_id', 'coordinator', 'execution_surface', 'work_kind', 'profile', 'state',
@@ -158,7 +169,7 @@ function surfaceOverrideReason(value: string | undefined) {
 function profileFor(kind: ChatGptWorkKind, profile?: ModelProfile): ModelProfile {
   const chosen = profile ?? (kind === 'architecture' ? 'architecture' : kind === 'code' ? 'code' : 'review');
   const allowed = kind === 'architecture'
-    ? new Set<ModelProfile>(['architecture'])
+    ? new Set<ModelProfile>(['architecture', 'architecture-current-pro'])
     : kind === 'code'
       ? new Set<ModelProfile>(['code', 'code-hard'])
       : new Set<ModelProfile>(['review', 'review-critical']);
@@ -280,7 +291,9 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
       !selection || typeof selection !== 'object' || Object.keys(selection).some(key => !SELECTION_KEYS.has(key)) ||
       selection.schema_version !== MODEL_POLICY_SCHEMA_VERSION || selection.profile !== record.profile || !UUID.test(selection.selection_id) ||
       (selection.surface !== 'chat' && selection.surface !== 'work') || (shared && selection.surface !== 'chat') || !expectedSelection ||
-      selection.picker_target !== expectedSelection[0] || selection.expected_model_label !== expectedSelection[1] ||
+      selection.picker_target !== expectedSelection[0] ||
+      (selection.expected_model_label !== expectedSelection[1] &&
+        selection.expected_model_label !== LEGACY_PROFILE_MODEL_LABEL[record.profile]) ||
       selection.expected_target_label !== expectedSelection[2] || selection.required_selection_method !== 'model-picker' ||
       selection.required_evidence_source !== 'trusted-browser-adapter-live-control' ||
       !validDate(selection.requested_at) || !validDate(selection.expires_at) ||
@@ -308,7 +321,7 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
       ((record.recovery_event_sha256 === undefined) !== (record.recovery_observed_at === undefined)) ||
       (record.uncertain_from !== undefined && record.uncertain_from !== 'submission-reserved' && record.uncertain_from !== 'submitted') ||
       (record.coordinator === 'claude' && record.work_kind === 'code') ||
-      (record.work_kind === 'architecture' && record.profile !== 'architecture') ||
+      (record.work_kind === 'architecture' && record.profile !== 'architecture' && record.profile !== 'architecture-current-pro') ||
       (record.work_kind === 'review' && record.profile !== 'review' && record.profile !== 'review-critical') ||
       (record.work_kind === 'code' && record.profile !== 'code' && record.profile !== 'code-hard') ||
       (['submission-reserved', 'submitted', 'completed', 'uncertain'].includes(record.state) && record.model_verified_at === undefined) ||

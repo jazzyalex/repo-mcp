@@ -103,8 +103,8 @@ async function observedSelection(stateDir: string, selection: Awaited<ReturnType
     selectionId: selection.selection_id,
     surface: 'work',
     controlLabel: selection.profile === 'review-critical' || selection.profile === 'architecture'
-      ? 'GPT-6.1 Sol Pro'
-      : 'GPT-6.1 Sol Extra High',
+      ? 'Pro'
+      : 'Extra High',
     selectedAt: '2026-10-07T20:00:01.000Z',
     observedAt: '2026-10-07T20:00:02.000Z',
     conversationId: 'conversation-1'
@@ -174,6 +174,62 @@ test('verified model selection reserves once and completion stores only output h
   assert.equal(JSON.stringify(completed).includes(output), false);
 });
 
+test('capability-only Pro architecture profile completes one durable Chat run', async t => {
+  const { stateDir } = await fixture(t, 'coding');
+  const run = await prepareChatGptRun({
+    stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'architecture',
+    profile: 'architecture-current-pro', surface: 'chat', conversationId: 'conversation-1',
+    prompt: 'Read-only architecture review.', now: NOW
+  });
+  assert.equal(run.selection.expected_model_label, null);
+  assert.equal(run.selection.expected_target_label, 'Pro');
+  const evidence = await recordTrustedBrowserObservation({
+    selectionId: run.selection.selection_id, surface: 'chat', modelLabel: 'GPT-9 Nova', controlLabel: 'Pro',
+    selectedAt: '2026-10-07T20:00:01.000Z', observedAt: '2026-10-07T20:00:02.000Z',
+    conversationId: 'conversation-1'
+  }, { stateDir: path.join(stateDir, 'model-policy'), now: OBSERVED });
+  const reserved = await reserveChatGptRun({ stateDir, runId: run.run_id, contract: run.selection, evidence, now: OBSERVED });
+  assert.equal(reserved.submission_authorized, true);
+  assert.equal((await markChatGptRunSubmitted({
+    stateDir, runId: run.run_id, receipt: receipt(run, 'current-pro-submit'), now: OBSERVED
+  })).state, 'submitted');
+  const output = 'Architecture review complete.';
+  const completed = await completeChatGptRun({
+    stateDir, runId: run.run_id, output, outcome: 'completed',
+    receipt: completionReceipt(run, 'current-pro-complete', 'current-pro-submit', output), now: OBSERVED
+  });
+  assert.equal(completed.state, 'completed');
+  assert.equal(completed.profile, 'architecture-current-pro');
+});
+
+test('pre-capability Sol-bound durable runs remain readable and reservable', async t => {
+  const { stateDir } = await fixture(t);
+  const run = await prepareChatGptRun({
+    stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'review',
+    profile: 'review', surface: 'chat', conversationId: 'conversation-1',
+    prompt: 'Review with a historical contract.', now: NOW
+  });
+  const legacySelection = { ...run.selection, expected_model_label: 'Sol' as const };
+  const legacyRun = { ...run, selection: legacySelection };
+  const runStore = await StateStore.open(stateDir);
+  await runStore.write(`chatgpt-runs/${run.run_id}.json`, 'chatgpt-run-v1', legacyRun);
+  const policyStore = await StateStore.open(path.join(stateDir, 'model-policy'));
+  await policyStore.write(
+    `requests/${run.selection.selection_id}.json`, 'model-policy-request-v2', legacySelection
+  );
+
+  assert.equal((await chatGptRunStatus(run.run_id, stateDir)).selection.expected_model_label, 'Sol');
+  const evidence = await recordTrustedBrowserObservation({
+    selectionId: run.selection.selection_id, surface: 'chat', modelLabel: 'GPT-6',
+    controlLabel: 'Extra High', selectedAt: '2026-10-07T20:00:01.000Z',
+    observedAt: '2026-10-07T20:00:02.000Z', conversationId: 'conversation-1'
+  }, { stateDir: path.join(stateDir, 'model-policy'), now: OBSERVED });
+  const reserved = await reserveChatGptRun({
+    stateDir, runId: run.run_id, contract: legacySelection, evidence, now: OBSERVED
+  });
+  assert.equal(reserved.submission_authorized, true);
+});
+
 test('candidate drift blocks reservation before browser submission', async t => {
   const { root, stateDir } = await fixture(t);
   const run = await prepareChatGptRun({
@@ -237,7 +293,7 @@ test('public ChatGPT run CLI prepares from a regular prompt and refuses a symlin
   const observedAt = new Date().toISOString();
   const observed = spawnSync('npm', ['run', '--silent', 'chatgpt-run', '--', 'observe',
     '--state-dir', stateDir, '--selection-id', prepared.selection.selection_id, '--surface', 'work',
-    '--conversation-id', 'conversation-cli', '--control-label', 'GPT-6.1 Sol Extra High',
+    '--conversation-id', 'conversation-cli', '--control-label', 'Extra High',
     '--selected-at', selectedAt, '--observed-at', observedAt],
   { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 30_000 });
   assert.equal(observed.status, 0, observed.stderr);

@@ -21,7 +21,7 @@ Low-level task lifecycle and ChatGPT-run transition functions are directly calla
 Repository registrations already have registration_epoch/updated_at but no surface-policy field. Workspace-open request state already authoritatively maps its request ledger entry to workspace_id.
 
 ## 3. Chat surface policy
-New defaults: code -> Chat/Sol High; code-hard -> Chat/Sol Extra High; review -> Chat/Sol Extra High; review-critical -> Chat/Sol Pro; architecture -> Chat/Sol Pro. The new coding default is an intentional behavior change; historical run surfaces are unchanged.
+New defaults: code -> Chat/High; code-hard -> Chat/Extra High; review -> Chat/Extra High; review-critical -> Chat/Pro; architecture -> Chat/Pro. Model labels are optional evidence and historical run surfaces are unchanged.
 Use the existing repository catalog:
     npm run --silent coord -- repository surface-policy --repository REPOSITORY_ID --mode default|chat-only
 RepositoryRegistration gains surface_policy: "default"|"chat-only"; missing legacy field normalizes to default.
@@ -32,12 +32,18 @@ This project's durable policy is chat-only. This is an owner execution/accountin
 
 ## 4. Dynamic Sol model evidence
 VERSION grammar: COMPONENT [ "." COMPONENT [ "." COMPONENT ] ]; COMPONENT is 0 or a nonzero ASCII digit followed by at most two ASCII digits; one to three components and at most 11 ASCII characters. Reject signs, internal whitespace, leading zeros in multi-digit components, Unicode lookalike digits, extra components, control characters, and overlong labels.
-Picker model label must be Sol, GPT-VERSION Sol, Sol Pro, or GPT-VERSION Sol Pro. Literal Sol/Sol Pro is mandatory model proof; version alone never proves family.
+The exact visible effort control is authoritative. A picker model label is optional,
+sanitized evidence and may identify any current or future model family.
 Chat control may be High, Extra High, Pro, VERSION High, VERSION Extra High, or VERSION Pro. Evidence retains normalized picker/control labels and both optional parsed versions through validation.
-If both versions are present they must match exactly or MODEL_VERSION_MISMATCH. Picker-version + bare control is valid. Bare Sol/Sol Pro + versioned control is valid because picker proves family. Missing picker model evidence always MODEL_UNPROVEN.
-Reject Astra, plain GPT-version without Sol, Light, localized/unknown labels, and control characters. Extra High never proves Sol Pro; Pro profile requires Sol Pro.
-Required accept cases: GPT-6 Sol + 6 Extra High; GPT-6 Sol Pro + 6 Pro; GPT-5.6 Sol + 5.6 Extra High; future valid GPT-6.2 Sol + 6.2 Extra High; Sol + 5.6 Extra High; GPT-5.6 Sol + Extra High; Sol + Extra High; GPT-5.6 Sol Pro + 5.6 Pro; Sol Pro + 5.6 Pro; GPT-5.6 Sol Pro + Pro.
-Required reject cases: GPT-5.6 Sol + 6.1 Extra High and GPT-5.6 Sol Pro + 6.1 Pro => MODEL_VERSION_MISMATCH; missing picker => MODEL_UNPROVEN; Astra/plain GPT/Light/localized/control-character labels; invalid VERSION grammar; family/profile target mismatch.
+Model/control version differences do not affect authorization. Missing picker model
+evidence is valid. Reject unsafe model-label evidence, malformed or localized effort
+controls, and every profile/effort mismatch. High, Extra High, and Pro remain distinct.
+New Work runs require a bare independently observed effort control; a combined label
+ending in an effort word cannot authorize them. Historical Work contracts retain their
+explicitly recorded combined-control semantics.
+Required accept cases include missing model evidence, GPT-5.6, GPT-6, and a future safe
+model label paired with the exact required effort. Required reject cases include lower or
+different effort, control characters, empty labels when supplied, and overlong labels.
 Existing 120-second selection TTL and 10-second observation age remain exact.
 
 ## 5. Review task resolution
@@ -147,7 +153,7 @@ Historical runs are not rewritten with participant/surface fields: legacy non-sh
 Source skills are installed only after implementation/testing via the existing ownership-aware installer; foreign/modified copies require explicit replacement/backup.
 
 ## 17. Acceptance matrix
-Model/surface: all Section 4 accept/reject cases, explicitly GPT-6 Sol + 6 Extra High and GPT-6 Sol Pro + 6 Pro accepted while plain GPT-6 remains rejected; 120s/10s; Chat defaults; default Work override reason; chat-only defeats override before state creation; same policy mode idempotent; actual change bumps registration_epoch/stales old authority; historical Work unchanged.
+Model/surface: all Section 4 accept/reject cases, including absent, current, and future model labels with exact required effort; 120s/10s; Chat defaults; default Work override reason; chat-only defeats override before state creation; same policy mode idempotent; actual change bumps registration_epoch/stales old authority; historical Work unchanged.
 Task/share: omitted --task resolves exactly one; zero/multiple/coding-phase errors; explicit bind+review safe path; prepare-or-join never creates/freezes; concurrent taskless coordinators converge; different bases/scopes/prompts/results share; fingerprint stable across reviewers and changes on policy-visible bytes/index/readable-untracked changes; separate assume-unchanged and skip-worktree regressions prove that with HEAD/index unchanged, changing flagged worktree bytes changes the fingerprint and flagged missing/deletion is detected; unsafe/over-cap flagged state => TARGET_FINGERPRINT_UNAVAILABLE; denied names/content not exposed/read; restart revalidation; missing/partial state fails.
 Participant/workspace: distinct participant/run/workspace_request/token; immutable generation+participant+workspace_request in run; reconcile derives workspace_id only from authoritative ledger; arbitrary workspace ID cannot bind; completion/normal close requires bound; proven-absent requires either a terminal pre-submit run or a never-created run with a recovered dead initializer claim, plus authoritative proof of no workspace_open outcome; one closes while sibling continues.
 Concurrency/lifecycle: exact reserve still one-send; bind/join/phase/rebind/finish/resume/submission races fail closed; direct scripts/task/run paths cannot bypass guard; lock order includes share->run->request and share->task->admission->control; no lock across browser work; a same-task legacy non-shared submission-reserved, submitted, or uncertain run blocks normal review->coding, rebind, and finish; explicit security disable/revoke may invalidate current authority while preserving that legacy evidence; TTL/GC never completes; sole coding owner/workspace unchanged.

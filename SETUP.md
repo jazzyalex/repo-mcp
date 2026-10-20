@@ -580,10 +580,10 @@ another coding owner. If another caller intentionally omits `--task`, that API c
 task selection with durable participant/run preparation and still requires the final
 prompt/session/workspace-request inputs; it is not the browser handoff discovery path.
 
-The `review` profile is Sol Extra High. `review-critical` uses Sol Pro only for an
+The `review` profile requires Extra High. `review-critical` requires Pro only for an
 explicitly super-complex/critical Pro review. Work, Oracle, Codex subagents and
 Claude-native semantic review are not fallback execution surfaces. Failure to verify
-Chat surface, the exact live model/effort, Repo MCP attachment/visible chip, repository
+Chat surface, the exact live effort, Repo MCP attachment/visible chip, repository
 identity, required bounded evidence, or completed response is `NOT TESTABLE`.
 
 Before final prompt construction, choose the review target explicitly. Legacy
@@ -663,7 +663,7 @@ participant.
 
 Architecture, planning, and brainstorming intentions use the implemented generic
 `chatgpt-run prepare --kind architecture --profile architecture --surface chat` path,
-Sol Pro, and an `inspect` workspace. Planning and brainstorming do not have separate
+Pro, and an `inspect` workspace. Planning and brainstorming do not have separate
 executable work kinds or profiles. They do not use `coord review prepare-or-join`,
 request a coding grant, or implicitly change task phase.
 
@@ -738,13 +738,13 @@ and never pretends that a post-submission helper call authorized the prompt.
 
 Supported executable mappings are exact and never downgrade:
 
-- `code` -> Sol High
-- `code-hard` -> Sol Extra High
-- `review` -> Sol Extra High only
-- `review-critical`, `architecture` -> Sol Pro
+- `code` -> High
+- `code-hard` -> Extra High
+- `review` -> Extra High only
+- `review-critical`, `architecture` -> Pro
 
 Planning and brainstorming intentions use the implemented `architecture` work kind/profile.
-Pro is a distinct model/target, not an Extra High alias.
+Pro is a distinct effort target, not an Extra High alias.
 
 Resolve the requested profile before touching the picker. At least one browser
 context identity is mandatory:
@@ -772,20 +772,18 @@ private observation and returns a sanitized receipt. Hand-written receipt JSON i
 browser proof; `verify` rejects it when the matching private trusted observation does
 not exist or differs.
 
-Chat observations may expose only effort labels such as `High` and `Extra High`. In
-that case the helper records the model family as absent and fails closed with
-`MODEL_UNPROVEN`; a version prefix in the control is auxiliary evidence and never invents
-`Sol`. Trusted Chat picker model text accepts only `Sol`, `Sol Pro`, `GPT-VERSION Sol`,
-or `GPT-VERSION Sol Pro`. VERSION has one to three ASCII numeric components; each
-component is `0` or 1-3 digits without a leading zero, with an overall maximum of 11
-characters. Chat controls accept the matching bare effort or VERSION-prefixed effort.
-The normalized `observed_control_label` retains a valid version prefix. When both picker
-and control are versioned they must match exactly or verification fails with
-`MODEL_VERSION_MISMATCH`; a versioned picker with a bare control and a bare Sol picker
-with a versioned control remain valid. Plain `GPT-6`, Astra, Light, localized labels,
-Unicode-lookalike digits, control characters, and malformed/overlong versions fail
-closed. Work combined controls retain the shipped finite Sol allowlist for legacy
-receipt compatibility; `Light` still never satisfies a required profile.
+Chat observations may expose only effort labels such as `High` and `Extra High`. That is
+sufficient: authorization depends only on the exact required effort. A visible model
+label is optional, sanitized evidence; it may be GPT-5.6, GPT-6, GPT-6.1, or a future
+safe label. Model/control version differences do not affect authorization. Chat controls
+accept bare or valid version-prefixed effort labels and normalize them to High, Extra
+High, Light, or Pro. Unsafe, empty, control-character, or overlong model labels fail
+closed. Malformed or localized effort controls also fail closed, and `Light` never
+satisfies a required profile. Existing durable contracts with the former model-label
+expectation remain readable. For new capability-only Work runs, the trusted adapter must
+provide a bare independently observed effort control. Combined text such as `Sol Pro` is
+ambiguous model evidence and cannot authorize a new run; it remains readable only in a
+legacy contract that explicitly recorded the old combined-control expectation.
 
 Immediately before the trusted adapter submits one prompt:
 

@@ -48,7 +48,7 @@ Usage:
   chatgpt-run fail-pre-submit [--state-dir PATH] --run RUN_ID --failure-code CODE
 
 Profiles:
-  code | code-hard | review | review-critical | architecture
+  code | code-hard | review | review-critical | architecture | architecture-current-pro (compatibility alias)
   (profile must match the selected work kind; omitted profile uses that kind's default)
 
 RECEIPT_FLAGS:

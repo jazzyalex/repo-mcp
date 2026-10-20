@@ -245,7 +245,7 @@ Persist exact `prepared.run` separately from the outer
 compare the returned resolved base with the pre-resolved commit; stop on any mismatch and
 never rewrite the hashed prompt.
 
-The trusted browser route is: verify Chat + Repo MCP visible chip + exact Sol model/effort,
+The trusted browser route is: verify Chat + Repo MCP visible chip + exact required effort,
 observe, reserve once, submit only when `submission_authorized: true`, record the actual
 submission, reconcile the participant by task+participant from the authoritative
 `workspace_open` ledger, complete from a trusted finished-response receipt, then close
@@ -367,20 +367,21 @@ The installed Codex operator skill gives `Use Repo MCP to review this repository
 specific token-saving meaning: resolve the current checkout internally, use
 `coord review prepare-or-join` without stealing another owner, and drive a normal
 ChatGPT web Chat conversation through the trusted observe/reserve/submit/reconcile/
-complete/close sequence. The `review` profile is Sol Extra High; `review-critical`
-uses Sol Pro only for explicitly super-complex/critical review. Work, Oracle, Codex
+complete/close sequence. The `review` profile requires Extra High; `review-critical`
+requires Pro only for explicitly super-complex/critical review. Work, Oracle, Codex
 subagents and Claude-native review are not silent fallbacks. If Chat surface, model
 evidence, the Repo MCP chip, repository identity, required bounded evidence, or completion
 cannot be verified, the result is `NOT TESTABLE`.
 
 Claude supports Repo MCP review and architecture as a coordinator: it uses its own
-host-native browser controls to make ChatGPT web perform the Sol Extra High/Pro work
+host-native browser controls to make ChatGPT web perform the Extra High/Pro work
 through Repo MCP. Claude does not perform the semantic Repo MCP review itself.
 Coding/write access is coordinated only through the Codex operator path.
 
 New `chatgpt-run prepare` authorizations default to Chat when `--surface` is omitted:
-code -> Sol High, code-hard/review -> Sol Extra High, and review-critical/architecture ->
-Sol Pro. A repository may durably forbid Work with
+code -> High, code-hard/review -> Extra High, and review-critical/architecture -> Pro.
+`architecture-current-pro` remains an accepted compatibility alias for `architecture`.
+A repository may durably forbid Work with
 `npm run --silent coord -- repository surface-policy --repository ID --mode chat-only`;
 `default` restores the generic policy. A real surface-policy change increments the
 repository registration epoch and invalidates older grants/workspaces/run currentness;
@@ -390,13 +391,14 @@ reason is retained only in owner authorization state and is not returned in run/
 output. `chat-only` rejects Work before model-selection, request-claim, or run state is
 created.
 
-Chat picker evidence accepts bare `Sol` / `Sol Pro` or `GPT-VERSION Sol` /
-`GPT-VERSION Sol Pro`, where VERSION is one to three ASCII numeric components with
-1-3 digits per component and no leading zeroes in multi-digit components. A versioned
-Chat effort control retains its normalized version prefix, and if both picker and control
-carry a version they must match. Missing picker model evidence still fails
-`MODEL_UNPROVEN`. Existing Work combined-control evidence keeps its shipped legacy
-allowlist. `npm run --silent coord -- --help` and
+Authorization depends only on the exact visible effort control: High, Extra High, or
+Pro. The visible model label is optional, sanitized evidence and never authorizes or
+rejects a run. Labels such as GPT-5.6, GPT-6, GPT-6.1, or a future replacement therefore
+do not require a Repo MCP release. Versioned effort controls are normalized to the same
+effort. Lower or different effort still fails closed. Existing durable contracts that
+recorded the former Sol/Sol Pro/GPT-6 expectation remain readable. New Work runs require
+a bare independently observed effort control; ambiguous combined model text such as
+`Sol Pro` cannot authorize them. `npm run --silent coord -- --help` and
 `npm run --silent chatgpt-run -- --help` print complete static help without initializing
 operator state.
 

@@ -19,32 +19,34 @@ export type ModelProfile =
   | 'review-critical'
   | 'brainstorm'
   | 'plan'
-  | 'architecture';
+  | 'architecture'
+  | 'architecture-current-pro';
 
 export type ChatSurface = 'chat' | 'work';
-type CanonicalModel = 'sol' | 'sol-pro';
 type CanonicalTarget = 'high' | 'xhigh' | 'pro';
 type ObservedTarget = CanonicalTarget | 'light';
-type CanonicalModelFamily = 'Sol' | 'Sol Pro';
 type CanonicalTargetLabel = 'High' | 'Extra High' | 'Pro';
 type ObservedTargetLabel = CanonicalTargetLabel | 'Light';
 
 type ProfileTarget = {
-  model: CanonicalModel;
   target: CanonicalTarget;
   picker: 'High' | 'XHigh' | 'Pro';
-  modelLabel: CanonicalModelFamily;
   targetLabel: CanonicalTargetLabel;
+  /** Accepted only when reading a contract created before capability-only selection. */
+  legacyModelLabel: string | null;
 };
 
 const PROFILE_TARGETS: Record<ModelProfile, ProfileTarget> = {
-  code: { model: 'sol', target: 'high', picker: 'High', modelLabel: 'Sol', targetLabel: 'High' },
-  'code-hard': { model: 'sol', target: 'xhigh', picker: 'XHigh', modelLabel: 'Sol', targetLabel: 'Extra High' },
-  review: { model: 'sol', target: 'xhigh', picker: 'XHigh', modelLabel: 'Sol', targetLabel: 'Extra High' },
-  'review-critical': { model: 'sol-pro', target: 'pro', picker: 'Pro', modelLabel: 'Sol Pro', targetLabel: 'Pro' },
-  brainstorm: { model: 'sol-pro', target: 'pro', picker: 'Pro', modelLabel: 'Sol Pro', targetLabel: 'Pro' },
-  plan: { model: 'sol-pro', target: 'pro', picker: 'Pro', modelLabel: 'Sol Pro', targetLabel: 'Pro' },
-  architecture: { model: 'sol-pro', target: 'pro', picker: 'Pro', modelLabel: 'Sol Pro', targetLabel: 'Pro' }
+  code: { target: 'high', picker: 'High', targetLabel: 'High', legacyModelLabel: 'Sol' },
+  'code-hard': { target: 'xhigh', picker: 'XHigh', targetLabel: 'Extra High', legacyModelLabel: 'Sol' },
+  review: { target: 'xhigh', picker: 'XHigh', targetLabel: 'Extra High', legacyModelLabel: 'Sol' },
+  'review-critical': { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: 'Sol Pro' },
+  brainstorm: { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: 'Sol Pro' },
+  plan: { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: 'Sol Pro' },
+  architecture: { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: 'Sol Pro' },
+  // This alias was introduced with capability-only selection, so no legacy
+  // model-bound contract exists for it.
+  'architecture-current-pro': { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: null }
 };
 
 const PROFILE_NAMES = new Set<string>(Object.keys(PROFILE_TARGETS));
@@ -55,18 +57,21 @@ const REQUEST_KIND = 'model-policy-request-v2';
 const OBSERVATION_KIND = 'model-policy-observation-v2';
 const CONSUMED_KIND = 'model-policy-consumed-v2';
 
-// Work keeps the shipped finite allowlist for backward-compatible combined-control
-// receipts. Chat picker/control evidence uses the dynamic VERSION grammar below.
-const SOL_MODEL_LABELS = new Map<string, string>([
+// Only old durable Work contracts use the shipped finite combined-control
+// allowlist. New contracts require a bare effort and never consult these model
+// labels. Keeping the old list here preserves their original authorization
+// semantics without pinning current or future Chat contracts to a model family.
+const LEGACY_SOL_MODEL_LABELS = new Map<string, string>([
   ['sol', 'Sol'],
   ['gpt-5.6 sol', 'GPT-5.6 Sol'],
   ['gpt-6.1 sol', 'GPT-6.1 Sol']
 ]);
-const SOL_PRO_MODEL_LABELS = new Map<string, string>([
+const LEGACY_SOL_PRO_MODEL_LABELS = new Map<string, string>([
   ['sol pro', 'Sol Pro'],
   ['gpt-5.6 sol pro', 'GPT-5.6 Sol Pro'],
   ['gpt-6.1 sol pro', 'GPT-6.1 Sol Pro']
 ]);
+
 const CHAT_VERSION = /^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){0,2}$/u;
 
 export class ModelPolicyError extends Error {
@@ -89,7 +94,8 @@ export type ModelSelectionContract = {
   profile: ModelProfile;
   surface: ChatSurface;
   picker_target: 'High' | 'XHigh' | 'Pro';
-  expected_model_label: CanonicalModelFamily;
+  /** Null for capability-only contracts; old durable contracts may retain their historical label. */
+  expected_model_label: string | null;
   expected_target_label: CanonicalTargetLabel;
   required_selection_method: 'model-picker';
   required_evidence_source: 'trusted-browser-adapter-live-control';
@@ -103,7 +109,7 @@ export type SanitizedModelSelectionEvidence = {
   selection_id: string;
   profile: ModelProfile;
   surface: 'Chat' | 'Work';
-  observed_model_family: CanonicalModelFamily | null;
+  observed_model_family: string | null;
   observed_model_label: string | null;
   observed_target_label: ObservedTargetLabel;
   observed_control_label: string;
@@ -226,23 +232,23 @@ function parseChatVersion(value: string, code: string, field: string) {
   return value;
 }
 
-function parseAllowedModelLabel(value: unknown): {
-  model: CanonicalModel;
-  family: CanonicalModelFamily;
-  label: string;
-  version: string | null;
-} {
-  const normalized = normalizeUiLabel(value, 'UNSUPPORTED_MODEL_LABEL', 'model_label');
-  if (normalized === 'sol') return { model: 'sol', family: 'Sol', label: 'Sol', version: null };
-  if (normalized === 'sol pro') return { model: 'sol-pro', family: 'Sol Pro', label: 'Sol Pro', version: null };
-
-  const match = /^gpt-([^ ]+) (sol(?: pro)?)$/u.exec(normalized);
-  if (!match) fail('UNSUPPORTED_MODEL_LABEL', 'Observed model label is not a supported Sol-family picker label.');
-  const version = parseChatVersion(match[1], 'UNSUPPORTED_MODEL_LABEL', 'model_label');
-  if (match[2] === 'sol pro') {
-    return { model: 'sol-pro', family: 'Sol Pro', label: `GPT-${version} Sol Pro`, version };
+function parseObservedModelLabel(value: unknown): { family: string; label: string } {
+  if (typeof value !== 'string' || CONTROL.test(value)) {
+    fail('UNSUPPORTED_MODEL_LABEL', 'model_label must be a control-free string.');
   }
-  return { model: 'sol', family: 'Sol', label: `GPT-${version} Sol`, version };
+  const label = value.trim().replace(/\s+/gu, ' ');
+  if (!label || label.length > 160) {
+    fail('UNSUPPORTED_MODEL_LABEL', 'model_label must contain at most 160 visible characters.');
+  }
+  // The label is evidence, not authority. Preserve known family names for
+  // continuity and retain any future picker label verbatim instead of refusing it.
+  const normalized = label.toLowerCase();
+  const family = normalized === 'sol' || /^gpt-[^ ]+ sol$/u.test(normalized)
+    ? 'Sol'
+    : normalized === 'sol pro' || /^gpt-[^ ]+ sol pro$/u.test(normalized)
+      ? 'Sol Pro'
+      : label;
+  return { family, label };
 }
 
 function parseStandaloneTarget(value: unknown): {
@@ -271,55 +277,81 @@ function parseStandaloneTarget(value: unknown): {
 }
 
 function parseWorkControlLabel(value: unknown): {
-  model: CanonicalModel;
-  family: CanonicalModelFamily;
-  modelLabel: string;
+  family: string | null;
+  modelLabel: string | null;
   target: ObservedTarget;
   targetLabel: ObservedTargetLabel;
   controlLabel: string;
 } {
-  const normalized = normalizeUiLabel(value, 'UNSUPPORTED_MODEL_LABEL', 'control_label');
-  const pro = SOL_PRO_MODEL_LABELS.get(normalized);
-  if (pro) {
-    return {
-      model: 'sol-pro',
-      family: 'Sol Pro',
-      modelLabel: pro,
-      target: 'pro',
-      targetLabel: 'Pro',
-      controlLabel: pro
-    };
-  }
+  const display = parseObservedModelLabel(value).label;
+  const normalized = display.toLowerCase();
 
   const suffixes: Array<[string, ObservedTarget, ObservedTargetLabel]> = [
     ['extra high', 'xhigh', 'Extra High'],
     ['xhigh', 'xhigh', 'Extra High'],
     ['high', 'high', 'High'],
-    ['light', 'light', 'Light']
+    ['light', 'light', 'Light'],
+    ['pro', 'pro', 'Pro']
   ];
+  for (const [bare, target, targetLabel] of suffixes) {
+    if (normalized === bare) {
+      return { family: null, modelLabel: null, target, targetLabel, controlLabel: targetLabel };
+    }
+  }
   for (const [suffix, target, targetLabel] of suffixes) {
     if (!normalized.endsWith(' ' + suffix)) continue;
-    const modelKey = normalized.slice(0, -(suffix.length + 1));
-    const modelLabel = SOL_MODEL_LABELS.get(modelKey);
-    if (!modelLabel) {
-      fail('UNSUPPORTED_MODEL_LABEL', 'Observed Work control does not expose an allowlisted Sol-family model.');
-    }
+    const prefix = display.slice(0, -(suffix.length + 1)).trim();
+    const evidenceLabel = target === 'pro' ? display : prefix;
+    const parsedModel = parseObservedModelLabel(evidenceLabel);
     return {
-      model: 'sol',
-      family: 'Sol',
-      modelLabel,
+      family: parsedModel.family,
+      modelLabel: parsedModel.label,
       target,
       targetLabel,
-      controlLabel: modelLabel + ' ' + targetLabel
+      controlLabel: display
     };
   }
+  fail('UNSUPPORTED_TARGET_LABEL', 'Observed Work control does not expose a supported effort/target label.');
+}
 
-  for (const modelKey of SOL_MODEL_LABELS.keys()) {
+function parseLegacyWorkControlLabel(value: unknown): {
+  family: 'Sol' | 'Sol Pro';
+  modelLabel: string;
+  target: ObservedTarget;
+} {
+  const normalized = normalizeUiLabel(value, 'UNSUPPORTED_MODEL_LABEL', 'control_label');
+  const pro = LEGACY_SOL_PRO_MODEL_LABELS.get(normalized);
+  if (pro) return { family: 'Sol Pro', modelLabel: pro, target: 'pro' };
+
+  const suffixes: Array<[string, ObservedTarget]> = [
+    ['extra high', 'xhigh'],
+    ['xhigh', 'xhigh'],
+    ['high', 'high'],
+    ['light', 'light']
+  ];
+  for (const [suffix, target] of suffixes) {
+    if (!normalized.endsWith(' ' + suffix)) continue;
+    const modelKey = normalized.slice(0, -(suffix.length + 1));
+    const modelLabel = LEGACY_SOL_MODEL_LABELS.get(modelKey);
+    if (!modelLabel) {
+      fail('UNSUPPORTED_MODEL_LABEL', 'Legacy Work control does not expose an allowlisted Sol-family model.');
+    }
+    return { family: 'Sol', modelLabel, target };
+  }
+  for (const modelKey of LEGACY_SOL_MODEL_LABELS.keys()) {
     if (normalized.startsWith(modelKey + ' ')) {
-      fail('UNSUPPORTED_TARGET_LABEL', 'Observed Work control exposes Sol with an unsupported effort/target label.');
+      fail('UNSUPPORTED_TARGET_LABEL', 'Legacy Work control exposes Sol with an unsupported effort/target label.');
     }
   }
-  fail('UNSUPPORTED_MODEL_LABEL', 'Observed Work control does not expose an allowlisted Sol-family model.');
+  fail('UNSUPPORTED_MODEL_LABEL', 'Legacy Work control does not expose an allowlisted Sol-family model.');
+}
+
+function assertLegacyWorkAuthorization(expectedModelLabel: string, controlLabel: unknown) {
+  const parsed = parseLegacyWorkControlLabel(controlLabel);
+  if (parsed.family !== expectedModelLabel) {
+    fail('MODEL_MISMATCH', 'Observed Work model family does not satisfy the historical contract.');
+  }
+  return parsed;
 }
 
 function parseInstant(value: unknown, field: string, kind: 'contract' | 'evidence'): { text: string; millis: number } {
@@ -355,7 +387,8 @@ function validateContract(input: unknown): ModelSelectionContract {
   }
   if (
     object.picker_target !== target.picker ||
-    object.expected_model_label !== target.modelLabel ||
+    (object.expected_model_label !== null &&
+      (target.legacyModelLabel === null || object.expected_model_label !== target.legacyModelLabel)) ||
     object.expected_target_label !== target.targetLabel ||
     object.required_selection_method !== 'model-picker' ||
     object.required_evidence_source !== 'trusted-browser-adapter-live-control'
@@ -369,7 +402,7 @@ function validateContract(input: unknown): ModelSelectionContract {
     profile,
     surface,
     picker_target: target.picker,
-    expected_model_label: target.modelLabel,
+    expected_model_label: object.expected_model_label as string | null,
     expected_target_label: target.targetLabel,
     required_selection_method: 'model-picker',
     required_evidence_source: 'trusted-browser-adapter-live-control',
@@ -399,18 +432,14 @@ function parseEvidenceReceipt(input: unknown) {
   const observed = parseInstant(object.observed_at, 'observed_at', 'evidence');
   const browserContext = parseBrowserContext(object.browser_context, 'evidence');
 
-  let model: CanonicalModel | null;
-  let modelFamily: CanonicalModelFamily | null;
+  let modelFamily: string | null;
   let modelLabel: string | null;
-  let modelVersion: string | null = null;
   let target: ObservedTarget;
   let targetLabel: ObservedTargetLabel;
   let controlLabel: string;
-  let controlVersion: string | null = null;
 
   if (surface === 'Work') {
     const parsed = parseWorkControlLabel(object.observed_control_label);
-    model = parsed.model;
     modelFamily = parsed.family;
     modelLabel = parsed.modelLabel;
     target = parsed.target;
@@ -426,26 +455,19 @@ function parseEvidenceReceipt(input: unknown) {
     target = parsedTarget.target;
     targetLabel = parsedTarget.label;
     controlLabel = parsedTarget.controlLabel;
-    controlVersion = parsedTarget.version;
     if (object.observed_model_family === null && object.observed_model_label === null) {
-      model = null;
       modelFamily = null;
       modelLabel = null;
     } else {
-      const parsedModel = parseAllowedModelLabel(object.observed_model_label);
-      model = parsedModel.model;
+      const parsedModel = parseObservedModelLabel(object.observed_model_label);
       modelFamily = parsedModel.family;
       modelLabel = parsedModel.label;
-      modelVersion = parsedModel.version;
       if (object.observed_model_family !== modelFamily) {
         fail('INVALID_EVIDENCE', 'Chat model-family and model-label evidence disagree.');
       }
     }
     if (object.observed_target_label !== targetLabel) {
       fail('INVALID_EVIDENCE', 'Chat target evidence disagrees with the live control label.');
-    }
-    if (modelVersion !== null && controlVersion !== null && modelVersion !== controlVersion) {
-      fail('MODEL_VERSION_MISMATCH', 'Observed Chat picker and live control expose different model versions.');
     }
   }
 
@@ -466,7 +488,6 @@ function parseEvidenceReceipt(input: unknown) {
   };
   return {
     receipt,
-    model,
     target,
     selectedMillis: selected.millis,
     observedMillis: observed.millis
@@ -581,7 +602,7 @@ export async function resolveModelProfile(
     profile,
     surface,
     picker_target: target.picker,
-    expected_model_label: target.modelLabel,
+    expected_model_label: null,
     expected_target_label: target.targetLabel,
     required_selection_method: 'model-picker',
     required_evidence_source: 'trusted-browser-adapter-live-control',
@@ -630,21 +651,26 @@ export async function recordTrustedBrowserObservation(
   const observed = parseInstant(input.observedAt, 'observed_at', 'evidence');
   validateObservationTimes(contract, selected.millis, observed.millis, checkedNow(options.now, 'record browser evidence'));
 
-  let model: CanonicalModel | null;
-  let modelFamily: CanonicalModelFamily | null;
+  let modelFamily: string | null;
   let modelLabel: string | null;
-  let modelVersion: string | null = null;
   let target: ObservedTarget;
   let targetLabel: ObservedTargetLabel;
   let controlLabel: string;
-  let controlVersion: string | null = null;
 
   if (surface === 'work') {
     if (input.modelLabel !== undefined) {
       fail('INVALID_EVIDENCE', 'Work evidence must use the combined live control label, not a caller-supplied separate model label.');
     }
     const parsed = parseWorkControlLabel(input.controlLabel);
-    model = parsed.model;
+    if (contract.expected_model_label === null && parsed.modelLabel !== null) {
+      fail(
+        'AMBIGUOUS_WORK_EFFORT',
+        'Capability-only Work authorization requires a bare effort control; combined model text is informational and cannot authorize a run.'
+      );
+    }
+    if (contract.expected_model_label !== null) {
+      assertLegacyWorkAuthorization(contract.expected_model_label, input.controlLabel);
+    }
     modelFamily = parsed.family;
     modelLabel = parsed.modelLabel;
     target = parsed.target;
@@ -655,20 +681,13 @@ export async function recordTrustedBrowserObservation(
     target = parsedTarget.target;
     targetLabel = parsedTarget.label;
     controlLabel = parsedTarget.controlLabel;
-    controlVersion = parsedTarget.version;
     if (input.modelLabel === undefined) {
-      model = null;
       modelFamily = null;
       modelLabel = null;
     } else {
-      const parsedModel = parseAllowedModelLabel(input.modelLabel);
-      model = parsedModel.model;
+      const parsedModel = parseObservedModelLabel(input.modelLabel);
       modelFamily = parsedModel.family;
       modelLabel = parsedModel.label;
-      modelVersion = parsedModel.version;
-    }
-    if (modelVersion !== null && controlVersion !== null && modelVersion !== controlVersion) {
-      fail('MODEL_VERSION_MISMATCH', 'Observed Chat picker and live control expose different model versions.');
     }
   }
 
@@ -691,7 +710,7 @@ export async function recordTrustedBrowserObservation(
   // Parse our own sanitized receipt before publishing private state so schema/label
   // changes cannot create an unreadable authorization record.
   const parsedReceipt = parseEvidenceReceipt(receipt);
-  if (parsedReceipt.model !== model || parsedReceipt.target !== target) {
+  if (parsedReceipt.target !== target) {
     fail('INVALID_EVIDENCE', 'Sanitized browser observation is internally inconsistent.');
   }
   if (!(await stateCreate(store, observationPath(selectionId), OBSERVATION_KIND, receipt))) {
@@ -739,16 +758,22 @@ export async function verifyModelSelection(
   if (!isDeepStrictEqual(storedEvidence.receipt.browser_context, contract.browser_context)) {
     fail('BROWSER_CONTEXT_MISMATCH', 'Trusted observation does not match the bound browser context.');
   }
+  if (
+    contract.expected_model_label === null && observedSurface === 'work' &&
+    storedEvidence.receipt.observed_model_label !== null
+  ) {
+    fail(
+      'AMBIGUOUS_WORK_EFFORT',
+      'Capability-only Work authorization requires independent bare effort evidence; model-label text cannot authorize a run.'
+    );
+  }
+  if (contract.expected_model_label !== null && observedSurface === 'work') {
+    assertLegacyWorkAuthorization(contract.expected_model_label, storedEvidence.receipt.observed_control_label);
+  }
 
   const preConsumeMillis = checkedNow(options.now, 'verify model evidence');
   validateObservationTimes(contract, storedEvidence.selectedMillis, storedEvidence.observedMillis, preConsumeMillis);
   const target = PROFILE_TARGETS[contract.profile];
-  if (storedEvidence.model === null) {
-    fail('MODEL_UNPROVEN', 'The live browser evidence does not expose a model family, so the requested Sol profile cannot be proven on this surface.');
-  }
-  if (storedEvidence.model !== target.model) {
-    fail('MODEL_MISMATCH', 'Observed model family does not satisfy the requested profile.');
-  }
   if (storedEvidence.target !== target.target) {
     fail('TARGET_MISMATCH', 'Observed effort/target does not satisfy the requested profile; no downgrade or promotion is permitted.');
   }
@@ -831,7 +856,7 @@ export type OracleProfileTarget = {
   thinking: OracleThinking;
 };
 
-const ORACLE_PROFILE_TARGETS: Record<ModelProfile, OracleProfileTarget> = {
+const ORACLE_PROFILE_TARGETS: Partial<Record<ModelProfile, OracleProfileTarget>> = {
   code: { model: 'gpt-5.6-sol', thinking: 'high' },
   'code-hard': { model: 'gpt-5.6-sol', thinking: 'extra-high' },
   review: { model: 'gpt-5.6-sol', thinking: 'extra-high' },
@@ -861,7 +886,9 @@ const ORACLE_REQUIRED_HELP_OPTIONS = [
 ] as const;
 
 export function oracleTargetForProfile(profileInput: ModelProfile): OracleProfileTarget {
-  return { ...ORACLE_PROFILE_TARGETS[parseProfile(profileInput)] };
+  const target = ORACLE_PROFILE_TARGETS[parseProfile(profileInput)];
+  if (!target) fail('ORACLE_PROFILE_UNSUPPORTED', 'This compatibility profile is available only on Chat.');
+  return { ...target };
 }
 
 function safeRelative(child: string, parent: string) {

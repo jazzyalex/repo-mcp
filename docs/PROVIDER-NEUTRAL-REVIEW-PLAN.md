@@ -12,8 +12,8 @@ their own browser controls; they do not substitute their own semantic work. Orac
 optional compatibility code, never the implicit way to obtain a ChatGPT review.
 
 For Codex, the established user-facing default remains token-saving: `Use Repo MCP
-review` means an independent ChatGPT web review at the `review` profile (Sol Extra High),
-or `review-critical` (Sol Pro) when explicitly requested. It does not mean a Codex
+review` means an independent ChatGPT web review at the `review` profile (Extra High),
+or `review-critical` (Pro) when explicitly requested. It does not mean a Codex
 subagent. Claude coordinates the same ChatGPT web execution route with its own browser
 controls and labels Claude Code only as the coordinator.
 

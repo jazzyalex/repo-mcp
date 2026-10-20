@@ -51,7 +51,7 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(codexSkill, /each configured real client route/i);
   assert.match(codexSkill, /request to "use Repo MCP review".*ChatGPT web/is);
   assert.match(codexSkill, /must\s+not be satisfied by a Codex subagent/is);
-  assert.match(codexSkill, /model profile `review`.*Sol Extra High/is);
+  assert.match(codexSkill, /model profile `review`.*Extra High/is);
   assert.match(codexSkill, /host-native browser control/is);
   assert.match(codexSkill, /durable `chatgpt-run`/i);
   assert.match(codexSkill, /Never silently fall back.*Oracle/is);
@@ -78,7 +78,7 @@ test('onboarding documents, skills and safe policies agree', async () => {
   ]) {
     const architect = await readFile(path.join(PROJECT_BASE, file), 'utf8');
     assert.match(architect, /ChatGPT web performs the architecture work/i);
-    assert.match(architect, /profile `architecture`.*Sol Pro/is);
+    assert.match(architect, /--profile architecture.*Pro/is);
     assert.match(architect, new RegExp(`Coordinator: ${coordinator}`));
     assert.match(architect, /Repository evidence: Repo MCP/);
     assert.match(architect, /Do \*\*not\*\*.*review prepare-or-join/is);

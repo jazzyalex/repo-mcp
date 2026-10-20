@@ -218,9 +218,10 @@ intentionally delegate task selection; it is not discovery and the browser hando
 uses it. Compatible reviewers share one target generation but retain distinct
 participants, normal Chat sessions, workspace requests/runs/workspaces, and results.
 
-Use model profile `review` (Sol Extra High) by default and `review-critical` (Sol Pro)
+Use model profile `review` (Extra High) by default and `review-critical` (Pro)
 only for explicitly super-complex/critical Pro review. Verify Chat surface, exact live
-Sol model/effort evidence, Repo MCP attachment and visible chip. Never silently fall back
+effort evidence, Repo MCP attachment and visible chip. Record a visible model label only
+as optional evidence. Never silently fall back
 to Work, Oracle, a Codex subagent, Claude-native review, or another backend.
 
 For every work kind, completion must use a trusted finished-response receipt with
