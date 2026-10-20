@@ -12,7 +12,7 @@ The user may simply say:
 
 Do not ask the user for repository IDs, task IDs, policy paths, workspace tokens, write grants, request IDs, model-policy files, or browser-session IDs. Resolve the current Git root, discover the installed control checkout, and keep generated authority internal.
 
-ChatGPT web Chat performs semantic review and architecture for both Codex- and Claude-coordinated routes. A Codex subagent, Claude-native review, Work, Oracle, or another backend is not an equivalent fallback. Coding/write coordination is Codex-only.
+ChatGPT web Chat performs semantic review and architecture for both Codex- and Claude-coordinated routes. A Codex subagent, Claude-native review, Work, Oracle, or another backend is not an equivalent fallback. Coding/write coordination is available to both Codex and Claude; ChatGPT performs the edits.
 
 Repository/task registration, policy, task lifecycle, write grants, service control, Git operations, browser control, and local test/build execution remain trusted coordinator actions. One coding owner/workspace remains enforced.
 

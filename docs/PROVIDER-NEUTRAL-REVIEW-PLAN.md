@@ -64,7 +64,7 @@ prepared, submitted, completed, failed-pre-submit, and uncertain states. Recover
 the same record; it never creates a replacement run automatically.
 
 `chatgpt-run prepare/observe/reserve/submitted/complete` implements this state machine.
-Claude is refused for `code`; both coordinators support `review` and `architecture`.
+Both coordinators support `code`, `review` and `architecture`.
 
 ### 3. Candidate and prompt preparation — partial
 
@@ -79,13 +79,13 @@ is still absent, so current assurance remains `phase_only` and must be reported 
   the generic model-selection contract, a preattached Repo MCP tab, and the generic run
   journal. This is the default token-saving Codex route.
 - Claude Code: Claude uses its own host-native browser controls to coordinate ChatGPT web
-  XHigh/Pro review or architecture. ChatGPT opens the Repo MCP workspace and performs the
+  review, architecture, or coding. ChatGPT opens the Repo MCP workspace and performs the
   work; Claude remains the local coordinator.
 - Codex: Codex uses host-native browser control to coordinate ChatGPT web review,
   architecture, or coding. ChatGPT performs the repository work.
 
-Coding/write access is maintained through the Codex coordinator path. Claude's supported
-Repo MCP workflows are review and architecture, both executed by ChatGPT web.
+Coding/write access is available through both coordinator paths. All Repo MCP workflows,
+including coding, are executed by ChatGPT web.
 
 An adapter that cannot prove a requested model or recover a submitted conversation
 returns `NOT TESTABLE`; it does not substitute a backend.

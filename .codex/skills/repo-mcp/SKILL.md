@@ -1,6 +1,6 @@
 ---
 name: repo-mcp
-description: Operate Repo MCP for ChatGPT web coding, review, and architecture, coordinated locally by Codex; Claude coordinates read-only review and architecture.
+description: Operate Repo MCP for ChatGPT web coding, review, and architecture, coordinated locally by Codex; Claude can coordinate the same flows.
 ---
 
 # Repo MCP operator
@@ -465,7 +465,7 @@ npm run --silent coord -- service status    # new process_pid, "local_mcp": "rea
 Then run the client route proof above. After an MCP schema change, also refresh the
 Repo MCP app's tools in ChatGPT and start a new ChatGPT conversation.
 
-### Coding run (Codex only)
+### Coding run
 
 ChatGPT does the coding through Repo MCP; Codex coordinates. Use the setup block (`C`,
 `R`, `now`, `jget`) from the review recipe in this skill.

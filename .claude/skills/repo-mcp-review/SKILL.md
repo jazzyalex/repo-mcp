@@ -219,6 +219,7 @@ not semantic coverage and the deferred large-diff manifest/per-path feature is n
 available. Do not claim stronger or complete coverage when bounded evidence is
 incomplete.
 
-If repairs are needed, return the findings to the Codex coding coordinator. Claude does
-not issue coding grants, edit through Repo MCP, commit, push, restart services, or change
-branches/worktrees in this review workflow.
+If repairs are needed, start a separate coding run with the `repo-mcp` skill (Claude or
+Codex can coordinate it). This review workflow itself issues no coding grants, makes no
+edits through Repo MCP, and does not commit, push, restart services, or change
+branches/worktrees.

@@ -38,8 +38,9 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(reviewSkill, /Execution surface:\s+ChatGPT web/is);
   assert.match(reviewSkill, /Do not substitute Claude's own\s+review/is);
   const claudeSkill = await readFile(path.join(PROJECT_BASE, '.claude/skills/repo-mcp/SKILL.md'), 'utf8');
-  assert.match(claudeSkill, /Claude's maintained Repo MCP paths are read-only/i);
-  assert.match(claudeSkill, /Coding\/write work[\s\S]*return[\s\S]*Codex Repo MCP operator/i);
+  assert.match(claudeSkill, /Review and architecture are read-only\. Coding is allowed/i);
+  assert.match(claudeSkill, /chatgpt-run -- prepare[\s\S]*--coordinator claude[\s\S]*--kind code/);
+  assert.match(claudeSkill, /never edits the served\s+repository through Repo MCP itself/i);
   assert.match(claudeSkill, /Claude's\s+host-native browser controls/is);
   assert.match(claudeSkill, /Never substitute\s+Claude's own analysis.*Oracle/is);
   assert.match(claudeSkill, /claude mcp add --scope user --transport http repo-mcp http:\/\/127\.0\.0\.1:8787\/mcp/);

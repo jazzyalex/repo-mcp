@@ -4,7 +4,7 @@ Date: 2026-10-13
 
 ## 1. Scope and invariants
 Repo MCP remains the only repository-evidence route for ChatGPT semantic coding, review, and architecture.
-1. ChatGPT Chat performs semantic coding/review/architecture. Codex coordinates coding and may coordinate review/architecture; Claude may coordinate review/architecture but never coding/write authority.
+1. ChatGPT Chat performs semantic coding/review/architecture. Codex coordinates coding and may coordinate review/architecture; Claude may coordinate review, architecture and coding (since 2026-10-20).
 2. One unfinished task owns one registered checkout; one coding owner and one open coding workspace remain the maximum.
 3. Independent reviewers may share one compatible review task, but each keeps a distinct participant, ChatGPT run, browser context, workspace request/token, prompt, diff base, scope, and result.
 4. Existing exact-request deduplication, one-send reservation, uncertain-run recovery, bearer workspace authority, epoch/cursor checks, and task gates remain authoritative.

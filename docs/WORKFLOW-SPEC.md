@@ -10,7 +10,7 @@ The single-active/sequential workflow later in this file records the v0.1 pilot 
 
 ## Current operating procedure: ChatGPT owns code and review
 
-Codex coordinates coding execution, local checks, Git, and browser control without replacing the requested ChatGPT semantic review. Claude may coordinate Chat review/architecture only; coding/write coordination remains Codex-only.
+Codex coordinates coding execution, local checks, Git, and browser control without replacing the requested ChatGPT semantic review. Claude may coordinate the same Chat coding, review and architecture flows; ChatGPT still performs every repository read and write.
 
 “ChatGPT review through Repo MCP” names two independent facts: ChatGPT web Chat is the
 execution surface, and Repo MCP is the repository evidence source. A Codex subagent,
@@ -54,7 +54,7 @@ A browser ChatGPT conversation can reach local MCP through the existing private 
 | --- | --- |
 | User | Task scope, repository choice, authorization for external actions |
 | Codex coordinator | Checkout/task/policy ownership, coding grants, local checks, browser handoffs, evidence capture, Git and deployment actions |
-| Claude coordinator | Read-only Chat review/architecture preparation and browser handoff; no coding/write grants |
+| Claude coordinator | Chat review/architecture preparation, coding grants for runs it coordinates, local checks and browser handoff |
 | ChatGPT coding conversation | Inspect actual source, implement and add tests through Repo MCP; do not invent local check results |
 | ChatGPT review/architecture conversation | Read-only semantic review/architecture through Repo MCP with exact bounded evidence and verified model/profile |
 | Local MCP | Repository discovery, bounded reads/search/diffs, scoped edits, approved fixture checks, durable workspace/review/run authority |

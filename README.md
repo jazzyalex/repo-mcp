@@ -213,8 +213,8 @@ See [SECURITY.md](SECURITY.md) for the threat model and how to report a vulnerab
 - **Clients:** ChatGPT (through the tunnel) and Claude Code, including the Code tab of
   the Claude desktop app (through loopback HTTP). Claude Desktop chat and claude.ai
   connectors cannot reach a loopback server, and Repo MCP has no stdio mode yet.
-- **Coding through ChatGPT** is coordinated by Codex. Claude's bundled skills are
-  read-only (review and architecture).
+- **Coding through ChatGPT** can be coordinated by Codex or Claude Code. In both
+  cases ChatGPT makes the edits through a `code` workspace and a single-use write grant.
 
 ## Documentation
 

@@ -4,7 +4,7 @@ Date: 2026-10-13
 Normative contract: docs/CHAT-REVIEW-SHARING-SPEC.md. This plan references that contract instead of restating it.
 
 ## 1. Execution discipline
-- ChatGPT Chat performs semantic coding and independent semantic review through Repo MCP. Codex is the coding coordinator and runs approved local builds/tests/Git. Claude may coordinate Chat review/architecture only.
+- ChatGPT Chat performs semantic coding and independent semantic review through Repo MCP. Codex is the coding coordinator and runs approved local builds/tests/Git. Claude may coordinate Chat review/architecture (and, since 2026-10-20, coding).
 - Never use Work for this project; never fall back implicitly to Oracle or a host-model review.
 - Preserve all pre-existing source/test drafts and unresolved legacy evidence until an approved implementation stage explicitly changes the intended source files.
 - No commit, push, service restart, deployment, cleanup, task finish/rebind/resume, or other-repository access is part of this docs revision.

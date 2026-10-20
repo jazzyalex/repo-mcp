@@ -247,15 +247,15 @@ test('candidate drift blocks reservation before browser submission', async t => 
   assert.equal((await chatGptRunStatus(run.run_id, stateDir)).state, 'prepared');
 });
 
-test('Claude cannot prepare coding work and uncertain runs cannot be resubmitted', async t => {
+test('Claude can prepare coding work and uncertain runs cannot be resubmitted', async t => {
   const coding = await fixture(t, 'coding');
-  await assert.rejects(
-    prepareChatGptRun({
-      stateDir: coding.stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'claude', workKind: 'code',
-      surface: 'work', conversationId: 'conversation-1', prompt: 'Code.'
-    }),
-    /coding is a Codex-coordinated workflow/i
-  );
+  const claudeCode = await prepareChatGptRun({
+    stateDir: coding.stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'claude', workKind: 'code',
+    surface: 'work', conversationId: 'conversation-1', prompt: 'Code.', now: NOW
+  });
+  assert.equal(claudeCode.coordinator, 'claude');
+  assert.equal(claudeCode.work_kind, 'code');
+  assert.equal((await chatGptRunStatus(claudeCode.run_id, coding.stateDir)).state, 'prepared', 'a stored Claude coding run is valid');
 
   const review = await fixture(t, 'review');
   const run = await prepareChatGptRun({
@@ -945,7 +945,7 @@ test('corrupt state combinations fail closed', async t => {
   const corruptions: Array<[string, (run: Awaited<ReturnType<typeof prepareChatGptRun>>) => object]> = [
     ['reserved without verification', run => ({ ...run, state: 'submission-reserved' })],
     ['reserved with submitted timestamp', run => ({ ...run, state: 'submission-reserved', model_verified_at: OBSERVED.toISOString(), submitted_at: OBSERVED.toISOString() })],
-    ['Claude coding', run => ({ ...run, coordinator: 'claude', work_kind: 'code', profile: 'code' })],
+    ['unknown coordinator', run => ({ ...run, coordinator: 'other' })],
     ['incompatible profile', run => ({ ...run, profile: 'architecture' })]
   ];
   for (const [name, mutate] of corruptions) {

@@ -1,6 +1,6 @@
 ---
 name: repo-mcp
-description: Operate Repo MCP from Claude as the local coordinator for ChatGPT web review and architecture; coding/write coordination stays with Codex.
+description: Operate Repo MCP from Claude as the local coordinator for ChatGPT web coding, review and architecture.
 ---
 
 # Repo MCP operator
@@ -122,11 +122,13 @@ After successful smoke, the operator may finish this disposable task with
    identifiers.
 4. Preserve the one-unfinished-task/one-coding-owner invariant. Do not bind a second
    unfinished task, freeze or rebind another coding owner, or revive stale authority.
-5. Claude's maintained Repo MCP paths are read-only. Coding/write work and write grants
-   return to the Codex Repo MCP operator.
+5. Review and architecture are read-only. Coding is allowed: ChatGPT web makes the edits
+   through a `code` workspace, and Claude coordinates it with a single-use write grant
+   (see "Coding run" below). Claude never edits a served repository through Repo MCP
+   itself.
 
-The normal user prompts `Use Repo MCP to review this repository` and `Use Repo MCP to
-architect this repository` mean **ChatGPT web performs the semantic work** while Claude
+The normal user prompts `Use Repo MCP to review this repository`, `Use Repo MCP to
+architect this repository` and `Use Repo MCP to code this task: ...` mean **ChatGPT web performs the semantic work** while Claude
 coordinates local setup and Claude's host-native browser controls. Never substitute
 Claude's own analysis, Work, Oracle, or a Claude subagent.
 
@@ -243,6 +245,66 @@ npm run --silent coord -- service status    # new process_pid, "local_mcp": "rea
 Then run the client route proof above. After an MCP schema change, also refresh the
 Repo MCP app's tools in ChatGPT and start a new ChatGPT conversation.
 
+### Coding run
+
+ChatGPT does the coding through Repo MCP; Claude coordinates and never edits the served
+repository through Repo MCP itself. Set up the run folder and helpers first:
+
+```bash
+R=$(mktemp -d)  # private run folder (mode 700)
+jget(){ python3 -I -c 'import json,sys
+o=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): o=o[k]
+print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
+```
+
+```bash
+npm run --silent coord -- task status --task "$TASK"            # phase must be coding
+npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if it is in review; refuses protected reviewers
+```
+
+1. Prepare the browser first: normal ChatGPT **Chat** tab, effort **High** (profile
+   `code`) or **Extra High** (`code-hard`), Repo MCP attached.
+2. Issue the grant right before preparing; it is single-use and expires in 10 minutes:
+   ```bash
+   npm run --silent coord -- workspace grant --task "$TASK" > "$R/grant.json"; GRANT=$(jget "$R/grant.json" write_grant)
+   ```
+3. Write `$R/prompt.txt` with repository ID, task ID, `code` mode, `write_grant` `$GRANT`,
+   a fresh `workspace_open` request ID, the expected HEAD and the coding instructions.
+   The grant goes only into this prompt; never into files in a repository or logs.
+4. Prepare, observe and reserve, send, record the send:
+   ```bash
+   npm run --silent chatgpt-run -- prepare --repository "$REPO" --task "$TASK" --coordinator claude \
+     --kind code --profile code --surface chat --session-id "$SID" --prompt-file "$R/prompt.txt" \
+     --base-ref "$(git -C "$ROOT" rev-parse HEAD)" > "$R/run.json"
+   RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
+   PSHA=$(jget "$R/run.json" prompt_sha256); BASE=$(jget "$R/run.json" resolved_base_commit)
+   NOW=$(now); npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
+     --control-label "High" --selected-at "$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/evidence.json" \
+   && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
+     --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
+   # send once only after "True", then:
+   NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
+     --prompt-sha256 "$PSHA" --base-commit "$BASE" --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" \
+     --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
+   SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
+   ```
+5. Wait (page check every 60 seconds, as in the `repo-mcp-review` skill). Capture the
+   answer: back up the clipboard (`LANG=en_US.UTF-8 pbpaste > "$R/clip.bak"`), click the
+   Copy button under the last answer, then
+   `sleep 1; LANG=en_US.UTF-8 pbpaste > "$R/output.md"; LANG=en_US.UTF-8 pbcopy < "$R/clip.bak"`.
+   Complete:
+   ```bash
+   H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
+   npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
+     --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
+     --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
+     --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
+   ```
+6. Check the result locally, outside MCP: `git -C "$ROOT" diff`, the project's own
+   tests and build. Commit and push only when the user asks. To move the task to review:
+   `npm run --silent coord -- task phase --task "$TASK" --phase review`.
+
 ### Recover a run
 
 Use the run's own IDs from its run folder. Never resend a prompt that may have been sent.
@@ -287,8 +349,9 @@ touches ChatGPT or Claude conversations.
 ## Handoff and authority
 
 For an explicitly requested read-only handoff, give the target conversation only the
-repository and task IDs. Claude does not issue coding grants. Never make a handoff the
-default current-session workflow.
+repository and task IDs. Claude issues a write grant only for a coding run it
+coordinates itself, never for a handoff. Never make a handoff the default
+current-session workflow.
 
 Repository registration, policy changes, task phases, grants, service control, Git
 branch/worktree changes, commit, push, dependency installation, and arbitrary shell

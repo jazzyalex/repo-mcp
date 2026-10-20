@@ -320,7 +320,6 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
       ((record.completion_event_sha256 === undefined) !== (record.completion_observed_at === undefined)) ||
       ((record.recovery_event_sha256 === undefined) !== (record.recovery_observed_at === undefined)) ||
       (record.uncertain_from !== undefined && record.uncertain_from !== 'submission-reserved' && record.uncertain_from !== 'submitted') ||
-      (record.coordinator === 'claude' && record.work_kind === 'code') ||
       (record.work_kind === 'architecture' && record.profile !== 'architecture' && record.profile !== 'architecture-current-pro') ||
       (record.work_kind === 'review' && record.profile !== 'review' && record.profile !== 'review-critical') ||
       (record.work_kind === 'code' && record.profile !== 'code' && record.profile !== 'code-hard') ||
@@ -574,9 +573,6 @@ export async function prepareChatGptRun(options: {
   assertId(options.taskId, 'task ID');
   if (options.coordinator !== 'codex' && options.coordinator !== 'claude') throw new SafeError('Coordinator must be codex or claude.');
   if (!['review', 'architecture', 'code'].includes(options.workKind)) throw new SafeError('Invalid ChatGPT work kind.');
-  if (options.coordinator === 'claude' && options.workKind === 'code') {
-    throw new SafeError('Claude coordinates Repo MCP review and architecture only; coding is a Codex-coordinated workflow.');
-  }
   if (options.headRef !== undefined && (options.baseRef === undefined || !options.sharedReview || options.workKind !== 'review')) {
     throw new SafeError('Commit-pinned ChatGPT review requires shared review with explicit base_ref and head_ref.');
   }
