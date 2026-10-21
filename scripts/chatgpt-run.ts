@@ -270,7 +270,20 @@ try {
     }
   }
 } catch (error) {
-  if (error instanceof GoError) process.stdout.write(JSON.stringify({ error: error.code, message: error.message }) + '\n');
-  process.stderr.write((error instanceof Error ? error.message : 'ChatGPT run command failed.') + '\n');
   process.exitCode = 1;
+  const code = error instanceof GoError ? error.code : 'GO_ERROR';
+  let report: Record<string, unknown> | undefined = error instanceof GoError ? { error: code, message: error.message } : undefined;
+  if (command === 'go' && typeof values['request-id'] === 'string') {
+    // An error after the send must not read as "nothing was sent": report the stored
+    // request, and exit 3 whenever its run may have been submitted.
+    const status = await goStatus(stateDir, values['request-id']).catch(() => undefined);
+    if (status) {
+      const unresolved = status.phase !== 'cleaned' && status.phase !== 'failed' &&
+        (status.phase === 'send-intent' || ['submission-reserved', 'submitted', 'uncertain'].includes(status.run_state ?? ''));
+      report = { ...status, error: code, message: error instanceof Error ? error.message : String(error), unresolved };
+      if (unresolved) process.exitCode = 3;
+    }
+  }
+  if (report) process.stdout.write(JSON.stringify(report) + '\n');
+  process.stderr.write((error instanceof Error ? error.message : 'ChatGPT run command failed.') + '\n');
 }

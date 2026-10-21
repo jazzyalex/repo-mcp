@@ -301,19 +301,26 @@ export class CdpChatGptPage implements ChatGptPage {
     // Long user messages render collapsed ("Show more"), so only the head is comparable.
     // The head starts with the per-request run marker, so a match is this run's message.
     if (o.user) return true;
-    // A conversation can render in a "fallback" mode that shows only the in-progress
-    // assistant turn. A reload renders the full thread; the running turn is unaffected.
+    return (await this.orderAfterFullRender(prompt)).user;
+  }
+
+  /**
+   * A conversation can render in a "fallback" mode that shows only the in-progress
+   * assistant turn. When no user message is visible, reload once to render the full
+   * thread; the running turn is unaffected.
+   */
+  private async orderAfterFullRender(prompt: string) {
     if (!this.reloaded && await this.eval<number>('window.__go.messages("user").length') === 0) {
       this.reloaded = true;
       await this.send('Page.reload');
       await this.sleep(6_000);
-      return (await this.order(prompt)).user;
     }
-    return false;
+    return this.order(prompt);
   }
 
   async turnState(prompt: string): Promise<TurnState> {
-    const o = await this.order(prompt);
+    let o = await this.order(prompt);
+    if (!o.user) o = await this.orderAfterFullRender(prompt);
     if (!o.user) return { state: 'unknown', chars: 0 };
     const stop = await this.eval<number>('window.__go.find("stop").length');
     // Busy while a Stop control shows or the turn marker says it is not complete.

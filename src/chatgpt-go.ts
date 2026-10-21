@@ -302,8 +302,11 @@ class Driver {
 
   async drive(): Promise<GoResult> {
     if (this.m.phase === 'cleaned' || this.m.phase === 'failed') {
-      if (this.m.output_file) await this.ensureOutputFile();
+      // A finished request must never keep the account; output repair is reported separately.
+      let repair: unknown;
+      if (this.m.output_file) await this.ensureOutputFile().catch(error => { repair = error; });
       await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+      if (repair) throw repair;
       return result(this.m, this.m.run_id ? await this.run() : undefined);
     }
     await admit(this.account, accountKey(this.store.dir, this.m.request_id), this.options.maxPerHour ?? 4, this.now());
@@ -433,9 +436,12 @@ class Driver {
     const outputFile = path.join(this.store.dir, `${manifestPath(this.m.request_id)}.output.md`);
     await writeFile(outputFile, answer, { mode: 0o600 });
     const eventId = `chatgpt-go-complete-${conversationId(this.m.conversation_url)}-${this.now().toISOString()}`;
+    // Build the receipt before reading the journal's "now", so the observation can never
+    // appear to come from the future when the clock ticks between the two reads.
+    const receipt = this.receipt(run, eventId);
     await completeChatGptRun({
       stateDir: this.stateDir, runId: run.run_id, output: answer, outcome: 'completed', now: this.now(),
-      receipt: { ...this.receipt(run, eventId), kind: 'completion', responseState: 'completed',
+      receipt: { ...receipt, kind: 'completion', responseState: 'completed',
         submissionEventSha256: run.submission_event_sha256!, outputSha256: sha256(answer) }
     });
     if (await chatGptRunOutput(run.run_id, this.stateDir) !== answer) throw new GoError('OUTPUT_MISMATCH', 'Saved output differs from the capture.');

@@ -5,6 +5,12 @@ command does every browser step in code. Use this manual recipe only when `go` c
 run, for example when the ChatGPT page layout changed and `go` fails with a `UI_*`
 code that a selector fix has not yet covered.
 
+**Before you start:** the manual recipe does not take `go`'s account admission. Use it
+only when every `go` request is resolved: `chatgpt-run go --request-id ID --status` shows
+`cleaned` or `failed` for the last request, and its run is `completed` or
+`failed-pre-submit`. Never use it to retry a request that may have been sent
+(`uncertain`, `submitted`, or exit 3); resume that request with `go --resume` instead.
+
 This is the recipe the skills used before `go` (last completed cleanly on 2026-10-20).
 The coordinator drives the browser itself with its host browser tools and polls the page,
 which costs many coordinator turns per pass.
@@ -82,11 +88,12 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 8. **Send once.** Close any open picker menu, then click the composer's **Send** button
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
-   more seconds and check again before clicking Send again. As soon as the URL shows
-   `/c/`, always save it (recovery needs it most):
+   more seconds and check again. **Never click Send a second time**: once Send was
+   clicked, the prompt may be on its way. As soon as the URL shows `/c/`, always save it
+   (recovery needs it most):
    `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`. If you still
-   cannot tell whether it was sent, record `chatgpt-run uncertain` and recover; never
-   send twice blindly.
+   cannot tell whether it was sent, record `chatgpt-run uncertain` and recover the same
+   run.
 9. **Record the send** (no head commit or candidate digest for this kind):
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \

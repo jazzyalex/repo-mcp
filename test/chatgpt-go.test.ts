@@ -302,3 +302,13 @@ test('a confirmed send clears an earlier failure code', async t => {
   assert.equal(r.phase, 'cleaned');
   assert.equal(r.failure_code, null);
 });
+
+test('a finished request releases the account even when output repair fails', async t => {
+  const { stateDir } = await fixture(t);
+  const r = await runGo(base(stateDir), { page: new FakePage(), sleep });
+  // Simulate a damaged journal output and a missing output file.
+  await rm(path.join(stateDir, 'chatgpt-run-outputs', `${r.run_id}.json`));
+  await rm(r.output_file!);
+  await assert.rejects(runGo(base(stateDir), { page: new FakePage(), sleep }));
+  assert.equal((await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep })).phase, 'cleaned');
+});
