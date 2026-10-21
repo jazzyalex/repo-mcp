@@ -82,7 +82,7 @@ Before constructing the final review prompt:
 1. Choose the target mode. For legacy working-tree review, resolve the intended Git base locally to an immutable commit. For commit-pinned review, choose explicit `base_ref` and `head_ref` (plus optional `scope_prefix`); `head_ref` without `base_ref` is invalid, and prepare-or-join will resolve both server-side.
 2. Generate a unique logical `workspace_open` request ID.
 3. Generate one stable logical browser session ID for this review attempt.
-4. Preserve a private mapping from that session ID to the normal ChatGPT conversation URL/tab for recovery. Do not use Temporary Chat.
+4. Preserve a private mapping from that session ID to the normal ChatGPT conversation URL/tab for recovery. Do not use Temporary Chat. After the run is completed (and the participant closed) and the answer is saved locally, archive the conversation in ChatGPT so it leaves the sidebar; keep it unarchived while the run is uncertain or needs recovery. Never delete it.
 5. Attach Repo MCP in that normal Chat conversation through the tool picker and verify the visible Repo MCP chip before submission.
 6. Select Chat and the exact required model/effort.
 

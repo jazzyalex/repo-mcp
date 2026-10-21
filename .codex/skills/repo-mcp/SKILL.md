@@ -370,7 +370,8 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
    more seconds and check again before clicking Send again. If you still cannot tell,
-   record `chatgpt-run uncertain` and recover; never send twice blindly.
+   record `chatgpt-run uncertain` and recover; never send twice blindly. Save the
+   conversation URL: `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`.
 10. **Record the send**:
     ```bash
     NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
@@ -412,6 +413,13 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
     npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
     ```
     Both commands print `"state": "completed"` and `"state": "closed"`.
+15. **Archive the chat** so it leaves the ChatGPT sidebar. Do this only after the
+    commands above printed `completed` (and `closed` for a review) and `$R/output.md`
+    holds the whole answer. In the conversation tab (`$R/chat-url`), click the **More**
+    (`…`) button at the top right, then **Archive**. The chat stays in your account under
+    Settings → Data controls → Archived chats, and its URL still opens. Never use
+    **Delete**. Skip this step and keep the chat when the run is `uncertain`, needs
+    recovery, or the answer was not captured.
 
 ## Command recipes
 
@@ -567,7 +575,8 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
    more seconds and check again before clicking Send again. If you still cannot tell,
-   record `chatgpt-run uncertain` and recover; never send twice blindly.
+   record `chatgpt-run uncertain` and recover; never send twice blindly. Save the
+   conversation URL: `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`.
 10. **Record the send** (no head commit or candidate digest for this kind):
     ```bash
     NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
@@ -602,7 +611,14 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
       --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
       --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
     ```
-14. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the project's own
+14. **Archive the chat** so it leaves the ChatGPT sidebar. Do this only after the
+    commands above printed `completed` (and `closed` for a review) and `$R/output.md`
+    holds the whole answer. In the conversation tab (`$R/chat-url`), click the **More**
+    (`…`) button at the top right, then **Archive**. The chat stays in your account under
+    Settings → Data controls → Archived chats, and its URL still opens. Never use
+    **Delete**. Skip this step and keep the chat when the run is `uncertain`, needs
+    recovery, or the answer was not captured.
+15. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the project's own
     tests and build. Commit and push only when the user asks. To move the task to review:
     `npm run --silent coord -- task phase --task "$TASK" --phase review`.
 

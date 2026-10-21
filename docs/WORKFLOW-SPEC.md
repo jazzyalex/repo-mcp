@@ -72,7 +72,9 @@ architecture pass using the Chat surface; Codex or Claude coordinates coding/wri
 normal-Chat session from the start, an operator-selected conversation with Repo MCP
 attached and visible, exact live model/profile evidence, durable reservation immediately
 before one submission, and recovery of the same run/conversation after interruption.
-Temporary Chat is not a recovery surface. Shared review/architecture never silently
+Temporary Chat is not a recovery surface. After a run completes and its answer is
+saved locally, the coordinator archives (never deletes) the conversation so it leaves
+the ChatGPT sidebar. Shared review/architecture never silently
 falls back to Work, Oracle, or a host-model semantic review. Oracle remains a separate
 explicit legacy compatibility command only when the user specifically requests Oracle;
 it is not part of this workflow.
