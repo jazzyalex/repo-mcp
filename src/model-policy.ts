@@ -20,7 +20,8 @@ export type ModelProfile =
   | 'brainstorm'
   | 'plan'
   | 'architecture'
-  | 'architecture-current-pro';
+  | 'architecture-current-pro'
+  | 'architecture-xhigh';
 
 export type ChatSurface = 'chat' | 'work';
 type CanonicalTarget = 'high' | 'xhigh' | 'pro';
@@ -46,7 +47,9 @@ const PROFILE_TARGETS: Record<ModelProfile, ProfileTarget> = {
   architecture: { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: 'Sol Pro' },
   // This alias was introduced with capability-only selection, so no legacy
   // model-bound contract exists for it.
-  'architecture-current-pro': { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: null }
+  'architecture-current-pro': { target: 'pro', picker: 'Pro', targetLabel: 'Pro', legacyModelLabel: null },
+  // Cheaper architecture pass at Extra High; introduced after capability-only selection.
+  'architecture-xhigh': { target: 'xhigh', picker: 'XHigh', targetLabel: 'Extra High', legacyModelLabel: null }
 };
 
 const PROFILE_NAMES = new Set<string>(Object.keys(PROFILE_TARGETS));

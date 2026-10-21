@@ -61,7 +61,7 @@ Usage:
   chatgpt-run probe   read-only check of ChatGPT controls; never sends
 
 Profiles:
-  code | code-hard | review | review-critical | architecture | architecture-current-pro (compatibility alias)
+  code | code-hard | review | review-critical | architecture | architecture-current-pro (compatibility alias) | architecture-xhigh (Extra High)
   (profile must match the selected work kind; omitted profile uses that kind's default)
 
 RECEIPT_FLAGS:

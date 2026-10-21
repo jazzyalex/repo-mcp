@@ -259,3 +259,46 @@ test('admission is shared across state directories through one account store', a
   await assert.rejects(runGo({ ...base(other.stateDir), accountDir: base(stateDir).accountDir }, { page: new FakePage(), sleep }),
     (e: unknown) => e instanceof GoError && e.code === 'ACCOUNT_BUSY');
 });
+
+test('a request refused for a busy account stays resumable once the account is free', async t => {
+  const { stateDir } = await fixture(t);
+  let clock = Date.now();
+  const now = () => new Date(clock);
+  const held = await runGo(base(stateDir), { page: new FakePage({ showMessage: false, now }), sleep: async ms => { clock += ms; }, now });
+  assert.equal(held.phase, 'uncertain');
+  await assert.rejects(runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep }),
+    (e: unknown) => e instanceof GoError && e.code === 'ACCOUNT_BUSY');
+  await releaseGoAdmission(stateDir, 'req-1', 'inspected by hand', base(stateDir).accountDir);
+  // req-2's manifest exists without admission; the same command now proceeds.
+  const r2 = await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep });
+  assert.equal(r2.phase, 'cleaned');
+});
+
+test('a finished request rewrites a missing or altered output file from the journal', async t => {
+  const { stateDir } = await fixture(t);
+  const r = await runGo(base(stateDir), { page: new FakePage(), sleep });
+  await rm(r.output_file!);
+  const again = await runGo(base(stateDir), { page: new FakePage(), sleep });
+  assert.equal(await readFile(again.output_file!, 'utf8'), ANSWER);
+  await writeFile(again.output_file!, 'tampered');
+  await runGo(base(stateDir), { page: new FakePage(), sleep });
+  assert.equal(await readFile(again.output_file!, 'utf8'), ANSWER);
+});
+
+test('reusing a request ID with a different profile is a conflict', async t => {
+  const { stateDir } = await fixture(t);
+  await runGo(base(stateDir), { page: new FakePage(), sleep });
+  await assert.rejects(runGo({ ...base(stateDir), profile: 'architecture-xhigh' }, { page: new FakePage(), sleep }),
+    (e: unknown) => e instanceof GoError && e.code === 'REQUEST_CONFLICT');
+});
+
+test('a confirmed send clears an earlier failure code', async t => {
+  const { stateDir } = await fixture(t);
+  let clock = Date.now();
+  const now = () => new Date(clock);
+  const tick = async (ms: number) => { clock += ms; };
+  await runGo(base(stateDir), { page: new FakePage({ showMessage: false, now }), sleep: tick, now });
+  const r = await runGo(base(stateDir), { page: new FakePage({ sentAlready: true, now }), sleep: tick, now });
+  assert.equal(r.phase, 'cleaned');
+  assert.equal(r.failure_code, null);
+});

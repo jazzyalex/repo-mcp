@@ -78,6 +78,7 @@ export class CdpChatGptPage implements ChatGptPage {
   private cdp?: RelayCdp;
   private session?: string;
   private targetId?: string;
+  private reloaded = false;
   constructor(private sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))) {}
 
   private async browser() {
@@ -298,8 +299,17 @@ export class CdpChatGptPage implements ChatGptPage {
   async hasExpectedUserMessage(prompt: string) {
     const o = await this.order(prompt);
     // Long user messages render collapsed ("Show more"), so only the head is comparable.
-    // Each run uses a fresh conversation, so the last user message heading-match is ours.
-    return o.user;
+    // The head starts with the per-request run marker, so a match is this run's message.
+    if (o.user) return true;
+    // A conversation can render in a "fallback" mode that shows only the in-progress
+    // assistant turn. A reload renders the full thread; the running turn is unaffected.
+    if (!this.reloaded && await this.eval<number>('window.__go.messages("user").length') === 0) {
+      this.reloaded = true;
+      await this.send('Page.reload');
+      await this.sleep(6_000);
+      return (await this.order(prompt)).user;
+    }
+    return false;
   }
 
   async turnState(prompt: string): Promise<TurnState> {

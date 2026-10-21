@@ -92,7 +92,7 @@ The action depends on the journal state first, then on the manifest phase.
 | `submitted` | any | Reattach, wait, capture, complete. |
 | `uncertain` | URL known and user message found | `recover submitted`, then continue as `submitted`. |
 | `uncertain` | otherwise | Report `uncertain`, exit 3, and hold admission. |
-| `completed` | any | Check `chatGptRunOutput` against `output_sha256`, then retry cleanup only. |
+| `completed` | any | Check `chatGptRunOutput` against `output_sha256`, rewrite the output file atomically if it is missing or altered, then retry cleanup only. Every rerun of a finished request does the same file check. |
 | `failed-pre-submit` | any | Report the terminal failure and release admission. |
 
 A reserve result with `submission_authorized: false` means the run is already
@@ -116,6 +116,9 @@ which removes a journal run lock only when its owner process is dead.
   - It is changed only under the `chatgpt-go-account` lock.
   - A lock left by a dead process is recovered, so a crash cannot block resume.
 - **Acquire:**
+  - The request manifest is written first, then admission is claimed. A crash between
+    the two leaves a resumable request, never an orphaned admission. A request refused
+    with `ACCOUNT_BUSY` resumes with the same command once the account is free.
   - The step runs before the browser is touched and before any grant or prepare.
   - It fails with `ACCOUNT_BUSY` if another request is active.
   - It fails with `RATE_LIMITED` if the number of sends in the last hour is at least
@@ -152,6 +155,9 @@ which removes a journal run lock only when its owner process is dead.
   `Input.insertText`. There is no clipboard.
 - **Composer read-back:** whitespace-normalized composer text must equal the
   normalized prompt.
+- **Fallback render:** a conversation can render in a fallback mode that shows only the
+  running assistant turn. If the page shows no user message at all, `go` reloads the tab
+  once. The running turn is not affected.
 - **Expected user message:** the last user message in the conversation contains the
   first 300 normalized characters of the prompt. A length check is not used, because
   ChatGPT collapses long user messages ("Show more"). Each run starts a fresh

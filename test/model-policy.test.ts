@@ -113,7 +113,8 @@ test('profiles resolve to exact fail-closed picker targets', async t => {
     brainstorm: ['Pro', 'Pro'],
     plan: ['Pro', 'Pro'],
     architecture: ['Pro', 'Pro'],
-    'architecture-current-pro': ['Pro', 'Pro']
+    'architecture-current-pro': ['Pro', 'Pro'],
+    'architecture-xhigh': ['Extra High', 'XHigh']
   } as const;
 
   for (const [profile, [control, picker]] of Object.entries(expected)) {

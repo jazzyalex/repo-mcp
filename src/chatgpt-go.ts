@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { readRegularFile } from './bounded-file.js';
@@ -220,7 +220,9 @@ export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult>
       if (prompt !== undefined && sha256(prompt) !== saved.prompt_sha256) throw new GoError('REQUEST_CONFLICT', `Request ${options.requestId} already exists with a different prompt.`);
       if ((options.repositoryId !== undefined && options.repositoryId !== saved.repository_id) ||
           (options.taskId !== undefined && options.taskId !== saved.task_id) ||
-          (options.coordinator !== undefined && options.coordinator !== saved.coordinator)) {
+          (options.coordinator !== undefined && options.coordinator !== saved.coordinator) ||
+          (options.kind !== undefined && options.kind !== saved.kind) ||
+          (options.profile !== undefined && options.profile !== saved.profile)) {
         throw new GoError('REQUEST_CONFLICT', `Request ${options.requestId} already exists with different inputs.`);
       }
     } else if (prompt !== undefined) {
@@ -239,7 +241,8 @@ export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult>
         session_id: `go-${digest.slice(0, 16)}-${randomBytes(4).toString('hex')}`,
         created_at: at, updated_at: at, phase: 'admitted'
       };
-      await admit(account, accountKey(store.dir, m.request_id), options.maxPerHour ?? 4, now());
+      // The manifest is durable before the account is claimed, so a crash in between
+      // leaves a resumable request, never an orphaned admission. drive() admits it.
       if (!(await store.create(rel, GO_KIND, m))) throw new GoError('REQUEST_BUSY', 'Request was created concurrently.');
     }
     if (!m) throw new GoError('NO_SUCH_REQUEST', `No go request ${options.requestId}; start it with --prompt-file.`);
@@ -299,6 +302,7 @@ class Driver {
 
   async drive(): Promise<GoResult> {
     if (this.m.phase === 'cleaned' || this.m.phase === 'failed') {
+      if (this.m.output_file) await this.ensureOutputFile();
       await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
       return result(this.m, this.m.run_id ? await this.run() : undefined);
     }
@@ -395,7 +399,7 @@ class Driver {
     } else if (run.state === 'submission-reserved') {
       await markChatGptRunSubmitted({ stateDir: this.stateDir, runId: run.run_id, receipt: this.receipt(run, eventId), now: this.now() });
     }
-    await this.save({ phase: 'submitted', submission_event_id: eventId });
+    await this.save({ phase: 'submitted', submission_event_id: eventId, failure_code: undefined });
     return this.awaitAnswer(prompt);
   }
 
@@ -451,6 +455,26 @@ class Driver {
     return this.finish('cleaned', { cleanup });
   }
 
+  /**
+   * Make the output file equal the journal's verified answer. The file is checked by
+   * content, not by the manifest's word; a missing or altered file is rewritten atomically.
+   */
+  private async ensureOutputFile() {
+    const saved = await chatGptRunOutput(this.m.run_id!, this.stateDir);
+    const digest = sha256(saved);
+    if (this.m.output_sha256 && digest !== this.m.output_sha256) throw new GoError('OUTPUT_MISMATCH', 'Saved output differs from the manifest.');
+    const outputFile = path.join(this.store.dir, `${manifestPath(this.m.request_id)}.output.md`);
+    const current = await readFile(outputFile, 'utf8').catch(() => undefined);
+    if (current === undefined || sha256(current) !== digest) {
+      const temp = `${outputFile}.${process.pid}.tmp`;
+      await writeFile(temp, saved, { mode: 0o600 });
+      await rename(temp, outputFile);
+    }
+    if (this.m.output_file !== outputFile || this.m.output_sha256 !== digest || (this.m.phase !== 'completed' && this.m.phase !== 'cleaned')) {
+      await this.save({ phase: this.m.phase === 'cleaned' ? 'cleaned' : 'completed', output_file: outputFile, output_sha256: digest });
+    }
+  }
+
   /** Continue from whatever the journal says happened (spec section 4). */
   private async recover(): Promise<GoResult> {
     // A crash can leave the journal's own run lock behind; it is removed only if its owner is dead.
@@ -463,16 +487,9 @@ class Driver {
         return this.finish('failed', { failure_code: 'DRIVER_INTERRUPTED' });
       case 'failed-pre-submit':
         return this.finish('failed', { failure_code: this.m.failure_code ?? run.failure_code });
-      case 'completed': {
-        const saved = await chatGptRunOutput(run.run_id, this.stateDir);
-        if (this.m.output_sha256 && sha256(saved) !== this.m.output_sha256) throw new GoError('OUTPUT_MISMATCH', 'Saved output differs from the manifest.');
-        if (this.m.phase !== 'completed' || !this.m.output_file) {
-          const outputFile = path.join(this.store.dir, `${manifestPath(this.m.request_id)}.output.md`);
-          await writeFile(outputFile, saved, { mode: 0o600 });
-          await this.save({ phase: 'completed', output_file: outputFile, output_sha256: sha256(saved) });
-        }
+      case 'completed':
+        await this.ensureOutputFile();
         return this.cleanup();
-      }
       case 'submission-reserved':
         if (!this.m.send_intent_at) {
           // The click is ordered after the intent write, so nothing was sent.

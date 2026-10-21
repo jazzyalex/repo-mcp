@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { openSync } from 'node:fs';
+import { closeSync, openSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -143,13 +143,18 @@ export async function ensureRelay(sleep: (ms: number) => Promise<void> = ms => n
   if (await relayAlive()) return;
   await mkdir(RELAY_DIR, { recursive: true, mode: 0o700 });
   const logFd = openSync(RELAY_LOG, 'a', 0o600);
+  let spawnError: Error | undefined;
   const child = spawn(process.execPath, [...process.execArgv, path.join(PROJECT_BASE, 'scripts', 'chatgpt-run.ts'), 'cdp-relay'], {
     cwd: PROJECT_BASE, detached: true, stdio: ['ignore', logFd, logFd]
   });
+  // Without a listener an async spawn failure (EAGAIN, ENOENT) would crash the driver.
+  child.on('error', error => { spawnError = error; });
   child.unref();
+  closeSync(logFd);
   const deadline = Date.now() + APPROVAL_WAIT_MS + 10_000;
   while (Date.now() < deadline) {
     await sleep(500);
+    if (spawnError) throw new GoError('BROWSER_UNAVAILABLE', `Cannot start the CDP relay: ${spawnError.message}`);
     if (await relayAlive()) return;
     // Exit 0 means another starter won the singleton lock; keep waiting for its socket.
     if (child.exitCode !== null && child.exitCode !== 0) throw new GoError('BROWSER_UNAVAILABLE', `CDP relay exited; see ${RELAY_LOG}.`);
@@ -161,7 +166,7 @@ export async function ensureRelay(sleep: (ms: number) => Promise<void> = ms => n
 export class RelayCdp {
   private id = 0;
   private buffer = '';
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private constructor(private socket: net.Socket) {
     socket.setEncoding('utf8');
     socket.on('data', chunk => {
@@ -173,12 +178,13 @@ export class RelayCdp {
         const waiter = this.pending.get(msg.id);
         if (!waiter) continue;
         this.pending.delete(msg.id);
+        clearTimeout(waiter.timer);
         if (msg.error) waiter.reject(new GoError('CDP_ERROR', String(msg.error.message)));
         else waiter.resolve(msg.result);
       }
     });
     socket.on('close', () => {
-      for (const w of this.pending.values()) w.reject(new GoError('BROWSER_UNAVAILABLE', 'CDP relay connection closed.'));
+      for (const w of this.pending.values()) { clearTimeout(w.timer); w.reject(new GoError('BROWSER_UNAVAILABLE', 'CDP relay connection closed.')); }
       this.pending.clear();
     });
   }
@@ -194,9 +200,9 @@ export class RelayCdp {
   send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<any> {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => { if (this.pending.delete(id)) reject(new GoError('CDP_TIMEOUT', `${method} timed out.`)); }, 30_000);
+      this.pending.set(id, { resolve, reject, timer });
       this.socket.write(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }) + '\n');
-      setTimeout(() => { if (this.pending.delete(id)) reject(new GoError('CDP_TIMEOUT', `${method} timed out.`)); }, 30_000);
     });
   }
   close() { this.socket.destroy(); }

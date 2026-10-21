@@ -106,7 +106,7 @@ const SURFACE_OVERRIDE_KIND = 'chatgpt-run-surface-override-v1';
 const OUTPUT_KIND = 'chatgpt-run-output-v1';
 const RECEIPT_MAX_AGE_MS = 60_000;
 const STATES = new Set<ChatGptRunState>(['prepared', 'verification-pending', 'submission-reserved', 'submitted', 'completed', 'failed-pre-submit', 'uncertain']);
-const PROFILES = new Set<ModelProfile>(['code', 'code-hard', 'review', 'review-critical', 'brainstorm', 'plan', 'architecture', 'architecture-current-pro']);
+const PROFILES = new Set<ModelProfile>(['code', 'code-hard', 'review', 'review-critical', 'brainstorm', 'plan', 'architecture', 'architecture-current-pro', 'architecture-xhigh']);
 const PROFILE_SELECTION = {
   code: ['High', null, 'High'],
   'code-hard': ['XHigh', null, 'Extra High'],
@@ -115,7 +115,8 @@ const PROFILE_SELECTION = {
   brainstorm: ['Pro', null, 'Pro'],
   plan: ['Pro', null, 'Pro'],
   architecture: ['Pro', null, 'Pro'],
-  'architecture-current-pro': ['Pro', null, 'Pro']
+  'architecture-current-pro': ['Pro', null, 'Pro'],
+  'architecture-xhigh': ['XHigh', null, 'Extra High']
 } as const;
 const LEGACY_PROFILE_MODEL_LABEL = {
   code: 'Sol',
@@ -125,7 +126,8 @@ const LEGACY_PROFILE_MODEL_LABEL = {
   brainstorm: 'Sol Pro',
   plan: 'Sol Pro',
   architecture: 'Sol Pro',
-  'architecture-current-pro': 'GPT-6'
+  'architecture-current-pro': 'GPT-6',
+  'architecture-xhigh': null
 } as const;
 const RECORD_KEYS = new Set([
   'schema_version', 'run_id', 'coordinator', 'execution_surface', 'work_kind', 'profile', 'state',
@@ -171,7 +173,7 @@ function surfaceOverrideReason(value: string | undefined) {
 function profileFor(kind: ChatGptWorkKind, profile?: ModelProfile): ModelProfile {
   const chosen = profile ?? (kind === 'architecture' ? 'architecture' : kind === 'code' ? 'code' : 'review');
   const allowed = kind === 'architecture'
-    ? new Set<ModelProfile>(['architecture', 'architecture-current-pro'])
+    ? new Set<ModelProfile>(['architecture', 'architecture-current-pro', 'architecture-xhigh'])
     : kind === 'code'
       ? new Set<ModelProfile>(['code', 'code-hard'])
       : new Set<ModelProfile>(['review', 'review-critical']);
@@ -322,7 +324,7 @@ function validateRun(raw: unknown, runId: string): ChatGptRunRecord {
       ((record.completion_event_sha256 === undefined) !== (record.completion_observed_at === undefined)) ||
       ((record.recovery_event_sha256 === undefined) !== (record.recovery_observed_at === undefined)) ||
       (record.uncertain_from !== undefined && record.uncertain_from !== 'submission-reserved' && record.uncertain_from !== 'submitted') ||
-      (record.work_kind === 'architecture' && record.profile !== 'architecture' && record.profile !== 'architecture-current-pro') ||
+      (record.work_kind === 'architecture' && record.profile !== 'architecture' && record.profile !== 'architecture-current-pro' && record.profile !== 'architecture-xhigh') ||
       (record.work_kind === 'review' && record.profile !== 'review' && record.profile !== 'review-critical') ||
       (record.work_kind === 'code' && record.profile !== 'code' && record.profile !== 'code-hard') ||
       (['submission-reserved', 'submitted', 'completed', 'uncertain'].includes(record.state) && record.model_verified_at === undefined) ||
