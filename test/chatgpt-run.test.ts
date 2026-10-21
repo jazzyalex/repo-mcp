@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,7 @@ import {
   setRepositorySurfacePolicy
 } from '../src/multirepo-state.js';
 import {
+  chatGptRunOutput,
   chatGptRunStatus,
   completeChatGptRun,
   failChatGptRunBeforeSubmit,
@@ -162,6 +163,7 @@ test('verified model selection reserves once and completion stores only output h
   assert.equal((await markChatGptRunSubmitted({ runId: run.run_id, stateDir, receipt: submittedReceipt, now: OBSERVED })).state, 'submitted');
   assert.equal((await markChatGptRunSubmitted({ runId: run.run_id, stateDir, receipt: submittedReceipt, now: OBSERVED })).state, 'submitted');
   const output = 'SHIP: no findings.';
+  await assert.rejects(chatGptRunOutput(run.run_id, stateDir), /only a completed run has a saved output/);
   const completedReceipt = completionReceipt(run, 'completion-1', 'submission-1', output);
   const completed = await completeChatGptRun({ stateDir, runId: run.run_id, output, outcome: 'ship', receipt: completedReceipt, now: OBSERVED });
   assert.equal(completed.state, 'completed');
@@ -172,6 +174,18 @@ test('verified model selection reserves once and completion stores only output h
   );
   assert.match(completed.output_sha256 ?? '', /^[a-f0-9]{64}$/);
   assert.equal(JSON.stringify(completed).includes(output), false);
+  assert.equal(await chatGptRunOutput(run.run_id, stateDir), output);
+  const savedPath = path.join(stateDir, 'chatgpt-run-outputs', `${run.run_id}.json`);
+  assert.equal((await stat(savedPath)).mode & 0o777, 0o600);
+  const saved = JSON.parse(await readFile(savedPath, 'utf8'));
+  saved.data.output = 'tampered';
+  await writeFile(savedPath, JSON.stringify(saved));
+  await assert.rejects(chatGptRunOutput(run.run_id, stateDir), /does not match the run record/);
+  await rm(savedPath);
+  await assert.rejects(chatGptRunOutput(run.run_id, stateDir), /No saved output/);
+  // Repeating the same completion restores a missing saved output.
+  await completeChatGptRun({ stateDir, runId: run.run_id, output, outcome: 'ship', receipt: completedReceipt, now: OBSERVED });
+  assert.equal(await chatGptRunOutput(run.run_id, stateDir), output);
 });
 
 test('capability-only Pro architecture profile completes one durable Chat run', async t => {
@@ -320,6 +334,10 @@ test('public ChatGPT run CLI prepares from a regular prompt and refuses a symlin
     sha256('browser-event\0submit-cli'), '--output-sha256', sha256('SHIP\n'), '--response-state', 'completed'], { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 30_000 });
   assert.equal(completed.status, 0, completed.stderr);
   assert.equal(JSON.parse(completed.stdout).state, 'completed');
+  const printed = spawnSync('npm', ['run', '--silent', 'chatgpt-run', '--', 'output', '--state-dir', stateDir, '--run', prepared.run_id],
+    { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(printed.status, 0, printed.stderr);
+  assert.equal(printed.stdout, 'SHIP\n');
   const refused = spawnSync('npm', args(linked), { cwd: PROJECT_BASE, encoding: 'utf8', timeout: 30_000 });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /symlink|symbolic link|ELOOP/i);

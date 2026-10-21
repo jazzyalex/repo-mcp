@@ -5,6 +5,7 @@ import {
   CHATGPT_RUN_MAX_PROMPT_BYTES,
   chatGptRunStatus,
   completeChatGptRun,
+  chatGptRunOutput,
   failChatGptRunBeforeSubmit,
   markChatGptRunSubmitted,
   markChatGptRunUncertain,
@@ -31,6 +32,7 @@ Usage:
     [--surface chat|work] [--surface-override-reason REASON]
     (--session-id ID|--conversation-id ID) --prompt-file FILE [--base-ref REF]
   chatgpt-run status [--state-dir PATH] --run RUN_ID
+  chatgpt-run output [--state-dir PATH] --run RUN_ID
   chatgpt-run observe [--state-dir PATH] --selection-id ID --surface chat|work
     --control-label LABEL [--model-label LABEL] --selected-at ISO --observed-at ISO
     (--session-id ID|--conversation-id ID)
@@ -119,7 +121,7 @@ const validateCommandOptions = () => {
       'surface-override-reason', 'conversation-id', 'session-id', 'prompt-file', 'base-ref'
     );
   }
-  if (command === 'status') return assertOnly('state-dir', 'run');
+  if (command === 'status' || command === 'output') return assertOnly('state-dir', 'run');
   if (command === 'observe') {
     return assertOnly(
       'state-dir', 'selection-id', 'surface', 'control-label', 'model-label',
@@ -157,7 +159,7 @@ try {
     }
     process.stdout.write(HELP);
   } else {
-    if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit.');
+    if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|output|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit.');
     validateCommandOptions();
     if (command === 'prepare') {
       const promptFile = need('prompt-file');
@@ -171,6 +173,8 @@ try {
       }));
     } else if (command === 'status') {
       print(await chatGptRunStatus(need('run'), stateDir));
+    } else if (command === 'output') {
+      process.stdout.write(await chatGptRunOutput(need('run'), stateDir));
     } else if (command === 'observe') {
       print(await recordTrustedBrowserObservation({
         selectionId: need('selection-id'), surface: need('surface') as ChatSurface,

@@ -97,10 +97,16 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
     45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
     with `run_in_background`; Codex: a short wait).
     ```js
-    (() => { const m = [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+    (() => { const m = [...document.querySelectorAll(ANSWER)].at(-1);
       const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
-      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]'), chars: t.length, tail: t.slice(-150)}; })()
+      const turn = [...document.querySelectorAll('[data-talvt-turn-state]')].at(-1)?.getAttribute('data-talvt-turn-state');
+      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]') || (turn !== undefined && turn !== 'complete'),
+        chars: t.length, tail: t.slice(-150)}; })()
     ```
+    `ANSWER` is `'[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]'`
+    (the old and the October 2026 ChatGPT layouts). If `chars` stays near 0 while the
+    page shows an answer, the layout changed again: find the answer element before
+    trusting the check.
     The answer is done when two checks in a row show `busy: false` with the same `chars`,
     and `tail` ends with the verdict or the end of the report. A Pro pass usually takes 15–20 minutes.
 11. **Capture the answer** into `$R/output.md`: back up the clipboard
@@ -116,13 +122,18 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
       --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
       --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
     ```
-13. **Archive the chat** so it leaves the ChatGPT sidebar. Do this only after the
-    commands above printed `completed` (and `closed` for a review) and `$R/output.md`
-    holds the whole answer. In the conversation tab (`$R/chat-url`), click the **More**
-    (`…`) button at the top right, then **Archive**. The chat stays in your account under
-    Settings → Data controls → Archived chats, and its URL still opens. Never use
-    **Delete**. Skip this step and keep the chat when the run is `uncertain`, needs
-    recovery, or the answer was not captured.
+13. **Archive the chat** so it leaves the ChatGPT sidebar. `complete` saves the answer
+    in the broker state; first confirm that saved copy matches what you captured:
+    ```bash
+    npm run --silent chatgpt-run -- output --run "$RUN" | cmp -s - "$R/output.md" && echo SAVED
+    ```
+    Only when it prints `SAVED`: in the conversation tab (`$R/chat-url`), click the
+    **More** (`…`) button at the top right, then **Archive**. The chat stays in your
+    account (Settings, Archived chats) and its URL still opens with the full answer.
+    Archiving asks for no confirmation; the tab moves to a new chat.
+    Never use **Delete**. Skip this step and keep the chat when the run is `uncertain`,
+    needs recovery, or the check did not print `SAVED`. Later, `chatgpt-run output --run
+    RUN_ID` prints the saved answer again.
 14. If you bound a task for this pass, finish it: `npm run --silent coord -- task finish --task "$TASK"`.
 
 Report `Execution surface: ChatGPT web`, `Coordinator: Claude Code`, verified Pro profile, `Repository evidence: Repo MCP`, and exact scope/limitations.

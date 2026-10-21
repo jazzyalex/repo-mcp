@@ -103,6 +103,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/u;
 const KIND = 'chatgpt-run-v1';
 const REQUEST_KIND = 'chatgpt-run-request-v1';
 const SURFACE_OVERRIDE_KIND = 'chatgpt-run-surface-override-v1';
+const OUTPUT_KIND = 'chatgpt-run-output-v1';
 const RECEIPT_MAX_AGE_MS = 60_000;
 const STATES = new Set<ChatGptRunState>(['prepared', 'verification-pending', 'submission-reserved', 'submitted', 'completed', 'failed-pre-submit', 'uncertain']);
 const PROFILES = new Set<ModelProfile>(['code', 'code-hard', 'review', 'review-critical', 'brainstorm', 'plan', 'architecture', 'architecture-current-pro']);
@@ -147,6 +148,7 @@ export const CHATGPT_RUN_MAX_OUTPUT_BYTES = 1024 * 1024;
 const recordPath = (runId: string) => `chatgpt-runs/${runId}.json`;
 const requestPath = (requestKey: string) => `chatgpt-run-requests/${requestKey}.json`;
 const surfaceOverridePath = (runId: string) => `chatgpt-run-authorizations/${runId}.json`;
+const outputPath = (runId: string) => `chatgpt-run-outputs/${runId}.json`;
 const lockKey = (runId: string) => `chatgpt-run-${runId}`;
 
 function assertId(value: string, name: string) {
@@ -797,6 +799,20 @@ export async function chatGptRunStatus(runId: string, stateDir = defaultStateDir
   return readRun(await StateStore.inspect(stateDir), runId);
 }
 
+/** The saved answer of a completed run, checked against the digest in its record. */
+export async function chatGptRunOutput(runId: string, stateDir = defaultStateDir()) {
+  const store = await StateStore.inspect(stateDir);
+  const record = await readRun(store, runId);
+  if (record.state !== 'completed') throw new SafeError(`ChatGPT run is ${record.state}; only a completed run has a saved output.`);
+  const saved = await store?.read<{ run_id?: unknown; output_sha256?: unknown; output?: unknown }>(outputPath(runId), OUTPUT_KIND);
+  if (!saved) throw new SafeError('No saved output for this run (it completed before outputs were saved).');
+  if (saved.run_id !== runId || typeof saved.output !== 'string' || saved.output_sha256 !== record.output_sha256 ||
+      sha256(saved.output) !== record.output_sha256) {
+    throw new SafeError('Saved output does not match the run record; inspect it before continuing.');
+  }
+  return saved.output;
+}
+
 export async function reserveChatGptRun(options: {
   stateDir?: string; runId: string; contract: unknown; evidence: SanitizedModelSelectionEvidence; now?: Date;
 }) {
@@ -907,6 +923,10 @@ export async function completeChatGptRun(options: {
   if (Buffer.byteLength(options.output, 'utf8') > CHATGPT_RUN_MAX_OUTPUT_BYTES) throw new SafeError('ChatGPT completion output exceeds 1 MiB.');
   const stateDir = options.stateDir ?? defaultStateDir();
   const digest = sha256(options.output);
+  const store = await StateStore.open(stateDir);
+  // A completed run always has its answer on disk, so the ChatGPT chat can be archived safely.
+  const saveOutput = () => store.write(outputPath(options.runId), OUTPUT_KIND,
+    { run_id: options.runId, output_sha256: digest, output: options.output });
   return transitionRun(stateDir, options.runId, ['submitted', 'completed'], async record => {
     const trusted = validateTrustedReceipt(record, options.receipt, options.now, record.submitted_at);
     if (options.receipt.kind !== 'completion' || options.receipt.responseState !== 'completed') {
@@ -918,10 +938,14 @@ export async function completeChatGptRun(options: {
     if (options.receipt.outputSha256 !== digest) throw new SafeError('Completion receipt output digest does not match the observed output.');
     if (trusted.event === record.submission_event_sha256) throw new SafeError('Completion cannot reuse the submission event.');
     if (record.state === 'completed') {
-      if (record.output_sha256 === digest && record.outcome === options.outcome && record.completion_event_sha256 === trusted.event) return record;
+      if (record.output_sha256 === digest && record.outcome === options.outcome && record.completion_event_sha256 === trusted.event) {
+        await saveOutput();
+        return record;
+      }
       throw new SafeError('ChatGPT run already completed with a different output or outcome.');
     }
     await assertCandidateCurrent(record, stateDir);
+    await saveOutput();
     const at = nowIso(options.now);
     return { ...record, state: 'completed', output_sha256: digest, outcome: options.outcome,
       completion_event_sha256: trusted.event, completion_submission_event_sha256: options.receipt.submissionEventSha256,
