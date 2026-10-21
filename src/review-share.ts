@@ -58,6 +58,8 @@ type PrepareReviewOptions = {
   headRef?: string;
   scopePrefix?: string;
   ttlSeconds?: number;
+  /** Preallocated run ID for a new participant, so a caller can find a run published before a crash. */
+  runId?: string;
   now?: Date;
 };
 
@@ -79,6 +81,9 @@ function assertPrepareOptions(options: PrepareReviewOptions) {
   if ((options.scopePrefix ?? '').length > 256 || CONTROL.test(options.scopePrefix ?? '')) throw new SafeError('Review scope prefix is invalid.');
   if (options.headRef !== undefined && options.baseRef === undefined) {
     throw new SafeError('Commit-pinned shared review requires explicit base_ref with head_ref.');
+  }
+  if (options.runId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.runId)) {
+    throw new SafeError('Invalid preallocated run ID.');
   }
   const ttl = options.ttlSeconds ?? 60;
   if (!Number.isSafeInteger(ttl) || ttl < 60 || ttl > 3600) throw new SafeError('Review TTL must be between 60 and 3600 seconds.');
@@ -425,7 +430,7 @@ export async function prepareOrJoinReview(options: PrepareReviewOptions) {
 
     if (journal.participants.length >= 512) fail('REVIEW_SHARE_STATE_CORRUPT', 'Review participant retention limit reached.');
     const participantId = randomUUID();
-    const runId = randomUUID();
+    const runId = options.runId ?? randomUUID();
     const selectionId = randomUUID();
     const participantTtlMs = Math.max(60_000, (options.ttlSeconds ?? 60) * 1000);
     const participant: ReviewParticipant = {

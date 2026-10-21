@@ -6,10 +6,11 @@ import path from 'node:path';
 import { prepareFixture } from '../src/fixture.js';
 import { migrateV1 } from '../src/policy.js';
 import { defaultPolicy } from '../src/repo.js';
-import { bindRegisteredTask, registerRepository } from '../src/multirepo-state.js';
+import { bindRegisteredTask, openWorkspace, registerRepository, rebindRegisteredTask, setRegisteredTaskPhase } from '../src/multirepo-state.js';
+import { git } from './helpers.js';
 import { StateStore } from '../src/task-state.js';
 import { chatGptRunOutput, chatGptRunStatus } from '../src/chatgpt-run.js';
-import { GoError, goStatus, releaseGoAdmission, runGo, type ChatGptPage, type GoPhase, type TurnState } from '../src/chatgpt-go.js';
+import { GoError, goStatus, releaseGoAdmission, reviewVerdict, runGo, type ChatGptPage, type GoPhase, type TurnState } from '../src/chatgpt-go.js';
 
 const PROMPT = 'Architecture review of the plan. Use Repo MCP only. Make no edits.\n\nEnd with VERDICT.';
 const ANSWER = 'Proceed with changes.\n\nVERDICT: proceed with changes';
@@ -37,6 +38,7 @@ class FakePage implements ChatGptPage {
   constructor(public opts: {
     sentAlready?: boolean; showMessage?: boolean; busyPolls?: number; effortLabel?: string;
     failArchive?: boolean; failEffort?: GoError; tabGone?: boolean; dropClick?: boolean; now?: () => Date;
+    answer?: string; onSend?: () => Promise<void>;
   } = {}) { this.sent = !!opts.sentAlready; }
   async open() { return { targetId: 'target-1' }; }
   async reattach() { return !this.opts.tabGone; }
@@ -48,14 +50,14 @@ class FakePage implements ChatGptPage {
     if (!this.opts.now) await new Promise(r => setTimeout(r, 5));
     return { selectedAt, observedLabel: this.opts.effortLabel ?? label };
   }
-  async clickSend() { this.clicks++; if (!this.opts.dropClick) this.sent = true; }
+  async clickSend() { this.clicks++; if (!this.opts.dropClick) this.sent = true; await this.opts.onSend?.(); }
   async conversationUrl() { return this.sent ? 'https://chatgpt.com/c/abc-123' : undefined; }
   async hasExpectedUserMessage() { return this.sent && this.opts.showMessage !== false; }
   async turnState(): Promise<TurnState> {
     this.polls++;
-    return this.polls <= (this.opts.busyPolls ?? 1) ? { state: 'busy', chars: 10 } : { state: 'done', chars: ANSWER.length };
+    return this.polls <= (this.opts.busyPolls ?? 1) ? { state: 'busy', chars: 10 } : { state: 'done', chars: (this.opts.answer ?? ANSWER).length };
   }
-  async readAnswer() { return ANSWER; }
+  async readAnswer() { return this.opts.answer ?? ANSWER; }
   async archive() { if (this.opts.failArchive) throw new GoError('UI_MISSING:archive'); this.archived++; }
   async closeTab() {}
   async close() {}
@@ -209,7 +211,7 @@ test('ambiguous UI before prepare fails without creating a run', async t => {
   assert.equal(r.failure_code, 'UI_AMBIGUOUS_REPO_MCP_ITEM');
 });
 
-test('only architecture is supported for now', async t => {
+test('kind code is unsupported', async t => {
   const { stateDir } = await fixture(t);
   await assert.rejects(runGo({ ...base(stateDir), kind: 'code' }, { page: new FakePage(), sleep }),
     (e: unknown) => e instanceof GoError && e.code === 'KIND_UNSUPPORTED');
@@ -311,4 +313,107 @@ test('a finished request releases the account even when output repair fails', as
   await rm(r.output_file!);
   await assert.rejects(runGo(base(stateDir), { page: new FakePage(), sleep }));
   assert.equal((await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep })).phase, 'cleaned');
+});
+
+// --- review kind -------------------------------------------------------------------------
+
+const WS_ID = 'open-go-review-1';
+const REVIEW_PROMPT = `Independent review of the change. Workspace request id: ${WS_ID}\n\nEnd with VERDICT: SHIP or VERDICT: NO-SHIP.`;
+
+/** Registered repository with a review-phase task and two commits to review. */
+async function reviewFixture(t: { after(fn: () => Promise<void>): void }) {
+  const f = await fixture(t);
+  const root = path.join(f.stateDir, '..', 'repo');
+  await writeFile(path.join(root, 'src', 'go-target.txt'), 'target v1\n');
+  await git(root, 'add', '--', 'src/go-target.txt');
+  await git(root, 'commit', '-m', 'go target');
+  await rebindRegisteredTask({ stateDir: f.stateDir, taskId: 'task' });
+  await setRegisteredTaskPhase({ stateDir: f.stateDir, taskId: 'task', phase: 'review' });
+  const baseRef = (await git(root, 'rev-parse', 'HEAD^')).trim();
+  const headRef = (await git(root, 'rev-parse', 'HEAD')).trim();
+  return { ...f, baseRef, headRef };
+}
+
+const reviewBase = (r: { stateDir: string; baseRef: string; headRef: string }, requestId = 'rev-1') => ({
+  ...base(r.stateDir, requestId), kind: 'review', prompt: REVIEW_PROMPT,
+  workspaceRequestId: WS_ID, baseRef: r.baseRef, headRef: r.headRef
+});
+
+/** Simulates ChatGPT calling workspace_open with the request ID named in the prompt, at send time. */
+const openOnSend = (r: { stateDir: string; baseRef: string; headRef: string }) => async () => {
+  await openWorkspace({ stateDir: r.stateDir, repositoryId: 'repo', taskId: 'task', mode: 'review',
+    requestId: WS_ID, baseRef: r.baseRef, headRef: r.headRef });
+};
+
+const invalid = (e: unknown) => e instanceof GoError && e.code === 'INVALID_REQUEST';
+
+test('review happy path: SHIP verdict, cleaned, participant closed after workspace reconcile', async t => {
+  const r = await reviewFixture(t);
+  const page = new FakePage({ answer: 'Looks fine.\n\nVERDICT: SHIP', onSend: openOnSend(r) });
+  const res = await runGo(reviewBase(r), { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.run_state, 'completed');
+  assert.equal(res.outcome, 'ship');
+  assert.equal(res.participant, 'closed');
+  assert.equal(res.failure_code, null);
+  assert.equal(page.clicks, 1);
+  assert.equal((await goStatus(r.stateDir, 'rev-1')).participant, 'closed');
+  // Rerun is stable and does not click again.
+  const again = new FakePage();
+  assert.deepEqual(await runGo(reviewBase(r), { page: again, sleep }), res);
+  assert.equal(again.clicks, 0);
+});
+
+test('review answer without a verdict line fails closed to no-ship', async t => {
+  const r = await reviewFixture(t);
+  const res = await runGo(reviewBase(r), { page: new FakePage({ answer: 'I think this is fine to SHIP.', onSend: openOnSend(r) }), sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.outcome, 'no-ship');
+  assert.equal(res.participant, 'closed');
+});
+
+test('reviewVerdict parses the last verdict line and fails closed', () => {
+  assert.equal(reviewVerdict('text\n**VERDICT:** NO-SHIP'), 'no-ship');
+  assert.equal(reviewVerdict('VERDICT - SHIP'), 'ship');
+  assert.equal(reviewVerdict('VERDICT: NO-SHIP\nmore\nVERDICT: SHIP'), 'ship');
+  assert.equal(reviewVerdict('VERDICT: SHIP\nafter fixes\nVERDICT: NO-SHIP'), 'no-ship');
+  assert.equal(reviewVerdict('no verdict here'), 'no-ship');
+  assert.equal(reviewVerdict('We should SHIP this change.'), 'no-ship');
+});
+
+test('invalid review inputs are rejected before any run', async t => {
+  const r = await reviewFixture(t);
+  const run = (over: Record<string, unknown>) => runGo({ ...reviewBase(r, `bad-${Math.random().toString(36).slice(2, 8)}`), ...over }, { page: new FakePage(), sleep });
+  await assert.rejects(run({ workspaceRequestId: undefined }), invalid);
+  await assert.rejects(run({ baseRef: 'HEAD^' }), invalid);
+  await assert.rejects(run({ baseRef: 'A'.repeat(40) }), invalid);
+  await assert.rejects(run({ headRef: r.headRef.slice(0, 39) }), invalid);
+  await assert.rejects(run({ prompt: 'Review it. No workspace id here.' }), invalid);
+  await assert.rejects(run({ profile: 'architecture' }), invalid);
+  await assert.rejects(runGo({ ...base(r.stateDir, 'arch-opts'), workspaceRequestId: WS_ID, baseRef: r.baseRef, headRef: r.headRef },
+    { page: new FakePage(), sleep }), invalid);
+});
+
+test('review with a wrong effort label fails before submit and releases the participant', async t => {
+  const r = await reviewFixture(t);
+  const page = new FakePage({ effortLabel: 'High' });
+  const res = await runGo(reviewBase(r), { page, sleep });
+  assert.equal(res.phase, 'failed');
+  assert.equal(res.run_state, 'failed-pre-submit');
+  assert.equal(res.participant, 'closed');
+  assert.equal(page.clicks, 0);
+});
+
+test('a review whose workspace was never opened is held, then completes on resume once it is', async t => {
+  const r = await reviewFixture(t);
+  const page = new FakePage({ answer: 'VERDICT: NO-SHIP' });
+  const held = await runGo(reviewBase(r), { page, sleep: async () => {} });
+  assert.equal(held.phase, 'uncertain');
+  assert.equal(held.failure_code, 'WORKSPACE_RECONCILIATION_REQUIRED');
+  await openOnSend(r)();
+  const done = await runGo(reviewBase(r), { page, sleep: async () => {} });
+  assert.equal(done.phase, 'cleaned');
+  assert.equal(done.outcome, 'no-ship');
+  assert.equal(done.participant, 'closed');
+  assert.equal(page.clicks, 1);
 });

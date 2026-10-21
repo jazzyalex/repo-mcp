@@ -1,7 +1,8 @@
 # `chatgpt-run go` driver specification
 
-Status: v1, 2026-10-21. This is step 1 of `docs/AUTONOMOUS-RUN-PLAN.md`. It covers the
-architecture kind only. Review and code reuse this spec later.
+Status: v2, 2026-10-21. This is step 1 of `docs/AUTONOMOUS-RUN-PLAN.md`. It covers the
+architecture and review kinds (section 9) and the `finish` report (section 10). Code
+reuses this spec later.
 
 The run journal (`src/chatgpt-run.ts`, `src/model-policy.ts`) stays the authority. `go`
 is a trusted browser adapter. It performs the picker action, rereads the live control,
@@ -35,6 +36,10 @@ chatgpt-run probe
   - The exit code is 0 for `completed`.
   - The exit code is 3 for a held `uncertain` run.
   - The exit code is 1 for a terminal failure.
+  - On any `go` error, the CLI still prints the stored request status plus `error` and
+    `unresolved`. It exits 3 when the run may have been sent: phase `send-intent`, or
+    run state `submission-reserved`, `submitted` or `uncertain`. The caller then only
+    resumes, never starts a new request.
 
 ## 2. Driver manifest
 
@@ -125,6 +130,8 @@ which removes a journal run lock only when its owner process is dead.
     `--max-per-hour` (default 4).
   - A request may re-acquire its own admission.
 - **Release:** only when the request reaches `cleaned` or `failed`.
+  - A finished request releases admission even if the output-file repair fails. The
+    repair error is raised after the release.
   - A timeout, a crash or a dead PID does **not** release it.
   - `uncertain` keeps it.
   - `--release-admission` is the explicit operator escape.
@@ -157,7 +164,8 @@ which removes a journal run lock only when its owner process is dead.
   normalized prompt.
 - **Fallback render:** a conversation can render in a fallback mode that shows only the
   running assistant turn. If the page shows no user message at all, `go` reloads the tab
-  once. The running turn is not affected.
+  once. The running turn is not affected. The same reload also runs inside the turn-state
+  check, so a fallback render cannot hide the finished answer.
 - **Expected user message:** the last user message in the conversation contains the
   first 300 normalized characters of the prompt. A length check is not used, because
   ChatGPT collapses long user messages ("Show more"). Each run starts a fresh
@@ -198,7 +206,8 @@ which removes a journal run lock only when its owner process is dead.
 - **Session binding:** all receipts carry `sessionId = session_id` and no
   `conversationId`.
 - **Freshness:** `observedAt` is taken right before the journal call. It stays within
-  the journal's 60 s receipt freshness.
+  the journal's 60 s receipt freshness. The completion receipt is built before the
+  journal reads its own `now`, so the receipt time can never be later than `now`.
 
 ## 8. Tests (fault injection with a fake page, no live browser)
 
@@ -218,3 +227,54 @@ which removes a journal run lock only when its owner process is dead.
    `failed-pre-submit` after it.
 10. A lost final output: rerunning the same command returns the stored result without
     browser actions.
+
+## 9. Review kind
+
+```
+chatgpt-run go --kind review [--profile review|review-critical] --workspace-request-id WSREQ
+  --base-ref COMMIT --head-ref COMMIT [--scope-prefix P] ...
+```
+
+- **Commit-pinned only.** Both refs must be full 40-hex commits that the coordinator
+  resolved before it wrote the prompt. The prompt must contain `WSREQ`. The request
+  digest also covers `WSREQ`, both commits and the scope.
+- **Prepare** goes through `prepareOrJoinReview` with the preallocated `pending_run_id`,
+  so section 6a's adoption rule still holds. The driver then checks that both task IDs
+  equal the request's task, that the run's `commit_binding` names exactly the requested
+  base and head, and that it equals the participant's binding. On a mismatch it runs
+  `fail-pre-submit REVIEW_TARGET_MISMATCH` before any selection or send. If prepare
+  joined an existing participant (a different run ID), the run goes to recovery.
+- **Receipts** for a commit-pinned run also carry `headCommit` and `candidateDigest`.
+- **Outcome:** the `finish` report's outcome (`ship` / `no-ship`) when one exists. Else
+  the last `VERDICT: SHIP|NO-SHIP` line of the page text. A missing verdict fails closed
+  to `no-ship`.
+- **Participant release:** when the run is terminal, the driver reconciles
+  (`completed`) or recovers (`failed-pre-submit`) the participant and closes it with
+  request ID `go-close-<32 hex of the request hash>`. The result is `participant:
+  closed` or `participant: warning:<code>`. A warning does not change the phase, and
+  every rerun of the request retries the close.
+- **Bound before completion:** the journal completes a shared review only when its
+  participant is bound to the workspace ChatGPT opened. The driver reconciles right
+  before `completeChatGptRun`. If that fails, the run is held `uncertain` with the
+  reconcile code (usually `WORKSPACE_RECONCILIATION_REQUIRED`: ChatGPT never opened the
+  workspace). A resume reconciles again and never resends.
+- **Before go:** the coordinator still runs `coord task rebind` when HEAD moved.
+
+## 10. `finish` report
+
+- **Tool:** `finish(workspace_token, outcome, summary_markdown, request_id)` on the
+  multi-repository MCP server. Review workspaces report `ship` or `no-ship`; inspect and
+  code workspaces report `completed`. The report is at most 192 KiB and is never
+  truncated.
+- **Binding:** the coordinator names the `workspace_open` request ID in its prompt. The
+  report is stored per workspace (`mcp-reports/<workspace_id>`, kind `mcp-report-v1`),
+  and `go` finds it through the request ledger (`workspaceForOpenRequest`). It must name
+  the request's repository and task. No run ID passes through ChatGPT.
+- **Immutable:** the first report wins. The same report again returns the same `ack_id`;
+  different content or outcome is rejected.
+- **Not a completion signal:** a report does not change the run state. `go` still waits
+  for a finished turn (section 6), then saves the report text as the run output instead
+  of the page text. `output_source` in the result is `mcp-report` or `page`.
+- **Architecture** passes may also pass `--workspace-request-id` to enable the report.
+- **Not yet:** the coding seal (an accepted report stops further mutations) waits for
+  `go --kind code`.

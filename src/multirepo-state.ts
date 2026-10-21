@@ -1393,6 +1393,21 @@ export async function readWorkspaceOpenOutcome(options: {
   });
 }
 
+/**
+ * The workspace selection a `workspace_open` request created, or null. This is the
+ * coordinator-made link: the coordinator names the request ID in its prompt, so the
+ * selection opened with it belongs to that run.
+ */
+export async function workspaceForOpenRequest(stateDir: string, requestId: string) {
+  validateRequestId(requestId);
+  return withControlLock(stateDir, 'read workspace for open request', async store => {
+    const auth = await readAuthStore(store);
+    const prior = auth.requests[requestKey('workspace_open', requestId)];
+    if (!prior || prior.operation !== 'workspace_open') return null;
+    return auth.workspaces[prior.workspace_id] ?? null;
+  });
+}
+
 export async function closeReviewWorkspaceUnderGate(options: {
   stateDir: string;
   workspaceId: string;

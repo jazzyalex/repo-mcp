@@ -12,6 +12,7 @@ import { jsonBytes } from './paging.js';
 import { StateStore } from './task-state.js';
 import { RELEASE_VERSION } from './version.js';
 import { jsonToolResult } from './tool-result.js';
+import { MCP_REPORT_MAX_BYTES, recordMcpReport } from './mcp-report.js';
 import {
   authorizeWorkspace,
   closeWorkspace,
@@ -296,7 +297,7 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
 
   const handler = createMcpHandler(({ era }) => {
     const server = new McpServer({ name: 'repo-mcp', version: RELEASE_VERSION }, {
-      instructions: 'Install-once multi-repository Repo MCP service. Begin with service_info and repository_list, then workspace_open using only operator-registered repository_id/task_id values. Every repository tool requires the immutable workspace_token returned by workspace_open; there is no ambient or current repository and no filesystem root/policy path is accepted through MCP. Coding mode additionally requires a short-lived operator-issued write_grant and only one coding workspace may own a task at a time. A phase change, rebind, disable, close, revocation or expiry invalidates old workspace authority. Git commit/push, policy changes, repository registration, task lifecycle control and unrestricted shell remain outside MCP.'
+      instructions: 'Install-once multi-repository Repo MCP service. Begin with service_info and repository_list, then workspace_open using only operator-registered repository_id/task_id values. Every repository tool requires the immutable workspace_token returned by workspace_open; there is no ambient or current repository and no filesystem root/policy path is accepted through MCP. Coding mode additionally requires a short-lived operator-issued write_grant and only one coding workspace may own a task at a time. A phase change, rebind, disable, close, revocation or expiry invalidates old workspace authority. When the coordinator prompt asks for it, deliver the complete final report once with finish before workspace_close. Git commit/push, policy changes, repository registration, task lifecycle control and unrestricted shell remain outside MCP.'
     });
 
     const respond = (fn: () => Promise<unknown>, tool: string) => async (): Promise<CallToolResult> => {
@@ -725,6 +726,19 @@ function registerWorkspaceTools(
       gatedPreflight
     );
   }, true));
+
+  server.registerTool('finish', {
+    description: 'Deliver your complete final report for this workspace to the coordinator. Call it once, before workspace_close, with the whole report as summary_markdown. Review workspaces report outcome ship or no-ship; inspect and code workspaces report completed. The same report again returns the same ack; a different report is rejected. This stores the report only: it changes no repository file and does not finish the task.',
+    inputSchema: z.strictObject({
+      workspace_token: deps.workspaceToken,
+      outcome: z.enum(['ship', 'no-ship', 'completed']),
+      summary_markdown: z.string().min(1).max(MCP_REPORT_MAX_BYTES),
+      request_id: requestId
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, scoped('finish', 'read', 'finish', (_repo, args, authorized) => recordMcpReport(stateDir, authorized.selection, {
+    outcome: args.outcome, summaryMarkdown: args.summary_markdown, requestId: args.request_id
+  })));
 
   server.registerTool('run_tests', {
     description: 'Run only an operator-approved fixture suite in a coding workspace. No arbitrary command is accepted.',

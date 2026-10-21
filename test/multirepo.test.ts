@@ -756,9 +756,9 @@ test('multi-repository broker isolates workspaces, writers, cursors, requests an
     const tools = await client.listTools();
     assert.deepEqual(
       tools.tools.map(tool => tool.name).sort(),
-      ['service_info', 'repository_list', 'workspace_open', 'workspace_close', 'repo_info', 'list_files', 'read', 'search', 'git_diff', 'edit', 'create_file', 'run_tests'].sort()
+      ['service_info', 'repository_list', 'workspace_open', 'workspace_close', 'repo_info', 'list_files', 'read', 'search', 'git_diff', 'edit', 'create_file', 'run_tests', 'finish'].sort()
     );
-    for (const name of ['repo_info', 'list_files', 'read', 'search', 'git_diff', 'edit', 'create_file', 'run_tests']) {
+    for (const name of ['repo_info', 'list_files', 'read', 'search', 'git_diff', 'edit', 'create_file', 'run_tests', 'finish']) {
       const schema = tools.tools.find(tool => tool.name === name)?.inputSchema as { required?: string[]; properties?: Record<string, unknown> };
       assert.ok(schema?.properties?.workspace_token, `${name} must expose workspace_token`);
       assert.ok(schema.required?.includes('workspace_token'), `${name} must require workspace_token`);

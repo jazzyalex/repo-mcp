@@ -41,17 +41,22 @@ connection prompts the owner again.
    Set `GOREQ=$REPO-architect-$(date +%Y%m%dT%H%M%S)` and
    `WSREQ=$REPO-architect-ws-$(date +%Y%m%dT%H%M%S)`.
 2. **Write the prompt** to `$R/prompt.txt`: repository ID, task ID, `inspect` mode,
-   request ID `$WSREQ`, expected root/branch/HEAD, the question, "make no edits", and
-   "end with one VERDICT line". `go` adds its own run-marker line on top.
+   request ID `$WSREQ`, expected root/branch/HEAD, the question, "make no edits",
+   "end with one VERDICT line", and "before `workspace_close`, call `finish` once with
+   outcome `completed` and your complete report as `summary_markdown`". `go` adds its own
+   run-marker line on top.
 3. **Run `go` once, in the background:**
    ```bash
    npm run --silent chatgpt-run -- go --request-id "$GOREQ" --repository "$REPO" --task "$TASK" \
-     --coordinator codex --kind architecture --profile architecture --prompt-file "$R/prompt.txt" > "$R/go.json"; echo "exit=$?" >> "$R/go.json"
+     --coordinator codex --kind architecture --profile architecture --workspace-request-id "$WSREQ" \\
+     --prompt-file "$R/prompt.txt" > "$R/go.json"; echo "exit=$?" >> "$R/go.json"
    ```
    Use `--profile architecture-xhigh` only when the user asked for Extra High. In Codex, start it as a background process and wait for it to exit.
    A Pro pass takes about 15–20 minutes, Extra High less. Do not check on it in between.
 4. **Read the result** (first line of `$R/go.json`, one JSON object):
-   - `exit=0`, `phase: cleaned`: read the answer from `output_file`. `cleanup` is
+   - `exit=0`, `phase: cleaned`: read the answer from `output_file`. `output_source` is
+     `mcp-report` when ChatGPT delivered it through `finish`, or `page` when `go` read the
+     page text instead (an older connector without `finish`, or ChatGPT skipped the call). `cleanup` is
      `archived`, or `warning:<code>` when only archiving failed; the answer is still saved.
      Check that the answer ends with the requested `VERDICT` line. If it does not, report
      the pass as incomplete and do not finish the task as successful.

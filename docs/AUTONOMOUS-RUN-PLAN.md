@@ -27,6 +27,21 @@ than doing the work directly.
   usage, and r is the part of it that automation removes. 80% overall needs f ≥ 0.89 at
   r = 0.9. So measure before claiming.
 
+## Progress (2026-10-21)
+
+- Step 1 (spec): done, `docs/GO-DRIVER-SPEC.md`. The token measurement is still open.
+- Step 2 (`go` for architecture): done, commits `5934249`, `8a08925`, `1e89484`.
+- Step 3 (`go` for review): done, spec section 9.
+- Step 4: the architect and review recipes use `go`. Manual fallbacks:
+  `docs/ARCHITECT-MANUAL-RECIPE.md`, `docs/REVIEW-MANUAL-RECIPE.md`.
+- Step 5 (`finish`): done as spec section 10, without the coding seal. The ChatGPT
+  connector must refresh before ChatGPT sees the new tool.
+- Steps 6 and 7, and the token measurement: open.
+- Known leftover state:
+  - Journal run `90103a1a-e9a6-445b-bb07-2b6ccdf93c6a` (request `go-live-20261021d`)
+    is `completed` with junk output ("ChatGPT said:"). An early busy-detection bug
+    caused it. Journal records are immutable; ignore that run.
+
 ## Order of work
 
 1. **Measure and specify (P0).** Record coordinator tokens on 3 equal tasks done three
