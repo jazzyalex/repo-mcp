@@ -71,6 +71,8 @@ function ignoredBy(ignored: Ignored, rel: string) {
 async function ignoreConfigSources(ctx: WalkContext) {
   // HEAD decides which includeIf.onbranch: rules apply. In a reftable repository HEAD is a fixed stub and a branch
   // switch changes only reftable/tables.list (which reads as missing, and stays stable, in a files-backend repository).
+  // tables.list also changes on every ref update, so reftable repositories re-walk after commits and fetches; that
+  // costs time, never read safety.
   const paths = (await gitText(ctx, ['rev-parse', '--git-path', 'index', '--git-path', 'info/exclude', '--git-path', 'config', '--git-path', 'config.worktree', '--git-path', 'HEAD', '--git-path', 'reftable/tables.list']))
     .split('\n').filter(Boolean).map(p => path.resolve(ctx.root, p));
   if (paths.length !== 6) throw IGNORE_FAILED();

@@ -79,9 +79,11 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 8. **Send once.** Close any open picker menu, then click the composer's **Send** button
    (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
    the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
-   more seconds and check again before clicking Send again. If you still cannot tell,
-   record `chatgpt-run uncertain` and recover; never send twice blindly. Save the
-   conversation URL: `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`.
+   more seconds and check again before clicking Send again. As soon as the URL shows
+   `/c/`, always save it (recovery needs it most):
+   `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`. If you still
+   cannot tell whether it was sent, record `chatgpt-run uncertain` and recover; never
+   send twice blindly.
 9. **Record the send** (no head commit or candidate digest for this kind):
    ```bash
    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
@@ -97,14 +99,14 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
     45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
     with `run_in_background`; Codex: a short wait).
     ```js
-    (() => { const m = [...document.querySelectorAll(ANSWER)].at(-1);
+    (() => { const ANSWER = '[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]';
+      const m = [...document.querySelectorAll(ANSWER)].at(-1);
       const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
       const turn = [...document.querySelectorAll('[data-talvt-turn-state]')].at(-1)?.getAttribute('data-talvt-turn-state');
       return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]') || (turn !== undefined && turn !== 'complete'),
         chars: t.length, tail: t.slice(-150)}; })()
     ```
-    `ANSWER` is `'[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]'`
-    (the old and the October 2026 ChatGPT layouts). If `chars` stays near 0 while the
+    `ANSWER` matches both the old and the October 2026 ChatGPT layouts. If `chars` stays near 0 while the
     page shows an answer, the layout changed again: find the answer element before
     trusting the check.
     The answer is done when two checks in a row show `busy: false` with the same `chars`,
@@ -125,7 +127,8 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 13. **Archive the chat** so it leaves the ChatGPT sidebar. `complete` saves the answer
     in the broker state; first confirm that saved copy matches what you captured:
     ```bash
-    npm run --silent chatgpt-run -- output --run "$RUN" | cmp -s - "$R/output.md" && echo SAVED
+    npm run --silent chatgpt-run -- output --run "$RUN" > "$R/saved.md" && [ -s "$R/saved.md" ] \
+      && cmp -s "$R/saved.md" "$R/output.md" && echo SAVED
     ```
     Only when it prints `SAVED`: in the conversation tab (`$R/chat-url`), click the
     **More** (`…`) button at the top right, then **Archive**. The chat stays in your

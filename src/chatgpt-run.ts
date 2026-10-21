@@ -805,7 +805,7 @@ export async function chatGptRunOutput(runId: string, stateDir = defaultStateDir
   const record = await readRun(store, runId);
   if (record.state !== 'completed') throw new SafeError(`ChatGPT run is ${record.state}; only a completed run has a saved output.`);
   const saved = await store?.read<{ run_id?: unknown; output_sha256?: unknown; output?: unknown }>(outputPath(runId), OUTPUT_KIND);
-  if (!saved) throw new SafeError('No saved output for this run (it completed before outputs were saved).');
+  if (!saved) throw new SafeError('No saved output exists for this run.');
   if (saved.run_id !== runId || typeof saved.output !== 'string' || saved.output_sha256 !== record.output_sha256 ||
       sha256(saved.output) !== record.output_sha256) {
     throw new SafeError('Saved output does not match the run record; inspect it before continuing.');
@@ -921,12 +921,26 @@ export async function completeChatGptRun(options: {
 }) {
   if (!options.output.trim()) throw new SafeError('ChatGPT completion output must not be empty.');
   if (Buffer.byteLength(options.output, 'utf8') > CHATGPT_RUN_MAX_OUTPUT_BYTES) throw new SafeError('ChatGPT completion output exceeds 1 MiB.');
+  assertRunId(options.runId);
   const stateDir = options.stateDir ?? defaultStateDir();
   const digest = sha256(options.output);
   const store = await StateStore.open(stateDir);
   // A completed run always has its answer on disk, so the ChatGPT chat can be archived safely.
+  // Saved outputs are kept like run records; GC does not remove either.
   const saveOutput = () => store.write(outputPath(options.runId), OUTPUT_KIND,
     { run_id: options.runId, output_sha256: digest, output: options.output });
+  try {
+    return await completeRun(stateDir, options, digest, saveOutput);
+  } catch (error) {
+    // Do not leave an answer file behind for a run that did not reach `completed`.
+    const record = await readRun(store, options.runId).catch(() => undefined);
+    if (record?.state !== 'completed') await store.remove(outputPath(options.runId)).catch(() => {});
+    throw error;
+  }
+}
+
+function completeRun(stateDir: string, options: Parameters<typeof completeChatGptRun>[0], digest: string,
+  saveOutput: () => Promise<void>) {
   return transitionRun(stateDir, options.runId, ['submitted', 'completed'], async record => {
     const trusted = validateTrustedReceipt(record, options.receipt, options.now, record.submitted_at);
     if (options.receipt.kind !== 'completion' || options.receipt.responseState !== 'completed') {

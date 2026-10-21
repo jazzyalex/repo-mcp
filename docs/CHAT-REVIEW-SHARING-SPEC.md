@@ -14,7 +14,7 @@ Non-goals: no implementation during this docs phase; no implicit Oracle/host-mod
 
 ## 2. Current-source constraints
 Current source already supports multiple read-only workspaces on one task, exactly one coding workspace, registration/binding/phase epochs, workspace-bound cursors, shared task runtimes, admission draining, and fail-closed stale authority.
-Current ChatGPT-run records bind repository/task epochs, policy, branch/HEAD, resolved base commit, prompt digest, hashed browser context, coordinator, work kind, and profile. Concurrent reserve authorizes exactly one submission; completion requires a distinct completed-response event plus exact output digest.
+Current ChatGPT-run records bind repository/task epochs, policy, branch/HEAD, resolved base commit, prompt digest, hashed browser context, coordinator, work kind, and profile. Concurrent reserve authorizes exactly one submission; completion requires a distinct completed-response event plus exact output digest, and stores the answer in a separate private state file (not in the run record) so the ChatGPT conversation can be archived.
 Current source git_diff supports base_ref and resolves it to an immutable base commit, although a client may expose a stale cached descriptor. Diagnose descriptor/build freshness; never add a base synonym.
 Current diff is bounded, uses --no-renames, policy filtering, index/file-fingerprint stale checks, and safe UTF-8/file rules. Readable non-creatable untracked files can be absent from aggregate git_diff today.
 Low-level task lifecycle and ChatGPT-run transition functions are directly callable, so share protection must live in common public primitives, not only a new wrapper.

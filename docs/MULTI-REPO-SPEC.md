@@ -315,8 +315,10 @@ Close requires a fresh public request ID. Review status is sanitized and MUST NO
 workspace/write-grant tokens, raw prompts/outputs/browser IDs, policy source paths, or
 unrelated filesystem roots.
 
-The provider-neutral owner CLI `chatgpt-run` supplies prepare/status/observe/reserve/
+The provider-neutral owner CLI `chatgpt-run` supplies prepare/status/output/observe/reserve/
 submitted/complete/uncertain/recover/recover-lock/recover-request/fail-pre-submit.
+`complete` also stores the answer (mode 600) under `chatgpt-run-outputs/` in the state
+directory; `output` prints it only for a completed run whose stored digest matches.
 For shared review, preparation is created by the review coordinator and later run
 commands operate on the exact nested run/selection. `reserve` is one-send authority:
 only `submission_authorized=true` permits browser submission.

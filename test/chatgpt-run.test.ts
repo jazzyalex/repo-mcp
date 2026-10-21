@@ -147,7 +147,7 @@ test('ChatGPT run binds candidate and stores hashes instead of prompt or raw bro
   assert.equal(serialized.includes('conversation-1'), false);
 });
 
-test('verified model selection reserves once and completion stores only output hash', async t => {
+test('verified model selection reserves once; completion keeps the answer out of the run record and saves it apart', async t => {
   const { stateDir } = await fixture(t);
   const run = await prepareChatGptRun({
     stateDir, repositoryId: 'repo', taskId: 'task', coordinator: 'codex', workKind: 'review',
@@ -183,7 +183,7 @@ test('verified model selection reserves once and completion stores only output h
   await assert.rejects(chatGptRunOutput(run.run_id, stateDir), /does not match the run record/);
   await rm(savedPath);
   await assert.rejects(chatGptRunOutput(run.run_id, stateDir), /No saved output/);
-  // Repeating the same completion restores a missing saved output.
+  // Repeating the identical completion (same receipt) rewrites a missing saved output.
   await completeChatGptRun({ stateDir, runId: run.run_id, output, outcome: 'ship', receipt: completedReceipt, now: OBSERVED });
   assert.equal(await chatGptRunOutput(run.run_id, stateDir), output);
 });
@@ -1054,6 +1054,8 @@ test('invalid transition results are rejected before publication and claim relea
   await assert.rejects(completeChatGptRun({ stateDir, runId: run.run_id, output: 'SHIP',
     outcome: 'invalid' as 'ship', receipt: completionReceipt(run, 'complete', 'submit', 'SHIP'), now: OBSERVED }), /corrupt|outcome/i);
   assert.equal((await chatGptRunStatus(run.run_id, stateDir)).state, 'submitted');
+  // The answer was saved before the record failed validation; it must not be left behind.
+  await assert.rejects(lstat(path.join(stateDir, 'chatgpt-run-outputs', `${run.run_id}.json`)), { code: 'ENOENT' });
   const store = await StateStore.open(stateDir);
   assert.ok(await store.read(`chatgpt-run-requests/${run.request_key}.json`, 'chatgpt-run-request-v1'));
 });

@@ -174,6 +174,8 @@ try {
     } else if (command === 'status') {
       print(await chatGptRunStatus(need('run'), stateDir));
     } else if (command === 'output') {
+      // The answer is untrusted model text; never let terminal escape sequences in it reach a TTY.
+      if (process.stdout.isTTY) throw new Error('chatgpt-run output prints raw model text; redirect it to a file.');
       process.stdout.write(await chatGptRunOutput(need('run'), stateDir));
     } else if (command === 'observe') {
       print(await recordTrustedBrowserObservation({
