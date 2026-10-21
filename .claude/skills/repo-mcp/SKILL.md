@@ -407,6 +407,12 @@ npm run --silent chatgpt-run -- status --run "$RUN"
   ```
 - **A review participant is left behind after a failed run:**
   `npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"`.
+- **`task finish`, `task phase` or `task rebind` refuses with `REVIEW_PROTECTED` and names
+  an open workspace:** a ChatGPT run ended without `workspace_close`. Check that no run
+  of this task is still `submitted` or `uncertain` (`chatgpt-run status`), then revoke
+  each named workspace and retry. Never edit Repo MCP state files by hand. A workspace
+  also stops blocking on its own when it expires (8 hours after it opened).
+  `npm run --silent coord -- workspace revoke --workspace WORKSPACE_ID`.
 - **A lock is left by a dead process** (check the recorded PID is gone first):
   `coord service recover-stale-control`, `coord task recover-stale --task "$TASK"`,
   `coord workspace recover-stale --workspace WORKSPACE_ID`,

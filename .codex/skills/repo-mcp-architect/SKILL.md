@@ -139,5 +139,11 @@ print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
     needs recovery, or the check did not print `SAVED`. Later, `chatgpt-run output --run
     RUN_ID` prints the saved answer again.
 14. If you bound a task for this pass, finish it: `npm run --silent coord -- task finish --task "$TASK"`.
+    If `finish` refuses with `REVIEW_PROTECTED` and names an open workspace, ChatGPT
+    did not call `workspace_close`. When the run is `completed`, revoke each named
+    workspace, then finish again. Never edit Repo MCP state files by hand.
+    ```bash
+    npm run --silent coord -- workspace revoke --workspace WORKSPACE_ID
+    ```
 
 Report `Execution surface: ChatGPT web`, `Coordinator: Codex`, the exact verified picker and Pro control, `Repository evidence: Repo MCP`, and exact scope/limitations. If the response self-identifies a backend, label that as self-report rather than UI proof.

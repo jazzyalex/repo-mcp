@@ -590,6 +590,10 @@ function workspaceCurrent(workspace: MinimalWorkspace, task: TaskRegistration, r
     workspace.phase_epoch === task.phase_epoch &&
     workspace.policy_digest === repository.policy_digest;
 }
+// An expired selection holds no authority (authorization rejects it), even if its client never closed it.
+function workspaceLive(workspace: MinimalWorkspace) {
+  return workspace.status === 'open' && typeof workspace.expires_at === 'string' && Date.now() < Date.parse(workspace.expires_at);
+}
 
 export async function assertReviewLifecycleAllowedUnderGate(stateDir: string, taskId: string) {
   const catalog = await readMultiRepoCatalog(stateDir);
@@ -613,9 +617,12 @@ export async function assertReviewLifecycleAllowedUnderGate(stateDir: string, ta
     fail('REVIEW_PROTECTED', 'Task has an unresolved currently authorized legacy review run.');
   }
   const openCurrent = (await authWorkspaces(stateDir)).filter(workspace =>
-    workspaceCurrent(workspace, task, repository) && workspace.status === 'open'
+    workspaceCurrent(workspace, task, repository) && workspaceLive(workspace)
   );
-  if (openCurrent.length) fail('REVIEW_PROTECTED', 'Task has a protected active review/coding workspace.');
+  if (openCurrent.length) {
+    const ids = openCurrent.map(workspace => String(workspace.workspace_id)).join(', ');
+    fail('REVIEW_PROTECTED', `Task has a protected active review/coding workspace (${ids}). After its ChatGPT run is complete, close it with: coord workspace revoke --workspace ID`);
+  }
 }
 
 async function protectedReviewWorkspaceIdsUnderHeldGates(stateDir: string) {
@@ -692,7 +699,7 @@ export async function codingOwnerSummary(
 ): Promise<ReviewCodingOwner> {
   const workspaces = await authWorkspaces(stateDir);
   const currentCode = workspaces.find(workspace =>
-    workspaceCurrent(workspace, task, repository) && workspace.mode === 'code' && workspace.status === 'open'
+    workspaceCurrent(workspace, task, repository) && workspace.mode === 'code' && workspaceLive(workspace)
   );
   const anyCode = workspaces.find(workspace =>
     workspace.repository_id === repository.repository_id && workspace.task_id === task.task_id && workspace.mode === 'code'

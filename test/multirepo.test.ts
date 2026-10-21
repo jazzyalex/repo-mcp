@@ -431,6 +431,27 @@ test('task finish drains admitted mutations before publishing completed catalog 
   }
 });
 
+test('task finish names a left-open workspace and ignores it once expired', async () => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-finish-open-')));
+  const stateDir = path.join(base, 'state');
+  try {
+    const root = await fixture(base, 'repo');
+    await registerRepository({ stateDir, repositoryId: 'repo', root, policyPath: await writePolicy(base, 'policy.json') });
+    await bindRegisteredTask({ stateDir, repositoryId: 'repo', taskId: 'task' });
+    const opened = await openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'inspect', requestId: 'left-open' });
+    const workspaceId = opened.workspace_token.split('.')[2];
+    await assert.rejects(
+      finishRegisteredTask({ stateDir, taskId: 'task', result: 'abandoned' }),
+      (error: Error) => error.message.includes(workspaceId) && error.message.includes('workspace revoke --workspace')
+    );
+    await expireWorkspaceToken(stateDir, opened.workspace_token);
+    const finished = await finishRegisteredTask({ stateDir, taskId: 'task', result: 'abandoned' });
+    assert.equal(finished.task.completed, true);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test('RepoWorkspace close is single-flight and cannot release a replacement task writer lock', async () => {
   const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-close-single-flight-')));
   const stateDir = path.join(base, 'state');
