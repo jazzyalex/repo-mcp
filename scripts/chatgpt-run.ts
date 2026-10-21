@@ -22,6 +22,9 @@ import {
 import type { ChatSurface, ModelProfile, SanitizedModelSelectionEvidence } from '../src/model-policy.js';
 import { recordTrustedBrowserObservation } from '../src/model-policy.js';
 import { defaultStateDir } from '../src/task-state.js';
+import { GoError, goStatus, releaseGoAdmission, runGo } from '../src/chatgpt-go.js';
+import { CdpChatGptPage } from '../src/chatgpt-browser.js';
+import { ensureRelay, runRelay } from '../src/cdp-relay.js';
 
 const HELP = `Repo MCP ChatGPT run journal
 
@@ -48,6 +51,14 @@ Usage:
   chatgpt-run recover-lock [--state-dir PATH] --run RUN_ID
   chatgpt-run recover-request [--state-dir PATH] --request-key SHA256
   chatgpt-run fail-pre-submit [--state-dir PATH] --run RUN_ID --failure-code CODE
+  chatgpt-run go [--state-dir PATH] --request-id ID --repository ID --task ID
+    --coordinator codex|claude --kind architecture [--profile PROFILE] --prompt-file FILE
+    [--timeout-minutes N] [--max-per-hour N]
+  chatgpt-run go [--state-dir PATH] --request-id ID --resume [--prompt-file FILE]
+  chatgpt-run go [--state-dir PATH] --request-id ID --status
+  chatgpt-run go [--state-dir PATH] --request-id ID --release-admission --reason TEXT
+  chatgpt-run relay   start the CDP relay to your main Chrome (approve once per Chrome start)
+  chatgpt-run probe   read-only check of ChatGPT controls; never sends
 
 Profiles:
   code | code-hard | review | review-critical | architecture | architecture-current-pro (compatibility alias)
@@ -90,7 +101,10 @@ const { positionals, values } = parseArgs({
     'selection-id': { type: 'string' }, 'control-label': { type: 'string' },
     'model-label': { type: 'string' }, 'selected-at': { type: 'string' }, 'observed-at': { type: 'string' },
     resolution: { type: 'string' }, 'request-key': { type: 'string' },
-    'submission-event-sha256': { type: 'string' }, 'output-sha256': { type: 'string' }, 'response-state': { type: 'string' }
+    'submission-event-sha256': { type: 'string' }, 'output-sha256': { type: 'string' }, 'response-state': { type: 'string' },
+    'request-id': { type: 'string' }, 'timeout-minutes': { type: 'string' }, 'max-per-hour': { type: 'string' },
+    resume: { type: 'boolean' }, status: { type: 'boolean' },
+    'release-admission': { type: 'boolean' }, reason: { type: 'string' }
   }
 });
 
@@ -141,6 +155,12 @@ const validateCommandOptions = () => {
   if (command === 'recover-lock') return assertOnly('state-dir', 'run');
   if (command === 'recover-request') return assertOnly('state-dir', 'request-key');
   if (command === 'fail-pre-submit') return assertOnly('state-dir', 'run', 'failure-code');
+  if (command === 'go') {
+    return assertOnly('state-dir', 'request-id', 'repository', 'task', 'coordinator', 'kind', 'profile', 'prompt-file',
+      'timeout-minutes', 'max-per-hour', 'resume', 'status', 'release-admission', 'reason');
+  }
+  if (command === 'relay' || command === 'cdp-relay') return assertOnly();
+  if (command === 'probe') return assertOnly();
   throw new Error('Unknown chatgpt-run command.');
 };
 const receipt = (): TrustedChatGptRunReceipt => ({
@@ -159,7 +179,7 @@ try {
     }
     process.stdout.write(HELP);
   } else {
-    if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|output|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit.');
+    if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|output|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit|go|relay|probe.');
     validateCommandOptions();
     if (command === 'prepare') {
       const promptFile = need('prompt-file');
@@ -212,6 +232,37 @@ try {
       print(await recoverChatGptRunLock(need('run'), stateDir));
     } else if (command === 'recover-request') {
       print(await recoverChatGptRequestClaim(need('request-key'), stateDir));
+    } else if (command === 'go') {
+      const requestId = need('request-id');
+      const int = (name: 'timeout-minutes' | 'max-per-hour') => {
+        const v = values[name]; if (v === undefined) return undefined;
+        if (!/^[1-9]\d{0,3}$/.test(v)) throw new Error(`--${name} must be a positive integer.`);
+        return Number(v);
+      };
+      let result: unknown;
+      if (values.status) result = await goStatus(stateDir, requestId);
+      else if (values['release-admission']) result = await releaseGoAdmission(stateDir, requestId, values.reason ?? '');
+      else {
+        const promptFile = values['prompt-file'];
+        const prompt = promptFile ? await readRegularFile(promptFile, CHATGPT_RUN_MAX_PROMPT_BYTES, 'Prompt file') : undefined;
+        if (!values.resume && prompt === undefined) throw new Error('go requires --prompt-file (or --resume).');
+        result = await runGo({
+          stateDir, requestId, prompt, promptFile,
+          repositoryId: values.repository, taskId: values.task, coordinator: values.coordinator as ChatGptCoordinator | undefined,
+          kind: values.kind, profile: values.profile as ModelProfile | undefined,
+          timeoutMinutes: int('timeout-minutes'), maxPerHour: int('max-per-hour')
+        }, { page: new CdpChatGptPage() });
+        const phase = (result as { phase: string }).phase;
+        process.exitCode = phase === 'cleaned' ? 0 : phase === 'uncertain' ? 3 : 1;
+      }
+      process.stdout.write(JSON.stringify(result) + '\n');
+    } else if (command === 'cdp-relay') {
+      await runRelay();
+    } else if (command === 'relay') {
+      await ensureRelay();
+      print({ relay: 'running' });
+    } else if (command === 'probe') {
+      print(await new CdpChatGptPage().probe());
     } else if (command === 'fail-pre-submit') {
       print(await failChatGptRunBeforeSubmit(need('run'), need('failure-code'), stateDir));
     } else {
@@ -219,6 +270,7 @@ try {
     }
   }
 } catch (error) {
+  if (error instanceof GoError) process.stdout.write(JSON.stringify({ error: error.code, message: error.message }) + '\n');
   process.stderr.write((error instanceof Error ? error.message : 'ChatGPT run command failed.') + '\n');
   process.exitCode = 1;
 }
