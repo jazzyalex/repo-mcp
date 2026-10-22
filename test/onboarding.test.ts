@@ -33,15 +33,15 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(reviewSkill, /Never\s+return `SHIP`.*working tree is clean/is);
   assert.doesNotMatch(reviewSkill, /Execution surface: Claude Code/);
   assert.match(reviewSkill, /ChatGPT web performs the semantic review/is);
-  assert.match(reviewSkill, /Claude's host-native browser controls/is);
+  assert.match(reviewSkill, /chatgpt-run go --kind review/);
   assert.match(reviewSkill, /durable `chatgpt-run`/i);
   assert.match(reviewSkill, /Execution surface:\s+ChatGPT web/is);
   assert.match(reviewSkill, /Do not substitute Claude's own\s+review/is);
   const claudeSkill = await readFile(path.join(PROJECT_BASE, '.claude/skills/repo-mcp/SKILL.md'), 'utf8');
   assert.match(claudeSkill, /Review and architecture are read-only\. Coding is allowed/i);
-  assert.match(claudeSkill, /chatgpt-run -- prepare[\s\S]*--coordinator claude[\s\S]*--kind code/);
+  assert.match(claudeSkill, /chatgpt-run -- go[\s\S]*--coordinator claude[\s\S]*--kind code/);
   assert.match(claudeSkill, /never edits the served\s+repository through Repo MCP itself/i);
-  assert.match(claudeSkill, /Claude's\s+host-native browser controls/is);
+  assert.match(claudeSkill, /starts `chatgpt-run go`, which drives the browser/is);
   assert.match(claudeSkill, /Never substitute\s+Claude's own analysis.*Oracle/is);
   assert.match(claudeSkill, /claude mcp add --scope user --transport http repo-mcp http:\/\/127\.0\.0\.1:8787\/mcp/);
   assert.match(claudeSkill, /WorkingDirectory.*control checkout/is);
@@ -53,7 +53,8 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(codexSkill, /request to "use Repo MCP review".*ChatGPT web/is);
   assert.match(codexSkill, /must\s+not be satisfied by a Codex subagent/is);
   assert.match(codexSkill, /model profile `review`.*Extra High/is);
-  assert.match(codexSkill, /host-native browser control/is);
+  assert.match(codexSkill, /chatgpt-run go --kind code/);
+  assert.match(codexSkill, /--coordinator codex --kind review/);
   assert.match(codexSkill, /durable `chatgpt-run`/i);
   assert.match(codexSkill, /Never silently fall back.*Oracle/is);
   assert.match(codexSkill, /Never silently fall back.*Oracle.*Codex subagent/is);

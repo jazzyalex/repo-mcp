@@ -52,9 +52,11 @@ Usage:
   chatgpt-run recover-request [--state-dir PATH] --request-key SHA256
   chatgpt-run fail-pre-submit [--state-dir PATH] --run RUN_ID --failure-code CODE
   chatgpt-run go [--state-dir PATH] --request-id ID --repository ID --task ID
-    --coordinator codex|claude --kind architecture|review [--profile PROFILE] --prompt-file FILE
+    --coordinator codex|claude --kind architecture|review|code [--profile PROFILE] --prompt-file FILE
     [--timeout-minutes N] [--max-per-hour N]
     review also needs: --workspace-request-id ID --base-ref COMMIT --head-ref COMMIT [--scope-prefix P]
+    code also needs: --workspace-request-id ID [--base-ref REF] [--check CMD]... [--exec]
+      (go issues the single-use write grant and appends it to the sent text; never put one in the prompt)
   chatgpt-run go [--state-dir PATH] --request-id ID --resume [--prompt-file FILE]
   chatgpt-run go [--state-dir PATH] --request-id ID --status
   chatgpt-run go [--state-dir PATH] --request-id ID --release-admission --reason TEXT
@@ -96,6 +98,7 @@ const { positionals, values } = parseArgs({
     help: { type: 'boolean' }, 'conversation-id': { type: 'string' },
     'session-id': { type: 'string' }, 'prompt-file': { type: 'string' }, 'base-ref': { type: 'string' },
     'head-ref': { type: 'string' }, 'scope-prefix': { type: 'string' }, 'workspace-request-id': { type: 'string' },
+    check: { type: 'string', multiple: true }, exec: { type: 'boolean' },
     'contract-file': { type: 'string' }, 'evidence-file': { type: 'string' },
     'output-file': { type: 'string' }, outcome: { type: 'string' }, 'failure-code': { type: 'string' },
     'prompt-sha256': { type: 'string' }, 'base-commit': { type: 'string' }, 'head-commit': { type: 'string' },
@@ -160,7 +163,7 @@ const validateCommandOptions = () => {
   if (command === 'go') {
     return assertOnly('state-dir', 'request-id', 'repository', 'task', 'coordinator', 'kind', 'profile', 'prompt-file',
       'timeout-minutes', 'max-per-hour', 'resume', 'status', 'release-admission', 'reason',
-      'workspace-request-id', 'base-ref', 'head-ref', 'scope-prefix');
+      'workspace-request-id', 'base-ref', 'head-ref', 'scope-prefix', 'check', 'exec');
   }
   if (command === 'relay' || command === 'cdp-relay') return assertOnly();
   if (command === 'probe') return assertOnly();
@@ -255,7 +258,8 @@ try {
           kind: values.kind, profile: values.profile as ModelProfile | undefined,
           timeoutMinutes: int('timeout-minutes'), maxPerHour: int('max-per-hour'),
           workspaceRequestId: values['workspace-request-id'], baseRef: values['base-ref'],
-          headRef: values['head-ref'], scopePrefix: values['scope-prefix']
+          headRef: values['head-ref'], scopePrefix: values['scope-prefix'],
+          checks: values.check, exec: values.exec
         }, { page: new CdpChatGptPage() });
         const phase = (result as { phase: string }).phase;
         process.exitCode = phase === 'cleaned' ? 0 : phase === 'uncertain' ? 3 : 1;

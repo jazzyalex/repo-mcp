@@ -36,7 +36,12 @@ than doing the work directly.
   `docs/ARCHITECT-MANUAL-RECIPE.md`, `docs/REVIEW-MANUAL-RECIPE.md`.
 - Step 5 (`finish`): done as spec section 10, without the coding seal. The ChatGPT
   connector must refresh before ChatGPT sees the new tool.
-- Steps 6 and 7, and the token measurement: open.
+- Step 6, first part (`exec`): v1 done, `docs/EXEC-TOOL.md`. The operator enables it per
+  grant with `coord workspace grant --exec`. Not in v1: the retained execution lease,
+  orphan cleanup after a broker crash, and the verification step. The ChatGPT connector
+  must refresh before ChatGPT sees the new tools.
+- Step 6, second part (`go` for code with project checks), step 7, and the token
+  measurement: open.
 - Known leftover state:
   - Journal run `90103a1a-e9a6-445b-bb07-2b6ccdf93c6a` (request `go-live-20261021d`)
     is `completed` with junk output ("ChatGPT said:"). An early busy-detection bug
@@ -175,6 +180,8 @@ the manifest.
   polling, because `StateStore.write` replaces files by rename.
 
 ## C. `exec`: shell for coding workspaces
+
+v1 status: done. The contract, limits and gaps are in `docs/EXEC-TOOL.md`.
 
 `exec(workspace_token, request_id, cmd, yield_ms?, max_output_tokens?)`,
 `exec_poll(workspace_token, session_id, cursor?)`,

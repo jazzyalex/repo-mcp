@@ -14,6 +14,9 @@ import { RELEASE_VERSION } from './version.js';
 import { jsonToolResult } from './tool-result.js';
 import { MCP_REPORT_MAX_BYTES, recordMcpReport } from './mcp-report.js';
 import {
+  EXEC_DEFAULT_YIELD_MS, EXEC_MAX_CMD_CHARS, EXEC_MAX_TIMEOUT_S, EXEC_MAX_WAIT_MS, ExecManager
+} from './exec-tool.js';
+import {
   authorizeWorkspace,
   closeWorkspace,
   getMultiRepoServiceConfig,
@@ -260,6 +263,8 @@ async function wrapResult(stateDir: string, authorized: AuthorizedWorkspace, kin
 export type MultiRepoServerOptions = {
   runtimeHooks?: RuntimeManagerHooks;
   reconcileIntervalMs?: number;
+  /** Toolchain PATH for exec; defaults to REPO_MCP_EXEC_PATH, then EXEC_DEFAULT_PATH. */
+  execPath?: string;
 };
 
 export async function startMultiRepoServer(stateDir: string, port?: number, options: MultiRepoServerOptions = {}) {
@@ -294,10 +299,11 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
     };
     await appendFile(auditFile, JSON.stringify(entry) + '\n', { mode: 0o600 });
   };
+  const exec = new ExecManager(stateDir, audit, { toolchainPath: options.execPath });
 
   const handler = createMcpHandler(({ era }) => {
     const server = new McpServer({ name: 'repo-mcp', version: RELEASE_VERSION }, {
-      instructions: 'Install-once multi-repository Repo MCP service. Begin with service_info and repository_list, then workspace_open using only operator-registered repository_id/task_id values. Every repository tool requires the immutable workspace_token returned by workspace_open; there is no ambient or current repository and no filesystem root/policy path is accepted through MCP. Coding mode additionally requires a short-lived operator-issued write_grant and only one coding workspace may own a task at a time. A phase change, rebind, disable, close, revocation or expiry invalidates old workspace authority. When the coordinator prompt asks for it, deliver the complete final report once with finish before workspace_close. Git commit/push, policy changes, repository registration, task lifecycle control and unrestricted shell remain outside MCP.'
+      instructions: 'Install-once multi-repository Repo MCP service. Begin with service_info and repository_list, then workspace_open using only operator-registered repository_id/task_id values. Every repository tool requires the immutable workspace_token returned by workspace_open; there is no ambient or current repository and no filesystem root/policy path is accepted through MCP. Coding mode additionally requires a short-lived operator-issued write_grant and only one coding workspace may own a task at a time. A phase change, rebind, disable, close, revocation or expiry invalidates old workspace authority. When the coordinator prompt asks for it, deliver the complete final report once with finish before workspace_close. A shell (exec, exec_poll, exec_cancel) is available only in code workspaces whose write_grant enabled exec; check workspace_capabilities in repo_info for "exec". Use it for builds, tests, lint and type checks, not for git commit/push. Git commit/push, policy changes, repository registration and task lifecycle control remain outside MCP.'
     });
 
     const respond = (fn: () => Promise<unknown>, tool: string) => async (): Promise<CallToolResult> => {
@@ -377,7 +383,8 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
       audit,
       scoped,
       workspaceToken,
-      cursor
+      cursor,
+      exec
     });
   }, { legacy: 'stateless', maxRequestBodySize: DEFAULT_LIMITS.request_body_bytes });
 
@@ -404,6 +411,7 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
     url: `http://127.0.0.1:${addr.port}/mcp`,
     processAttestation,
     close: async () => {
+      await exec.close();
       await handler.close();
       await runtimes.close();
       http.closeAllConnections();
@@ -422,6 +430,7 @@ function registerWorkspaceTools(
     scoped: (tool: string, capability: WorkspaceCapability, kind: string, fn: (repo: RepoWorkspace, args: any, authorized: AuthorizedWorkspace, gatedPreflight: () => Promise<void>) => Promise<unknown>, mutation?: boolean) => (args: any) => Promise<CallToolResult>;
     workspaceToken: typeof workspaceToken;
     cursor: typeof cursor;
+    exec: ExecManager;
   }
 ) {
   const { stateDir, scoped } = deps;
@@ -467,6 +476,7 @@ function registerWorkspaceTools(
   }, async args => {
     try {
       const result = await closeWorkspace({ stateDir, workspaceToken: args.workspace_token, requestId: args.request_id });
+      await deps.exec.cancelWorkspace(result.workspace_id, 'workspace_closed');
       await deps.audit('workspace_close', era, true);
       return jsonToolResult(result);
     } catch (error) {
@@ -746,5 +756,88 @@ function registerWorkspaceTools(
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
   }, scoped('run_tests', 'check', 'run_tests', (repo, args, authorized, gatedPreflight) => repo.test(args.suite, gatedPreflight).then(result => wrapResult(stateDir, authorized, 'run_tests', result))));
 
+  registerExecTools(server, era, deps);
   return server;
+}
+
+function registerExecTools(
+  server: McpServer,
+  era: string,
+  deps: {
+    stateDir: string;
+    audit: (tool: string, era: string, ok: boolean, authorized?: AuthorizedWorkspace, data?: unknown) => Promise<void>;
+    workspaceToken: typeof workspaceToken;
+    exec: ExecManager;
+  }
+) {
+  const { stateDir, exec } = deps;
+  const sessionId = z.string().regex(/^[a-f0-9]{32}$/).describe('session_id returned by exec.');
+  // Admission (authorization and session ownership) runs under the short workspace lock;
+  // waiting for output or exit runs after it is released, so close and other tools are not blocked.
+  const execScoped = (
+    tool: string,
+    admit: (args: any, authorized: AuthorizedWorkspace) => Promise<string>,
+    finish: (args: any, authorized: AuthorizedWorkspace, sessionId: string) => Promise<unknown>
+  ) => async (args: any): Promise<CallToolResult> => {
+    let authorizedForAudit: AuthorizedWorkspace | undefined;
+    try {
+      const sid = await withWorkspaceAdmission(stateDir, args.workspace_token, 'exec', async authorized => {
+        authorizedForAudit = authorized;
+        return admit(args, authorized);
+      });
+      const value = await finish(args, authorizedForAudit!, sid);
+      const data = value as any;
+      await deps.audit(tool, era, true, authorizedForAudit, { session_id: sid, state: data?.state, exit_code: data?.exit_code });
+      return jsonToolResult({ ...data, scope: authorizedForAudit!.scope });
+    } catch (error) {
+      await deps.audit(tool, era, false, authorizedForAudit).catch(() => {});
+      return { isError: true, content: [{ type: 'text', text: error instanceof SafeError ? error.message : 'exec operation failed. Check workspace authorization and repository state.' }] };
+    }
+  };
+
+  server.registerTool('exec', {
+    description: 'Run one shell command (via /bin/sh -c) in the repository root of this code workspace, as the repository owner, with no sandbox. Use it for builds, tests, lint and type checks. Available only when repo_info lists "exec" in workspace_capabilities. stdin is empty; stdout and stderr are merged. Waits up to yield_ms (default 10000, max 30000) and then returns session_id, state (running, exited, failed, cancelled, timed_out or uncertain), exit_code, the first output page and a cursor. If state is running or has_more is true, call exec_poll with the cursor. One command runs at a time per task. Retrying with the same request_id and the same cmd returns the same session and never runs the command again; a new command needs a new request_id. Wall-clock limit timeout_s (default 600, max 1800); stored output is capped at 4 MiB. Do not use it for git commit or push.',
+    inputSchema: z.strictObject({
+      workspace_token: deps.workspaceToken,
+      request_id: requestId,
+      cmd: z.string().min(1).max(EXEC_MAX_CMD_CHARS).describe('Shell command line, for example "npm test 2>&1 | tail -50".'),
+      yield_ms: z.number().int().min(0).max(EXEC_MAX_WAIT_MS).optional(),
+      timeout_s: z.number().int().min(1).max(EXEC_MAX_TIMEOUT_S).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, execScoped('exec',
+    async (args, authorized) => (await exec.start(authorized, args.workspace_token, era, {
+      requestId: args.request_id, cmd: args.cmd, timeoutS: args.timeout_s
+    })).session_id,
+    async (args, authorized, sid) => {
+      await exec.waitForExit(sid, args.yield_ms ?? EXEC_DEFAULT_YIELD_MS);
+      return exec.view(authorized, sid);
+    }));
+
+  server.registerTool('exec_poll', {
+    description: 'Read the next output page (at most 24 KiB of text) of an exec session from cursor, plus its current state and exit_code. Pass the cursor from the previous exec or exec_poll result; without a cursor it starts from the beginning. wait_ms (default 0, max 30000) waits for new output or exit first. Keep polling while state is running or has_more is true. Invalid UTF-8 is shown as U+FFFD.',
+    inputSchema: z.strictObject({
+      workspace_token: deps.workspaceToken,
+      session_id: sessionId,
+      cursor: z.string().regex(/^(?:0|[1-9][0-9]{0,9})$/).optional(),
+      wait_ms: z.number().int().min(0).max(EXEC_MAX_WAIT_MS).optional()
+    }),
+    annotations: readOnly
+  }, execScoped('exec_poll',
+    async (args, authorized) => { await exec.assertOwned(authorized, args.session_id); return args.session_id; },
+    async (args, authorized, sid) => {
+      await exec.waitForOutput(sid, Number(args.cursor ?? '0'), args.wait_ms ?? 0);
+      return exec.view(authorized, sid, args.cursor);
+    }));
+
+  server.registerTool('exec_cancel', {
+    description: 'Stop a running exec session: SIGTERM to its whole process group, then SIGKILL after 3 seconds. Safe to repeat; cancelling a finished session changes nothing and returns its final state.',
+    inputSchema: z.strictObject({ workspace_token: deps.workspaceToken, session_id: sessionId, request_id: requestId }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+  }, execScoped('exec_cancel',
+    async (args, authorized) => { await exec.assertOwned(authorized, args.session_id); return args.session_id; },
+    async (_args, authorized, sid) => {
+      const cancelled = await exec.cancel(sid, 'cancelled_by_request');
+      return { ...(await exec.view(authorized, sid, undefined)), cancel_applied: cancelled };
+    }));
 }

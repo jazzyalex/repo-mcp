@@ -129,7 +129,8 @@ which removes a journal run lock only when its owner process is dead.
   - It fails with `RATE_LIMITED` if the number of sends in the last hour is at least
     `--max-per-hour` (default 4).
   - A request may re-acquire its own admission.
-- **Release:** only when the request reaches `cleaned` or `failed`.
+- **Release:** only when the request reaches `cleaned` or `failed`. The release runs in a
+  `finally` step, so a failed manifest, participant or seal write cannot keep the account.
   - A finished request releases admission even if the output-file repair fails. The
     repair error is raised after the release.
   - A timeout, a crash or a dead PID does **not** release it.
@@ -270,9 +271,11 @@ chatgpt-run go --kind review [--profile review|review-critical] --workspace-requ
   report is stored per workspace (`mcp-reports/<workspace_id>`, kind `mcp-report-v1`),
   and `go` finds it through the request ledger (`workspaceForOpenRequest`). It must name
   the request's repository and task. No run ID passes through ChatGPT.
-- **Freshness:** `go` refuses a new request whose workspace request ID already opened a
-  workspace, and accepts a report only from a workspace opened after the run's
-  `send_intent_at`. An older workspace, participant or report can never attach to a new
+- **Freshness:** a workspace request ID is single-use: the first request that names it
+  takes a durable claim (`chatgpt-go-ws/<hash>`), and a later request with the same ID,
+  or one whose ID already opened a workspace, is refused. `go` accepts a report, and a
+  review completes, only with a workspace opened after the run's `send_intent_at`
+  (otherwise the run is held `WORKSPACE_STALE`). An older workspace, participant or report can never attach to a new
   run.
 - **Immutable:** the first report wins. The same report again returns the same `ack_id`;
   different content or outcome is rejected.
@@ -282,3 +285,29 @@ chatgpt-run go --kind review [--profile review|review-critical] --workspace-requ
 - **Architecture** passes may also pass `--workspace-request-id` to enable the report.
 - **Not yet:** the coding seal (an accepted report stops further mutations) waits for
   `go --kind code`.
+
+## 11. Code kind
+
+```
+chatgpt-run go --kind code [--profile code|code-hard] --workspace-request-id WSREQ
+  [--base-ref REF] [--check CMD]... [--exec] ...
+```
+
+- **Grant:** `go` issues the single-use write grant itself (15 minutes, `exec` enabled only
+  with `--exec`) right before it pastes the prompt, and appends `write_grant: <token>` as
+  the last line of the sent text. The prompt file never holds a grant; a prompt that
+  already contains one is refused. The manifest stores only `grant_id`. The journal's
+  `prompt_sha256` covers the sent text including the grant; page matching uses the text
+  without it (a prefix of the sent text), so recovery never needs the grant again. An
+  interrupted setup revokes its old grant before it issues a new one.
+- **Seal:** once the run is terminal (`completed` or `failed-pre-submit`), `go` revokes the
+  workspace opened with `WSREQ`, or the grant when no workspace was opened. The result
+  reports `sealed: revoked` or `sealed: warning:<code>`. No edit can land after the answer
+  is saved.
+- **Checks:** after sealing, each `--check` command runs once through `/bin/sh -c` in the
+  checkout, as the owner, with a 15-minute limit. Output goes to owner-only
+  `<manifest>.check-<n>.log` files. The result lists `{cmd, exit_code, timed_out, log,
+  tail}` and `candidate_changed`: whether HEAD, the tracked diff or untracked content
+  changed while the checks ran.
+- **Coordinator:** the coordinator reads the answer and the check results, then reviews,
+  commits and pushes itself. `go` never commits.

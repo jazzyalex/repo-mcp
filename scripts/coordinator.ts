@@ -71,7 +71,7 @@ Task:
   coord task finish [--state-dir PATH] --task ID
 
 Workspace:
-  coord workspace grant [--state-dir PATH] --task ID [--ttl-seconds N]
+  coord workspace grant [--state-dir PATH] --task ID [--ttl-seconds N] [--exec]
   coord workspace revoke [--state-dir PATH] (--workspace ID|--grant ID)
   coord workspace recover-stale [--state-dir PATH] --workspace ID
 
@@ -118,6 +118,7 @@ const { positionals, values } = parseArgs({
     'ttl-seconds': { type: 'string' },
     'state-dir': { type: 'string' },
     'allow-detached': { type: 'boolean' },
+    exec: { type: 'boolean' },
     'use-active-task': { type: 'boolean' },
     'dry-run': { type: 'boolean' },
     apply: { type: 'boolean' },
@@ -286,9 +287,10 @@ try {
     } else throw new Error('task command must be bind, status, phase, rebind, recover-stale or finish.');
   } else if (area === 'workspace') {
     if (command === 'grant') {
-      assertOnly('state-dir', 'task', 'ttl-seconds');
+      assertOnly('state-dir', 'task', 'ttl-seconds', 'exec');
       if (!values.task) throw new Error('workspace grant requires --task.');
-      print(await issueWorkspaceGrant({ stateDir, taskId: values.task, ttlMs: asTtlMs() }));
+      // --exec lets the code workspace opened with this grant run shell commands through exec.
+      print(await issueWorkspaceGrant({ stateDir, taskId: values.task, ttlMs: asTtlMs(), ...(values.exec ? { exec: true } : {}) }));
     } else if (command === 'revoke') {
       assertOnly('state-dir', 'workspace', 'grant');
       if (!!values.workspace === !!values.grant) throw new Error('workspace revoke requires exactly one of --workspace or --grant.');

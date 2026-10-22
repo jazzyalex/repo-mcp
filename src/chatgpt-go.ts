@@ -22,7 +22,8 @@ import {
 } from './chatgpt-run.js';
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
-import { workspaceForOpenRequest } from './multirepo-state.js';
+import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
+import { issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
 import { ReviewShareError } from './review-state.js';
 import { StateStore, acquireLock } from './task-state.js';
@@ -34,6 +35,7 @@ import { StateStore, acquireLock } from './task-state.js';
 export const GO_KIND = 'chatgpt-go-v1';
 const ACCOUNT_KIND = 'chatgpt-go-account-v1';
 const ACCOUNT_PATH = 'account';
+const WS_CLAIM_KIND = 'chatgpt-go-ws-claim-v1';
 /** One admission store per machine: every state dir drives the same main-Chrome ChatGPT account. */
 export const DEFAULT_ACCOUNT_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'repo-mcp', 'chatgpt-account');
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -73,7 +75,10 @@ export interface ChatGptPage {
 export type GoPhase = 'admitted' | 'tab-ready' | 'prepared' | 'reserved' | 'send-intent' |
   'submitted' | 'completed' | 'cleaned' | 'failed' | 'uncertain';
 
-export type GoKind = 'architecture' | 'review';
+export type GoKind = 'architecture' | 'review' | 'code';
+
+/** Code runs: `go` issues the write grant itself and runs the project checks after sealing. */
+export type GoCodeTarget = { base_ref?: string; checks: string[]; exec: boolean };
 
 /** Commit-pinned review target; the coordinator resolves both commits before writing the prompt. */
 export type GoReviewTarget = { workspace_request_id: string; base_ref: string; head_ref: string; scope_prefix?: string };
@@ -82,8 +87,15 @@ export type GoManifest = {
   request_id: string; request_digest: string; repository_id: string; task_id: string;
   coordinator: ChatGptCoordinator; kind: GoKind; profile: ModelProfile; prompt_sha256: string;
   review?: GoReviewTarget;
-  /** Architecture only: the workspace_open request ID the prompt names (review keeps it in `review`). */
+  /** Architecture and code: the workspace_open request ID the prompt names (review keeps it in `review`). */
   workspace_request_id?: string;
+  code?: GoCodeTarget;
+  /** Code only: the single-use write grant this request issued (never the grant itself). */
+  grant_id?: string;
+  /** Code only: `revoked` once the coding workspace (or unused grant) is revoked, or `warning:<code>`. */
+  sealed?: string;
+  checks?: CheckResult[];
+  candidate_changed?: boolean;
   /** Where the saved answer came from: the `finish` MCP report, or the page text. */
   output_source?: 'mcp-report' | 'page';
   /** Review only: `closed`, or `warning:<code>` when the shared-review participant could not be closed. */
@@ -99,6 +111,10 @@ export type GoOptions = {
   repositoryId?: string; taskId?: string; coordinator?: ChatGptCoordinator; kind?: string; profile?: ModelProfile;
   prompt?: string; promptFile?: string; timeoutMinutes?: number; maxPerHour?: number;
   workspaceRequestId?: string; baseRef?: string; headRef?: string; scopePrefix?: string;
+  /** Code only: commands run in the checkout after the workspace is sealed. */
+  checks?: string[];
+  /** Code only: let the write grant enable the `exec` shell tool. */
+  exec?: boolean;
 };
 
 export type GoDeps = {
@@ -113,6 +129,7 @@ export type GoResult = {
   request_id: string; phase: GoPhase; run_id: string | null; run_state: string | null;
   conversation_url: string | null; output_file: string | null; cleanup: string | null; failure_code: string | null;
   outcome: string | null; participant: string | null; output_source: string | null;
+  sealed: string | null; checks: CheckResult[] | null; candidate_changed: boolean | null;
 };
 
 const requestHash = (requestId: string) => sha256(`chatgpt-go\0${requestId}`);
@@ -124,11 +141,12 @@ const conversationId = (url: string | undefined) => url?.match(/\/c\/([A-Za-z0-9
 
 export function goRequestDigest(o: {
   repositoryId: string; taskId: string; coordinator: string; kind: string; profile: string; promptSha256: string;
-  review?: GoReviewTarget; workspaceRequestId?: string;
+  review?: GoReviewTarget; workspaceRequestId?: string; code?: GoCodeTarget;
 }) {
   const parts: unknown[] = ['chatgpt-go-request-v1', o.repositoryId, o.taskId, o.coordinator, o.kind, o.profile, o.promptSha256];
   if (o.review) parts.push(o.review.workspace_request_id, o.review.base_ref, o.review.head_ref, o.review.scope_prefix ?? '');
   else if (o.workspaceRequestId) parts.push('workspace', o.workspaceRequestId);
+  if (o.code) parts.push('code', o.code.base_ref ?? '', o.code.checks, o.code.exec);
   return sha256(JSON.stringify(parts));
 }
 
@@ -137,7 +155,8 @@ function result(m: GoManifest, run?: ChatGptRunRecord): GoResult {
     request_id: m.request_id, phase: m.phase, run_id: m.run_id ?? null, run_state: run?.state ?? null,
     conversation_url: m.conversation_url ?? null, output_file: m.output_file ?? null,
     cleanup: m.cleanup ?? null, failure_code: m.failure_code ?? null,
-    outcome: run?.outcome ?? null, participant: m.participant ?? null, output_source: m.output_source ?? null
+    outcome: run?.outcome ?? null, participant: m.participant ?? null, output_source: m.output_source ?? null,
+    sealed: m.sealed ?? null, checks: m.checks ?? null, candidate_changed: m.candidate_changed ?? null
   };
 }
 
@@ -251,34 +270,52 @@ export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult>
             options.workspaceRequestId !== (saved.review?.workspace_request_id ?? saved.workspace_request_id)) ||
           (options.baseRef !== undefined && options.baseRef !== saved.review?.base_ref) ||
           (options.headRef !== undefined && options.headRef !== saved.review?.head_ref) ||
-          (options.scopePrefix !== undefined && options.scopePrefix !== saved.review?.scope_prefix)) {
+          (options.scopePrefix !== undefined && options.scopePrefix !== saved.review?.scope_prefix) ||
+          (options.checks !== undefined && JSON.stringify(options.checks) !== JSON.stringify(saved.code?.checks ?? [])) ||
+          (options.exec !== undefined && options.exec !== (saved.code?.exec ?? false))) {
         throw new GoError('REQUEST_CONFLICT', `Request ${options.requestId} already exists with different inputs.`);
       }
     } else if (prompt !== undefined) {
       const kind = options.kind ?? 'architecture';
-      if (kind !== 'architecture' && kind !== 'review') throw new GoError('KIND_UNSUPPORTED', 'go supports --kind architecture or review.');
+      if (kind !== 'architecture' && kind !== 'review' && kind !== 'code') throw new GoError('KIND_UNSUPPORTED', 'go supports --kind architecture, review or code.');
       const profile = options.profile ?? kind;
       if (!options.repositoryId || !options.taskId || !options.coordinator) throw new GoError('INVALID_REQUEST', 'go needs --repository, --task and --coordinator.');
       const review = kind === 'review' ? reviewTarget(options, prompt, profile) : undefined;
-      if (!review && [options.baseRef, options.headRef, options.scopePrefix].some(v => v !== undefined)) {
+      if (!review && [options.headRef, options.scopePrefix].some(v => v !== undefined)) {
         throw new GoError('INVALID_REQUEST', 'Review target options need --kind review.');
+      }
+      if (kind === 'architecture' && options.baseRef !== undefined) throw new GoError('INVALID_REQUEST', '--base-ref needs --kind review or code.');
+      if (kind !== 'code' && (options.checks?.length || options.exec)) throw new GoError('INVALID_REQUEST', '--check and --exec need --kind code.');
+      let code: GoCodeTarget | undefined;
+      if (kind === 'code') {
+        if (profile !== 'code' && profile !== 'code-hard') throw new GoError('INVALID_REQUEST', 'Code profile must be code or code-hard.');
+        if (!options.workspaceRequestId) throw new GoError('INVALID_REQUEST', 'go --kind code needs --workspace-request-id.');
+        if (/write_grant:\s*wg1\./.test(prompt)) throw new GoError('INVALID_REQUEST', 'go issues the write grant itself; remove it from the prompt.');
+        code = { ...(options.baseRef ? { base_ref: options.baseRef } : {}), checks: options.checks ?? [], exec: !!options.exec };
       }
       const workspaceRequestId = review ? undefined : options.workspaceRequestId;
       if (workspaceRequestId !== undefined) requireNamedWorkspace(workspaceRequestId, prompt);
       // A request ID that already opened a workspace would bind this run to an older
       // workspace, its participant and its report.
       const ws = review?.workspace_request_id ?? workspaceRequestId;
-      if (ws && await workspaceForOpenRequest(options.stateDir, ws)) {
-        throw new GoError('INVALID_REQUEST', `Workspace request ID ${ws} was already used; use a fresh one.`);
+      if (ws) {
+        // A durable claim makes the ID single-use across requests, including one that is
+        // queued behind ACCOUNT_BUSY while another request still has to open it.
+        const claim = `chatgpt-go-ws/${sha256(`chatgpt-go-ws\0${ws}`)}`;
+        const owner = await store.create(claim, WS_CLAIM_KIND, { request_id: options.requestId })
+          ? options.requestId : (await store.read<{ request_id: string }>(claim, WS_CLAIM_KIND))?.request_id;
+        if (owner !== options.requestId || await workspaceForOpenRequest(options.stateDir, ws)) {
+          throw new GoError('INVALID_REQUEST', `Workspace request ID ${ws} was already used; use a fresh one.`);
+        }
       }
       const promptSha256 = sha256(prompt);
       const digest = goRequestDigest({ repositoryId: options.repositoryId, taskId: options.taskId,
-        coordinator: options.coordinator, kind, profile, promptSha256, review, workspaceRequestId });
+        coordinator: options.coordinator, kind, profile, promptSha256, review, workspaceRequestId, code });
       const at = now().toISOString();
       m = {
         request_id: options.requestId, request_digest: digest, repository_id: options.repositoryId,
         task_id: options.taskId, coordinator: options.coordinator, kind, profile, ...(review ? { review } : {}),
-        ...(workspaceRequestId ? { workspace_request_id: workspaceRequestId } : {}),
+        ...(workspaceRequestId ? { workspace_request_id: workspaceRequestId } : {}), ...(code ? { code } : {}),
         prompt_sha256: promptSha256, prompt_file: options.promptFile ? path.resolve(options.promptFile) : '',
         session_id: `go-${digest.slice(0, 16)}-${randomBytes(4).toString('hex')}`,
         created_at: at, updated_at: at, phase: 'admitted'
@@ -331,9 +368,14 @@ class Driver {
   }
 
   private async finish(phase: 'cleaned' | 'failed', patch: Partial<GoManifest> = {}) {
-    await this.save({ ...patch, phase });
-    await this.closeReview();
-    await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+    // The run is terminal: release the account even if a manifest or cleanup write fails.
+    try {
+      await this.save({ ...patch, phase });
+      await this.closeReview();
+      await this.seal();
+    } finally {
+      await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+    }
     return result(this.m, this.m.run_id ? await this.run() : undefined);
   }
 
@@ -348,9 +390,13 @@ class Driver {
     if (this.m.phase === 'cleaned' || this.m.phase === 'failed') {
       // A finished request must never keep the account; output repair is reported separately.
       let repair: unknown;
-      if (this.m.output_file) await this.ensureOutputFile().catch(error => { repair = error; });
-      await this.closeReview();
-      await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+      try {
+        if (this.m.output_file) await this.ensureOutputFile().catch(error => { repair = error; });
+        await this.closeReview();
+        await this.seal();
+      } finally {
+        await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+      }
       if (repair) throw repair;
       return result(this.m, this.m.run_id ? await this.run() : undefined);
     }
@@ -367,10 +413,14 @@ class Driver {
   /** No run exists yet: set up the tab, then prepare, select, reserve and send once. */
   private async fresh(): Promise<GoResult> {
     const prompt = this.requirePrompt();
+    // The text actually sent; for code it ends with the write grant. Page matching uses
+    // `prompt`, a prefix of it, so recovery never needs the grant again.
+    let sent = prompt;
     try {
       const { targetId } = await this.page.open();
       await this.page.attachRepoMcp();
-      await this.page.pastePrompt(prompt);
+      sent = await this.withGrant(prompt);
+      await this.page.pastePrompt(sent);
       await this.save({ phase: 'tab-ready', target_id: targetId, pending_run_id: this.m.pending_run_id ?? randomUUID() });
     } catch (error) {
       process.stderr.write(`browser setup failed: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -398,7 +448,8 @@ class Driver {
         prepared = await prepareChatGptRun({
           stateDir: this.stateDir, repositoryId: this.m.repository_id, taskId: this.m.task_id,
           coordinator: this.m.coordinator, workKind: this.m.kind, profile: this.m.profile, surface: 'chat',
-          sessionId: this.m.session_id, prompt, runId: this.m.pending_run_id, now: this.now()
+          sessionId: this.m.session_id, prompt: sent, runId: this.m.pending_run_id, now: this.now(),
+          ...(this.m.code?.base_ref ? { baseRef: this.m.code.base_ref } : {})
         });
       }
     } catch (error) {
@@ -524,6 +575,11 @@ class Driver {
       } catch (error) {
         return this.hold(codeOf(error, 'WORKSPACE_RECONCILIATION_REQUIRED'));
       }
+      // Only a workspace opened after this run's send can be this run's evidence.
+      const selection = await workspaceForOpenRequest(this.stateDir, this.m.review!.workspace_request_id);
+      if (!selection || !this.m.send_intent_at || Date.parse(selection.issued_at) < Date.parse(this.m.send_intent_at)) {
+        return this.hold('WORKSPACE_STALE');
+      }
     }
     const outputFile = path.join(this.store.dir, `${manifestPath(this.m.request_id)}.output.md`);
     await writeFile(outputFile, answer, { mode: 0o600 });
@@ -546,6 +602,8 @@ class Driver {
 
   private async cleanup(): Promise<GoResult> {
     await this.closeReview();
+    await this.seal();
+    await this.runChecks();
     let cleanup = 'archived';
     try {
       if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) throw new GoError('TAB_GONE');
@@ -555,6 +613,51 @@ class Driver {
       cleanup = `warning:${codeOf(error, 'ARCHIVE_FAILED')}`;
     }
     return this.finish('cleaned', { cleanup });
+  }
+
+  /** Issue this request's single-use write grant (code only) and return the text to send. */
+  private async withGrant(prompt: string) {
+    if (this.m.kind !== 'code') return prompt;
+    // A grant from an interrupted earlier setup was never sent; retire it first.
+    if (this.m.grant_id) await revokeGrant({ stateDir: this.stateDir, grantId: this.m.grant_id }).catch(() => {});
+    const grant = await issueWorkspaceGrant({ stateDir: this.stateDir, taskId: this.m.task_id, ttlMs: 15 * 60_000,
+      ...(this.m.code?.exec ? { exec: true } : {}) });
+    await this.save({ grant_id: grant.grant_id });
+    return `${prompt}\n\nwrite_grant: ${grant.write_grant}`;
+  }
+
+  /**
+   * Seal a code run once its run is terminal: revoke the workspace ChatGPT opened, or the
+   * grant if it was never used, so no edit can land after the answer was saved.
+   */
+  private async seal() {
+    if (this.m.kind !== 'code' || this.m.sealed === 'revoked' || !this.m.grant_id) return;
+    if (this.m.run_id) {
+      const run = await this.run().catch(() => undefined);
+      if (run && run.state !== 'completed' && run.state !== 'failed-pre-submit') return;
+    }
+    let status = 'revoked';
+    try {
+      const selection = this.m.workspace_request_id ? await workspaceForOpenRequest(this.stateDir, this.m.workspace_request_id) : null;
+      if (selection) await revokeWorkspace({ stateDir: this.stateDir, workspaceId: selection.workspace_id });
+      else await revokeGrant({ stateDir: this.stateDir, grantId: this.m.grant_id });
+    } catch (error) {
+      status = `warning:${codeOf(error, 'SEAL_FAILED')}`;
+    }
+    await this.save({ sealed: status });
+  }
+
+  /** Run the requested project checks once, after sealing, and report whether they changed the candidate. */
+  private async runChecks() {
+    if (this.m.kind !== 'code' || !this.m.code?.checks.length || this.m.checks) return;
+    const root = (await readMultiRepoCatalog(this.stateDir)).repositories[this.m.repository_id]?.root;
+    if (!root) throw new GoError('REPOSITORY_UNAVAILABLE', 'Registered repository is missing.');
+    const before = await candidateDigest(root);
+    const checks: CheckResult[] = [];
+    for (const [i, cmd] of this.m.code.checks.entries()) {
+      checks.push(await runCheck(root, cmd, path.join(this.store.dir, `${manifestPath(this.m.request_id)}.check-${i}.log`)));
+    }
+    await this.save({ checks, candidate_changed: (await candidateDigest(root)) !== before });
   }
 
   /**

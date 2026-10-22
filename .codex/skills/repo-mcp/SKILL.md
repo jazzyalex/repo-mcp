@@ -190,13 +190,12 @@ Run real project builds/integration tests locally through the trusted coordinato
 MCP `run_tests` is only for policy-approved fixture suites.
 
 For coding, Codex is the coordinator and ChatGPT web is the worker. Keep repository ID,
-task ID, grant, and browser references internal; use host-native browser control to make
-the ChatGPT coding conversation consume the grant and perform every Repo MCP read/write.
-The normal user prompt is simply `Use Repo MCP to code this task: ...`. Do not perform
-the semantic coding work in Codex and relabel it as Repo MCP/ChatGPT work.
-Prepare a durable `chatgpt-run` with kind `code` and profile `code` or `code-hard`; record
-the live picker observation, reserve immediately before the single prompt submission, submit only when
-`submission_authorized` is `true`, and recover the same run after any uncertain submission.
+task ID, grant, and browser references internal. Start the ChatGPT coding conversation
+with `chatgpt-run go --kind code` (the "Coding run" recipe below): it issues the grant
+itself, makes the conversation consume it, records every step in the durable `chatgpt-run` journal and recovers the
+same run after any uncertain submission. The normal user prompt is simply `Use Repo MCP
+to code this task: ...`. Do not perform the semantic coding work in Codex and relabel it
+as Repo MCP/ChatGPT work.
 
 ## Review handoff
 
@@ -292,149 +291,75 @@ old coding tokens never revive.
 
 ## Command recipe: commit-pinned review
 
-This sequence completed cleanly on 2026-10-20. Follow it literally; do not re-derive
-commands from SETUP.md, source code or old transcripts. Every command runs from the
-control checkout. Keep run files in a private folder outside the reviewed repository.
-Resolve `ROOT=$(git rev-parse --show-toplevel)` inside the user's project first.
+Follow it literally; do not re-derive commands from SETUP.md, source code or old
+transcripts. Every command runs from the control checkout. Keep run files in a private
+folder outside the reviewed repository, and keep the prompt file until `go` finishes:
+`--resume` reads it again. Resolve `ROOT=$(git rev-parse --show-toplevel)` inside the
+user's project first.
 
 ```bash
 C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
 R=$(mktemp -d)  # private run folder (mode 700)
-now(){ python3 -I -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z"))'; }
-jget(){ python3 -I -c 'import json,sys
-o=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): o=o[k]
-print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
 ```
 
+Browser prerequisite: the owner's main Chrome runs with remote debugging enabled in
+`chrome://inspect/#remote-debugging` and is signed in to ChatGPT. `go` starts a local
+relay that holds one DevTools connection, so Chrome asks the owner to approve it once
+per Chrome start. Never connect to Chrome's debugging port yourself.
+
 1. **Resolve.** `npm run --silent coord -- repository resolve --repo "$ROOT"` gives
-   `REPO` and the sole unfinished review `TASK`. Pin the target:
+   `REPO` and the sole unfinished review `TASK`. Pin the target with full commits:
    `BASE=$(git -C "$ROOT" rev-parse BASE_REF)`, `HEADC=$(git -C "$ROOT" rev-parse HEAD)`.
-   Set `SID=codex-$REPO-review-$(date +%Y%m%dT%H%M%S)` and
+   Set `GOREQ=$REPO-review-$(date +%Y%m%dT%H%M%S)` and
    `WSREQ=$REPO-review-ws-$(date +%Y%m%dT%H%M%S)` (fresh, unique each run).
 2. **Rebind first.** `npm run --silent coord -- task rebind --task "$TASK"`. This clears
    "Task binding is stale" after HEAD moved. It refuses when another reviewer or a
    coding owner is protected; then stop and report that blocker. Mention the rebind in
    the report.
-3. **Prepare the browser.** Open a normal ChatGPT **Chat** tab (not Work, not Temporary
-   Chat) and attach Repo MCP through the tool picker. The required effort is `Extra High` for
-   `review`, `Pro` for `review-critical`. Check it in the page:
-   ```js
-   ({chip:[...document.querySelectorAll('button,span,div')].some(e=>e.childElementCount===0&&e.innerText?.trim()==='Repo MCP'),
-     effort:[...document.querySelectorAll('button')].map(b=>b.innerText.trim()).filter(x=>/^(Light|Medium|High|Extra High|Pro)$/.test(x))})
-   ```
-4. **Write the final prompt** to `$R/prompt.txt`: repository ID, task ID, `review`
-   mode, `workspace_open` request ID `$WSREQ`, and the requested and resolved base/head.
-   Never edit it after this step.
-5. **Paste the prompt** into the composer now, before preparing (the prompt file is
-   final, and pasting later wastes the 2-minute selection window). Do not send.
-6. **Prepare the run** (the 2-minute selection window starts now):
+3. **Write the final prompt** to `$R/prompt.txt`: repository ID, task ID, `review` mode,
+   `workspace_open` request ID `$WSREQ`, `base_ref` `$BASE` and `head_ref` `$HEADC`
+   (and `scope_prefix` if used), what to review, "make no edits", "end with one line
+   `VERDICT: SHIP` or `VERDICT: NO-SHIP`", and "before `workspace_close`, call `finish`
+   once with outcome `ship` or `no-ship` and your complete review as
+   `summary_markdown`". Never edit it after this step. `go` adds its own run-marker line.
+4. **Run `go` once, in the background:**
    ```bash
-   npm run --silent coord -- review prepare-or-join --repository "$REPO" --task "$TASK" \
-     --coordinator codex --profile review --surface chat --session-id "$SID" \
-     --workspace-request-id "$WSREQ" --prompt-file "$R/prompt.txt" \
-     --base-ref "$BASE" --head-ref "$HEADC" > "$R/wrapper.json"
-   python3 -I -c 'import json,sys;json.dump(json.load(open(sys.argv[1]))["run"],open(sys.argv[2],"w"))' "$R/wrapper.json" "$R/run.json"
-   RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
-   PSHA=$(jget "$R/run.json" prompt_sha256); CDIG=$(jget "$R/run.json" commit_binding.candidate_digest)
-   PART=$(jget "$R/run.json" participant_id)
+   npm run --silent chatgpt-run -- go --request-id "$GOREQ" --repository "$REPO" --task "$TASK" \
+     --coordinator codex --kind review --profile review --workspace-request-id "$WSREQ" \
+     --base-ref "$BASE" --head-ref "$HEADC" --prompt-file "$R/prompt.txt" > "$R/go.json"; echo "exit=$?" >> "$R/go.json"
    ```
-   Check that both task IDs equal `$TASK`, the resolved base equals `$BASE`, and
-   `participant.commit_binding` equals `run.commit_binding`. Stop on any mismatch.
-7. **Select the effort, then observe and reserve.** Open the model picker and click
-   **Extra High**, even if it already shows it (the selection must happen after
-   preparation). Right after the click, record `SELAT=$(now)`. Read the label the page
-   now shows (the `effort` value from the check above) into `LABEL`; it must be exactly
-   `Extra High`. Within 10 seconds run this one command:
-   ```bash
-   npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "$LABEL" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
-   && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
-     --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
-   ```
-   Send only when it prints `True`.
-8. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
-   cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
-   ends the run. A failed `observe` (or an expired 2-minute window) leaves the run
-   open, so always close it first; the command is a no-op after a failed `reserve`,
-   which uses the same failure code:
-   ```bash
-   npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_SELECTION_NOT_VERIFIED
-   npm run --silent coord -- review recover-participant --task "$TASK" --participant "$PART"
-   npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
-   ```
-   Then start again from writing the prompt with a new `WSREQ` (the prompt names it).
-   Skipping the close leaves a protected participant that blocks later rebind, phase
-   and finish commands.
-9. **Send once.** Close any open picker menu, then click the composer's **Send** button
-   (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
-   the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
-   more seconds and check again before clicking Send again. As soon as the URL shows
-   `/c/`, always save it (recovery needs it most):
-   `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`. If you still
-   cannot tell whether it was sent, record `chatgpt-run uncertain` and recover; never
-   send twice blindly.
-10. **Record the send**:
-    ```bash
-    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
-      --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" --candidate-digest "$CDIG" \
-      --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
-    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
-    ```
-11. **Reconcile** in the background until ChatGPT has opened the workspace:
-    ```bash
-    for i in $(seq 1 30); do npm run --silent coord -- review reconcile --task "$TASK" --participant "$PART" 2>&1 | grep -q '"bound"' && { echo BOUND; break; }; sleep 15; done
-    ```
-12. **Wait for the answer, not for the workspace.** Never use the broker audit log,
-    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
-    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-    The page is the only signal. Every 30–60 seconds run this instant check (never wait
-    inside the page: background tabs slow page timers, and the browser call fails after
-    45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
-    with `run_in_background`; Codex: a short wait).
-    ```js
-    (() => { const ANSWER = '[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]';
-      const m = [...document.querySelectorAll(ANSWER)].at(-1);
-      const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
-      const turn = [...document.querySelectorAll('[data-talvt-turn-state]')].at(-1)?.getAttribute('data-talvt-turn-state');
-      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]') || (turn !== undefined && turn !== 'complete'),
-        chars: t.length, tail: t.slice(-150)}; })()
-    ```
-    `ANSWER` matches both the old and the October 2026 ChatGPT layouts. If `chars` stays near 0 while the
-    page shows an answer, the layout changed again: find the answer element before
-    trusting the check.
-    The answer is done when two checks in a row show `busy: false` with the same `chars`,
-    and `tail` ends with the verdict or the end of the report. An Extra High review usually takes 5–15 minutes.
-13. **Capture the answer** into `$R/output.md`: read the last assistant message in the
-    page (`[...document.querySelectorAll('[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]')].at(-1).innerText`,
-    minus a leading `ChatGPT said:` line) and write that exact text to the file
-    through the browser runtime's file access. If
-    that selector finds nothing (the page layout changes) or the text comes back
-    truncated, use the Copy button under the last answer and `pbpaste` instead.
-14. **Complete and close** (use `--outcome no-ship` when the verdict is NO-SHIP):
-    ```bash
-    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
-    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome ship \
-      --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
-      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" --head-commit "$HEADC" \
-      --candidate-digest "$CDIG" \
-      --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
-    npm run --silent coord -- review close --task "$TASK" --participant "$PART" --request-id "$REPO-review-close-$(date +%Y%m%dT%H%M%S)"
-    ```
-    Both commands print `"state": "completed"` and `"state": "closed"`.
-15. **Archive the chat** so it leaves the ChatGPT sidebar. `complete` saves the answer
-    in the broker state; first confirm that saved copy matches what you captured:
-    ```bash
-    npm run --silent chatgpt-run -- output --run "$RUN" > "$R/saved.md" && [ -s "$R/saved.md" ] \
-      && cmp -s "$R/saved.md" "$R/output.md" && echo SAVED
-    ```
-    Only when it prints `SAVED`: in the conversation tab (`$R/chat-url`), click the
-    **More** (`…`) button at the top right, then **Archive**. The chat stays in your
-    account (Settings, Archived chats) and its URL still opens with the full answer.
-    Archiving asks for no confirmation; the tab moves to a new chat.
-    Never use **Delete**. Skip this step and keep the chat when the run is `uncertain`,
-    needs recovery, or the check did not print `SAVED`. Later, `chatgpt-run output --run
-    RUN_ID` prints the saved answer again.
+   In Codex, start it as a background process and wait for it to exit. An Extra High review takes about 5–15 minutes. Do not check on it in
+   between.
+5. **Read the result** (first line of `$R/go.json`, one JSON object):
+   - `exit=0`, `phase: cleaned`: read the review from `output_file`. `outcome` is `ship`
+     or `no-ship`. It comes from the `finish` report when `output_source` is
+     `mcp-report`; otherwise from the last `VERDICT:` line of the page text, and a
+     missing verdict counts as `no-ship`. `participant: closed` means the review
+     participant was released; `warning:<code>` means it was not, so report it.
+     `cleanup` is `archived`, or `warning:<code>` when only archiving failed.
+   - `exit=3` (any output, with or without `"error"`): the prompt may have been sent.
+     Never start a new request or use the manual recipe; the account stays held. Run
+     `go --request-id "$GOREQ" --resume` once. It reattaches to the same chat and never
+     resends. If it still exits 3, report the `conversation_url` and stop.
+     `failure_code: WORKSPACE_RECONCILIATION_REQUIRED` means ChatGPT answered without
+     opening the review workspace. If the resume still says so, report the review as
+     `NOT TESTABLE`, then free the account with
+     `go --request-id "$GOREQ" --release-admission --reason "review workspace never opened"`.
+   - `exit=1`, `phase: failed`: nothing was sent when `run_id` is null or the run is
+     `failed-pre-submit`; `go` already released the participant. `REVIEW_TARGET_MISMATCH`
+     means the journal bound other commits than requested: stop and report it. For
+     `UI_*`, `COMPOSER_*` or `BROWSER_SETUP_FAILED`, retry once with a new `GOREQ` and
+     `WSREQ` (and a new prompt naming it). For `BROWSER_UNAVAILABLE` or
+     `BROWSER_APPROVAL_TIMEOUT`, ask the owner to approve the Chrome prompt or enable
+     remote debugging, then retry.
+   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. For `ACCOUNT_BUSY` or
+     `RATE_LIMITED`, report it and stop. `REQUEST_CONFLICT` means `GOREQ` was reused
+     with other inputs. `REVIEW_SHARE_STATE_STALE` means step 2 was skipped.
+   - `go --request-id "$GOREQ" --status` prints the stored result at any time.
+
+If `go` cannot run at all, use `docs/REVIEW-MANUAL-RECIPE.md` in the control checkout
+and say so in the report. Use it only after `go --status` shows your last request
+`cleaned` or `failed`; never after exit 3.
 
 ## Command recipes
 
@@ -519,138 +444,64 @@ Repo MCP app's tools in ChatGPT and start a new ChatGPT conversation.
 ### Coding run
 
 ChatGPT does the coding through Repo MCP; Codex coordinates and never edits the served
-repository through Repo MCP itself. Set up the run folder and helpers first:
+repository through Repo MCP itself. `chatgpt-run go --kind code` does every browser and
+journal step in code: it issues the single-use write grant and appends it to the sent
+text, attaches Repo MCP, selects the effort, sends once, waits, saves the answer,
+revokes the coding workspace, runs your checks and archives the chat. Do not drive the
+browser yourself and do not poll the page.
 
 ```bash
 C=$(plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.repo-mcp.server.plist); cd "$C"
-R=$(mktemp -d)  # private run folder (mode 700)
-now(){ python3 -I -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00","Z"))'; }
-jget(){ python3 -I -c 'import json,sys
-o=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): o=o[k]
-print(o)' "$1" "$2"; }  # jget FILE dotted.key.path
+R=$(mktemp -d)  # private run folder (mode 700); keep the prompt file until go finishes
 ```
+
+Browser prerequisite: the owner's main Chrome runs with remote debugging enabled in
+`chrome://inspect/#remote-debugging` and is signed in to ChatGPT. Chrome asks the owner
+to approve `go`'s relay once per Chrome start. Never connect to Chrome's debugging port
+yourself.
 
 1. **Set the run variables.** `npm run --silent coord -- repository resolve --repo "$ROOT"`
    gives `REPO` and its unfinished coding `TASK` (bind one with `coord task bind` when
-   there is none). Set `SID=codex-$REPO-code-$(date +%Y%m%dT%H%M%S)` and
-   `WSREQ=$REPO-code-ws-$(date +%Y%m%dT%H%M%S)`. Check the phase:
+   there is none). Set `GOREQ=$REPO-code-$(date +%Y%m%dT%H%M%S)` and
+   `WSREQ=$REPO-code-ws-$(date +%Y%m%dT%H%M%S)`. The phase must be coding:
    ```bash
    npm run --silent coord -- task status --task "$TASK"                 # phase must be coding
    npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if it is in review; refuses protected reviewers
    ```
-2. **Prepare the browser.** Open a normal ChatGPT **Chat** tab (not Work, not Temporary
-   Chat) and attach Repo MCP through the tool picker. The required effort is `High` for
-   profile `code`, `Extra High` for `code-hard`. Check it in the page:
-   ```js
-   ({chip:[...document.querySelectorAll('button,span,div')].some(e=>e.childElementCount===0&&e.innerText?.trim()==='Repo MCP'),
-     effort:[...document.querySelectorAll('button')].map(b=>b.innerText.trim()).filter(x=>/^(Light|Medium|High|Extra High|Pro)$/.test(x))})
-   ```
-3. **Issue the grant** right before preparing; it is single-use and expires in 10 minutes:
+2. **Write `$R/prompt.txt`** with repository ID, task ID, `code` mode, `workspace_open`
+   request ID `$WSREQ`, the expected HEAD, the coding instructions, "use the write_grant
+   on the last line of this message", "before `workspace_close`, call `finish` once with
+   outcome `completed` and a summary of your changes and checks", and "end with one
+   VERDICT line". Never put a grant in the prompt; `go` adds it.
+3. **Run `go` once, in the background:**
    ```bash
-   npm run --silent coord -- workspace grant --task "$TASK" > "$R/grant.json"; GRANT=$(jget "$R/grant.json" write_grant)
+   npm run --silent chatgpt-run -- go --request-id "$GOREQ" --repository "$REPO" --task "$TASK" \
+     --coordinator codex --kind code --profile code --workspace-request-id "$WSREQ" \
+     --check "PROJECT TEST COMMAND" --prompt-file "$R/prompt.txt" > "$R/go.json"; echo "exit=$?" >> "$R/go.json"
    ```
-4. **Write `$R/prompt.txt`** with repository ID, task ID, `code` mode, `write_grant` `$GRANT`,
-   request ID `$WSREQ`, the expected HEAD and the coding instructions. The grant goes
-   only into this prompt; never into files in a repository or logs.
-5. **Paste the prompt** into the composer now, before preparing (the prompt file is
-   final, and pasting later wastes the 2-minute selection window). Do not send.
-6. **Prepare the run** (the 2-minute selection window starts now; use `--profile code-hard`
-   for Extra High):
-   ```bash
-   npm run --silent chatgpt-run -- prepare --repository "$REPO" --task "$TASK" --coordinator codex \
-     --kind code --profile code --surface chat --session-id "$SID" --prompt-file "$R/prompt.txt" \
-     --base-ref "$(git -C "$ROOT" rev-parse HEAD)" > "$R/run.json"
-   RUN=$(jget "$R/run.json" run_id); SEL=$(jget "$R/run.json" selection.selection_id)
-   PSHA=$(jget "$R/run.json" prompt_sha256); BASE=$(jget "$R/run.json" resolved_base_commit)
-   ```
-7. **Select the effort, then observe and reserve.** Open the model picker and click
-   **High** (or **Extra High** for `code-hard`), even if it already shows it (the selection must happen after
-   preparation). Right after the click, record `SELAT=$(now)`. Read the label the page
-   now shows (the `effort` value from the check above) into `LABEL`; it must be exactly
-   the required effort. Within 10 seconds run this one command:
-   ```bash
-   npm run --silent chatgpt-run -- observe --selection-id "$SEL" --surface chat \
-     --control-label "$LABEL" --selected-at "$SELAT" --observed-at "$(now)" --session-id "$SID" > "$R/evidence.json" \
-   && npm run --silent chatgpt-run -- reserve --run "$RUN" --contract-file "$R/run.json" \
-     --evidence-file "$R/evidence.json" > "$R/reserve.json"; jget "$R/reserve.json" submission_authorized
-   ```
-   Send only when it prints `True`.
-8. **If observe or reserve fails, or prints anything but `True`:** do not send. That run
-   cannot be retried: `observe` is accepted once per selection, and a failed `reserve`
-   ends the run. A failed `observe` (or an expired 2-minute window) leaves the run
-   open, so always close it first; the command is a no-op after a failed `reserve`,
-   which uses the same failure code:
-   ```bash
-   npm run --silent chatgpt-run -- fail-pre-submit --run "$RUN" --failure-code MODEL_SELECTION_NOT_VERIFIED
-   npm run --silent coord -- workspace revoke --grant "$(jget "$R/grant.json" grant_id)"
-   ```
-   Then start again from issuing a new grant (the prompt names the grant and `WSREQ`).
-9. **Send once.** Close any open picker menu, then click the composer's **Send** button
-   (pressing Return after closing a menu may do nothing). Wait 5 seconds, then confirm
-   the send: the URL is `/c/CONVERSATION_ID` and the composer is empty. If not, wait 5
-   more seconds and check again before clicking Send again. As soon as the URL shows
-   `/c/`, always save it (recovery needs it most):
-   `printf '%s\n' 'https://chatgpt.com/c/CONVERSATION_ID' > "$R/chat-url"`. If you still
-   cannot tell whether it was sent, record `chatgpt-run uncertain` and recover; never
-   send twice blindly.
-10. **Record the send** (no head commit or candidate digest for this kind):
-    ```bash
-    NOW=$(now); npm run --silent chatgpt-run -- submitted --run "$RUN" --repository "$REPO" --task "$TASK" \
-      --prompt-sha256 "$PSHA" --base-commit "$BASE" \
-      --browser-event-id "chatgpt-send-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID" > "$R/submitted.json"
-    SUBSHA=$(jget "$R/submitted.json" submission_event_sha256)
-    ```
-11. **Wait for the answer, not for the workspace.** Never use the broker audit log,
-    `workspace_close`, or reconcile output as the completion signal: ChatGPT often closes
-    the Repo MCP workspace minutes before it finishes writing, and keeps writing after.
-    The page is the only signal. Every 30–60 seconds run this instant check (never wait
-    inside the page: background tabs slow page timers, and the browser call fails after
-    45 seconds). Wait between checks outside the page (Claude Code: a `sleep 45` command
-    with `run_in_background`; Codex: a short wait).
-    ```js
-    (() => { const ANSWER = '[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]';
-      const m = [...document.querySelectorAll(ANSWER)].at(-1);
-      const t = (m ? m.innerText : (document.querySelector('main')?.innerText || '')).trim();
-      const turn = [...document.querySelectorAll('[data-talvt-turn-state]')].at(-1)?.getAttribute('data-talvt-turn-state');
-      return {busy: !!document.querySelector('[data-testid="stop-button"],button[aria-label*="Stop"]') || (turn !== undefined && turn !== 'complete'),
-        chars: t.length, tail: t.slice(-150)}; })()
-    ```
-    `ANSWER` matches both the old and the October 2026 ChatGPT layouts. If `chars` stays near 0 while the
-    page shows an answer, the layout changed again: find the answer element before
-    trusting the check.
-    The answer is done when two checks in a row show `busy: false` with the same `chars`,
-    and `tail` ends with the verdict or the end of the report. A coding run usually takes 5–20 minutes.
-12. **Capture the answer** into `$R/output.md`: read the last assistant message in the
-    page (`[...document.querySelectorAll('[data-message-author-role="assistant"],[data-content-search-unit-key$=":assistant"]')].at(-1).innerText`,
-    minus a leading `ChatGPT said:` line) and write that exact text to the file
-    through the browser runtime's file access. If
-    that selector finds nothing (the page layout changes) or the text comes back
-    truncated, use the Copy button under the last answer and `pbpaste` instead.
-13. **Complete:**
-    ```bash
-    H=$(shasum -a 256 "$R/output.md" | cut -d' ' -f1); NOW=$(now)
-    npm run --silent chatgpt-run -- complete --run "$RUN" --output-file "$R/output.md" --outcome completed \
-      --response-state completed --submission-event-sha256 "$SUBSHA" --output-sha256 "$H" \
-      --repository "$REPO" --task "$TASK" --prompt-sha256 "$PSHA" --base-commit "$BASE" \
-      --browser-event-id "chatgpt-response-complete-CONVERSATION_ID-$NOW" --observed-at "$NOW" --session-id "$SID"
-    ```
-14. **Archive the chat** so it leaves the ChatGPT sidebar. `complete` saves the answer
-    in the broker state; first confirm that saved copy matches what you captured:
-    ```bash
-    npm run --silent chatgpt-run -- output --run "$RUN" > "$R/saved.md" && [ -s "$R/saved.md" ] \
-      && cmp -s "$R/saved.md" "$R/output.md" && echo SAVED
-    ```
-    Only when it prints `SAVED`: in the conversation tab (`$R/chat-url`), click the
-    **More** (`…`) button at the top right, then **Archive**. The chat stays in your
-    account (Settings, Archived chats) and its URL still opens with the full answer.
-    Archiving asks for no confirmation; the tab moves to a new chat.
-    Never use **Delete**. Skip this step and keep the chat when the run is `uncertain`,
-    needs recovery, or the check did not print `SAVED`. Later, `chatgpt-run output --run
-    RUN_ID` prints the saved answer again.
-15. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the project's own
-    tests and build. Commit and push only when the user asks. To move the task to review:
-    `npm run --silent coord -- task phase --task "$TASK" --phase review`.
+   Use `--profile code-hard` (Extra High) for hard changes. Add `--exec` only when
+   ChatGPT should run builds and tests itself through the `exec` tool. Repeat `--check`
+   for each project check (tests, typecheck, lint). In Codex, start it as a background process and wait for it to exit. A coding run usually takes
+   5–20 minutes.
+4. **Read the result** (first line of `$R/go.json`, one JSON object):
+   - `exit=0`, `phase: cleaned`: read the answer from `output_file`. `sealed: revoked`
+     means no further edit can land. Each `checks[]` entry has `exit_code`, `timed_out`,
+     a `tail` and a full `log`. `candidate_changed: true` means a check changed the
+     checkout; inspect before you trust the results.
+   - `exit=3`: the prompt may have been sent. Run `go --request-id "$GOREQ" --resume`
+     once; never start a new request. If it still exits 3, report `conversation_url`
+     and stop.
+   - `exit=1`, `phase: failed`: nothing was sent when `run_id` is null or the run is
+     `failed-pre-submit`; the grant is already revoked. Retry once with a new `GOREQ`
+     and `WSREQ` for `UI_*`, `COMPOSER_*` or `BROWSER_SETUP_FAILED`.
+   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. Stop on `ACCOUNT_BUSY` and
+     `RATE_LIMITED`.
+5. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the check logs, and
+   anything the checks do not cover. Commit and push only when the user asks. To move
+   the task to review: `npm run --silent coord -- task phase --task "$TASK" --phase review`.
+
+If `go` cannot run at all, use `docs/CODING-MANUAL-RECIPE.md` in the control checkout
+and say so; only after `go --status` shows your last request `cleaned` or `failed`.
 
 ### Recover a run
 

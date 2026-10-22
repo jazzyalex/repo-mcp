@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { prepareFixture } from '../src/fixture.js';
 import { migrateV1 } from '../src/policy.js';
 import { defaultPolicy } from '../src/repo.js';
-import { bindRegisteredTask, openWorkspace, registerRepository, rebindRegisteredTask, setRegisteredTaskPhase } from '../src/multirepo-state.js';
+import { bindRegisteredTask, issueWorkspaceGrant, openWorkspace, workspaceForOpenRequest, registerRepository, rebindRegisteredTask, setRegisteredTaskPhase } from '../src/multirepo-state.js';
 import { git } from './helpers.js';
 import { recordMcpReport } from '../src/mcp-report.js';
+import { sha256 } from '../src/errors.js';
 import { StateStore } from '../src/task-state.js';
 import { chatGptRunOutput, chatGptRunStatus } from '../src/chatgpt-run.js';
 import { GoError, goStatus, releaseGoAdmission, reviewVerdict, runGo, type ChatGptPage, type GoPhase, type TurnState } from '../src/chatgpt-go.js';
@@ -212,9 +213,9 @@ test('ambiguous UI before prepare fails without creating a run', async t => {
   assert.equal(r.failure_code, 'UI_AMBIGUOUS_REPO_MCP_ITEM');
 });
 
-test('kind code is unsupported', async t => {
+test('an unknown kind is unsupported', async t => {
   const { stateDir } = await fixture(t);
-  await assert.rejects(runGo({ ...base(stateDir), kind: 'code' }, { page: new FakePage(), sleep }),
+  await assert.rejects(runGo({ ...base(stateDir), kind: 'bogus' }, { page: new FakePage(), sleep }),
     (e: unknown) => e instanceof GoError && e.code === 'KIND_UNSUPPORTED');
   assert.equal((await chatGptRunStatus('00000000-0000-4000-8000-000000000000', stateDir).catch(() => undefined)), undefined);
 });
@@ -478,3 +479,143 @@ async function readManifestOutput(stateDir: string) {
   assert.ok(s.output_file);
   return s.output_file!;
 }
+
+// --- code kind ---------------------------------------------------------------------------
+
+const CODE_WS = 'open-go-code-1';
+const CODE_PROMPT = `Implement the change. Workspace request id: ${CODE_WS}\n\nMake the edits through Repo MCP.`;
+const codeBase = (stateDir: string, requestId = 'code-1') => ({
+  ...base(stateDir, requestId), kind: 'code', prompt: CODE_PROMPT, workspaceRequestId: CODE_WS
+});
+const repoRoot = (stateDir: string) => path.join(stateDir, '..', 'repo');
+const grantOf = (text: string) => text.match(/write_grant: (wg1\.\S+)$/)?.[1];
+
+/** A page that records the pasted text and, on send, opens the coding workspace with the pasted grant and edits a file. */
+function codePage(stateDir: string, opts: ConstructorParameters<typeof FakePage>[0] = {}, edit = true) {
+  const pasted: string[] = [];
+  const page = new FakePage({
+    ...opts,
+    onSend: async () => {
+      const grant = grantOf(pasted.at(-1)!);
+      assert.ok(grant, 'the sent text ends with a write grant');
+      await openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'code', requestId: CODE_WS, writeGrant: grant });
+      if (edit) await writeFile(path.join(repoRoot(stateDir), 'src', 'go-edit.txt'), 'edited by chatgpt\n');
+    }
+  });
+  page.pastePrompt = async (text: string) => { pasted.push(text); };
+  return { page, pasted };
+}
+
+test('code happy path: grant sent, workspace edited and sealed, journal hashes the sent text', async t => {
+  const { stateDir } = await fixture(t);
+  const { page, pasted } = codePage(stateDir);
+  const res = await runGo(codeBase(stateDir), { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.run_state, 'completed');
+  assert.equal(res.sealed, 'revoked');
+  assert.equal(page.clicks, 1);
+  assert.equal((await workspaceForOpenRequest(stateDir, CODE_WS))?.status, 'revoked');
+  assert.equal(await readFile(path.join(repoRoot(stateDir), 'src', 'go-edit.txt'), 'utf8'), 'edited by chatgpt\n');
+  // The first line is the per-request marker; the grant is appended after the template.
+  const sent = pasted.at(-1)!;
+  assert.match(sent, /\n\nwrite_grant: wg1\.\S+$/);
+  const run = await chatGptRunStatus(res.run_id!, stateDir);
+  assert.equal(run.prompt_sha256, sha256(sent));
+  const manifest = await (await StateStore.inspect(stateDir))!.read<any>(`chatgpt-go/${sha256('chatgpt-go\0code-1')}`, 'chatgpt-go-v1');
+  assert.equal(manifest.prompt_sha256, sha256(CODE_PROMPT));
+  assert.notEqual(run.prompt_sha256, manifest.prompt_sha256);
+});
+
+test('code checks run once after sealing and report exit codes, logs and an unchanged candidate', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir);
+  const res = await runGo({ ...codeBase(stateDir), checks: ['echo ok', 'exit 3'] }, { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.checks?.length, 2);
+  assert.deepEqual(res.checks!.map(c => c.exit_code), [0, 3]);
+  assert.equal(res.checks![0].timed_out, false);
+  assert.match(await readFile(res.checks![0].log, 'utf8'), /^ok/);
+  assert.match(res.checks![0].tail, /ok/);
+  assert.equal(res.candidate_changed, false);
+});
+
+test('a check that edits a tracked file marks the candidate as changed', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir);
+  const res = await runGo({ ...codeBase(stateDir), checks: ['echo x >> README.md'] }, { page, sleep });
+  assert.equal(res.candidate_changed, true);
+  assert.deepEqual(res.checks!.map(c => c.exit_code), [0]);
+});
+
+test('code with a wrong effort label fails before submit and revokes the unused grant', async t => {
+  const { stateDir } = await fixture(t);
+  const { page, pasted } = codePage(stateDir, { effortLabel: 'Extra High' });
+  const res = await runGo(codeBase(stateDir), { page, sleep });
+  assert.equal(res.phase, 'failed');
+  assert.equal(res.run_state, 'failed-pre-submit');
+  assert.equal(res.sealed, 'revoked');
+  assert.equal(page.clicks, 0);
+  await assert.rejects(openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'code',
+    requestId: 'late-open', writeGrant: grantOf(pasted.at(-1)!)! }));
+});
+
+test('code rejects a prompt that already holds a write grant and checks on other kinds', async t => {
+  const { stateDir } = await fixture(t);
+  await assert.rejects(runGo({ ...codeBase(stateDir), prompt: `${CODE_PROMPT}\nwrite_grant: wg1.abc.def` }, { page: new FakePage(), sleep }), invalid);
+  await assert.rejects(runGo({ ...base(stateDir, 'arch-checks'), checks: ['echo hi'] }, { page: new FakePage(), sleep }), invalid);
+});
+
+test('code recovery after an interrupted setup issues a new grant and revokes the old one', async t => {
+  const { stateDir } = await fixture(t);
+  await writeFile(path.join(stateDir, '..', 'prompt.txt'), CODE_PROMPT);
+  // afterPhase('tab-ready') throws inside the driver's setup try block, which treats it as a
+  // browser setup failure (and seals), so it cannot model a process crash. Model the crashed
+  // state directly: tab ready, a grant issued and never sent, no run, nothing sealed.
+  const first = codePage(stateDir);
+  await runGo({ ...codeBase(stateDir), }, { page: first.page, sleep, afterPhase: crashAt('tab-ready') });
+  const store = await StateStore.open(stateDir);
+  const rel = `chatgpt-go/${sha256('chatgpt-go\0code-1')}`;
+  const m = await store.read<any>(rel, 'chatgpt-go-v1');
+  const old = await issueWorkspaceGrant({ stateDir, taskId: 'task', ttlMs: 15 * 60_000 });
+  const { sealed: _s, failure_code: _f, ...rest } = m;
+  await store.write(rel, 'chatgpt-go-v1', { ...rest, phase: 'tab-ready', grant_id: old.grant_id });
+  const second = codePage(stateDir);
+  const res = await runGo({ stateDir, requestId: 'code-1', accountDir: base(stateDir).accountDir }, { page: second.page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.sealed, 'revoked');
+  assert.equal(first.page.clicks + second.page.clicks, 1);
+  assert.notEqual(grantOf(second.pasted[0]), old.write_grant);
+  await assert.rejects(openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'code', requestId: 'old-grant-open', writeGrant: old.write_grant }));
+});
+
+test('a workspace request ID is claimed at creation by the first request only', async t => {
+  const { stateDir } = await fixture(t);
+  const W = 'open-go-claim-1';
+  const prompt = `${PROMPT}\nWorkspace request id: ${W}`;
+  let clock = Date.now();
+  const now = () => new Date(clock);
+  const tick = async (ms: number) => { clock += ms; };
+  const held = await runGo({ ...base(stateDir, 'claim-a'), prompt, workspaceRequestId: W },
+    { page: new FakePage({ showMessage: false, now }), sleep: tick, now });
+  assert.equal(held.phase, 'uncertain');
+  // B never opened W, but A claimed it.
+  await assert.rejects(runGo({ ...base(stateDir, 'claim-b'), prompt, workspaceRequestId: W }, { page: new FakePage(), sleep }), invalid);
+  await assert.rejects(goStatus(stateDir, 'claim-b'), (e: unknown) => e instanceof GoError && e.code === 'NO_SUCH_REQUEST');
+  // The owner can still resume with the same ID.
+  const again = await runGo({ ...base(stateDir, 'claim-a'), prompt, workspaceRequestId: W },
+    { page: new FakePage({ showMessage: false, sentAlready: true, now }), sleep: tick, now });
+  assert.equal(again.phase, 'uncertain');
+  assert.equal(again.run_id, held.run_id);
+});
+
+test('the account is released even when the manifest can no longer be written', async t => {
+  const { stateDir } = await fixture(t);
+  await assert.rejects(runGo(base(stateDir), { page: new FakePage(), sleep, afterPhase: crashAt('completed') }), /crash at completed/);
+  const dir = path.join(stateDir, 'chatgpt-go');
+  await chmod(dir, 0o500);
+  t.after(() => chmod(dir, 0o700).catch(() => {}));
+  await assert.rejects(runGo(base(stateDir), { page: new FakePage({ sentAlready: true }), sleep }));
+  await chmod(dir, 0o700);
+  const other = await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep });
+  assert.equal(other.phase, 'cleaned');
+});

@@ -25,7 +25,8 @@ const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
 
 export type WorkspaceMode = 'inspect' | 'code' | 'review';
-export type WorkspaceCapability = 'read' | 'write' | 'check';
+/** 'exec' (the exec shell tools) exists only on code workspaces whose write grant was issued with exec enabled. */
+export type WorkspaceCapability = 'read' | 'write' | 'check' | 'exec';
 
 export type RepositorySurfacePolicy = 'default' | 'chat-only';
 
@@ -85,6 +86,8 @@ export type WorkspaceGrant = {
   expires_at: string;
   status: 'open' | 'consumed' | 'revoked';
   consumed_by?: string;
+  /** Present and true only when the operator enabled the exec shell for this grant. */
+  exec?: true;
 };
 
 export type WorkspaceSelection = {
@@ -273,7 +276,7 @@ function defaultCatalog(port = 8787): MultiRepoCatalog {
 }
 
 function parseCapabilities(value: unknown): WorkspaceCapability[] {
-  if (!Array.isArray(value) || !value.length || value.some(v => v !== 'read' && v !== 'write' && v !== 'check')) {
+  if (!Array.isArray(value) || !value.length || value.some(v => v !== 'read' && v !== 'write' && v !== 'check' && v !== 'exec')) {
     throw new SafeError('Corrupt workspace capabilities; inspect operator state before continuing.');
   }
   return [...value] as WorkspaceCapability[];
@@ -288,6 +291,7 @@ function parseGrant(value: unknown, key: string): WorkspaceGrant {
   if (!validDate(v.issued_at) || !validDate(v.expires_at)) throw new SafeError('Corrupt workspace grant timestamps.');
   const consumed_by = v.consumed_by === undefined ? undefined : stringField(v.consumed_by, 'consumed_by');
   if (consumed_by !== undefined && !HEX32.test(consumed_by)) throw new SafeError('Corrupt consumed workspace ID.');
+  if (v.exec !== undefined && v.exec !== true) throw new SafeError('Corrupt workspace grant exec flag.');
   return {
     grant_id,
     repository_id: assertId(stringField(v.repository_id, 'grant repository_id'), 'repository ID'),
@@ -299,7 +303,8 @@ function parseGrant(value: unknown, key: string): WorkspaceGrant {
     issued_at: v.issued_at as string,
     expires_at: v.expires_at as string,
     status,
-    ...(consumed_by ? { consumed_by } : {})
+    ...(consumed_by ? { consumed_by } : {}),
+    ...(v.exec === true ? { exec: true as const } : {})
   };
 }
 
@@ -350,12 +355,14 @@ function parseWorkspace(value: unknown, key: string): WorkspaceSelection {
   if (!HEX64.test(policy_digest) || !validDate(v.issued_at) || !validDate(v.expires_at)) throw new SafeError('Corrupt workspace selection.');
   const review_binding = v.review_binding === undefined ? undefined : parseReviewBinding(v.review_binding, policy_digest);
   if (review_binding && mode !== 'review') throw new SafeError('Commit review binding is valid only for review workspaces.');
+  const capabilities = parseCapabilities(v.capabilities);
+  if (capabilities.includes('exec') && mode !== 'code') throw new SafeError('Corrupt workspace capabilities: exec is valid only for code workspaces.');
   return {
     workspace_id,
     repository_id: assertId(stringField(v.repository_id, 'workspace repository_id'), 'repository ID'),
     task_id: assertId(stringField(v.task_id, 'workspace task_id'), 'task ID'),
     mode,
-    capabilities: parseCapabilities(v.capabilities),
+    capabilities,
     registration_epoch: integerField(v.registration_epoch, 'workspace registration_epoch', 1),
     binding_epoch: integerField(v.binding_epoch, 'workspace binding_epoch', 1),
     phase_epoch: integerField(v.phase_epoch, 'workspace phase_epoch', 1),
@@ -647,6 +654,7 @@ function admissionPurposeMatchesSelection(selection: WorkspaceSelection, purpose
   if (purpose === `workspace ${workspaceId} read`) return selection.status === 'open' && selection.capabilities.includes('read');
   if (purpose === `workspace ${workspaceId} write`) return selection.status === 'open' && selection.capabilities.includes('write');
   if (purpose === `workspace ${workspaceId} check`) return selection.status === 'open' && selection.capabilities.includes('check');
+  if (purpose === `workspace ${workspaceId} exec`) return selection.status === 'open' && selection.capabilities.includes('exec');
   if (purpose === `close workspace ${workspaceId}`) return selection.status === 'open' || selection.status === 'closed';
   if (purpose === `revoke workspace ${workspaceId}`) return selection.status === 'open' || selection.status === 'revoked';
   if (purpose === `explicit workspace ${workspaceId} admission recovery`) return true;
@@ -756,7 +764,9 @@ function grantPayload(grant: WorkspaceGrant) {
     phase_epoch: grant.phase_epoch,
     policy_digest: grant.policy_digest,
     issued_at: grant.issued_at,
-    expires_at: grant.expires_at
+    expires_at: grant.expires_at,
+    // Old grants have no exec field, so their MAC payload is unchanged.
+    ...(grant.exec ? { exec: true } : {})
   });
 }
 async function workspaceToken(store: StateStore, selection: WorkspaceSelection) {
@@ -1216,7 +1226,7 @@ export async function resolveRegisteredRepository(root: string, stateDir = defau
   };
 }
 
-export async function issueWorkspaceGrant(options: { stateDir?: string; taskId: string; ttlMs?: number }) {
+export async function issueWorkspaceGrant(options: { stateDir?: string; taskId: string; ttlMs?: number; exec?: boolean }) {
   const stateDir = options.stateDir ?? defaultStateDir();
   const taskId = assertId(options.taskId, 'task ID');
   const ttlMs = options.ttlMs ?? GRANT_TTL_MS;
@@ -1247,16 +1257,18 @@ export async function issueWorkspaceGrant(options: { stateDir?: string; taskId: 
       policy_digest: repository.policy_digest,
       issued_at: nowIso(),
       expires_at: futureIso(ttlMs),
-      status: 'open'
+      status: 'open',
+      ...(options.exec ? { exec: true as const } : {})
     };
     auth.grants[grant.grant_id] = grant;
     await writeAuth(store, auth);
-    return { grant_id: grant.grant_id, write_grant: await grantToken(store, grant), expires_at: grant.expires_at, repository_id: grant.repository_id, task_id: taskId };
+    return { grant_id: grant.grant_id, write_grant: await grantToken(store, grant), expires_at: grant.expires_at, repository_id: grant.repository_id, task_id: taskId, exec: !!grant.exec };
   });
 }
 
-function openCapabilities(mode: WorkspaceMode): WorkspaceCapability[] {
-  return mode === 'code' ? ['read', 'write', 'check'] : ['read'];
+function openCapabilities(mode: WorkspaceMode, grant?: WorkspaceGrant): WorkspaceCapability[] {
+  if (mode !== 'code') return ['read'];
+  return grant?.exec ? ['read', 'write', 'check', 'exec'] : ['read', 'write', 'check'];
 }
 
 export async function openWorkspace(options: {
@@ -1339,7 +1351,7 @@ export async function openWorkspace(options: {
       repository_id: repositoryId,
       task_id: taskId,
       mode: options.mode,
-      capabilities: openCapabilities(options.mode),
+      capabilities: openCapabilities(options.mode, grant),
       registration_epoch: repository.registration_epoch,
       binding_epoch: task.binding_epoch,
       phase_epoch: task.phase_epoch,
@@ -1458,7 +1470,14 @@ export async function authorizeWorkspace(stateDir: string, token: string, capabi
   if (!store) throw new SafeError('Repo MCP multi-repository state is not initialized.');
   const auth = await readAuthStore(store);
   const selection = await selectionFromToken(store, auth, token);
-  if (!selection.capabilities.includes(capability)) throw new SafeError(`Workspace mode ${selection.mode} does not grant ${capability} capability.`);
+  if (!selection.capabilities.includes(capability)) {
+    if (capability === 'exec') {
+      throw new SafeError(selection.mode === 'code'
+        ? 'This code workspace does not grant exec: its write_grant was issued without exec enabled.'
+        : `Workspace mode ${selection.mode} does not grant exec capability; exec exists only in code workspaces whose grant enabled it.`);
+    }
+    throw new SafeError(`Workspace mode ${selection.mode} does not grant ${capability} capability.`);
+  }
   const catalog = await readCatalogStore(store);
   const repository = catalog.repositories[selection.repository_id];
   const task = catalog.tasks[selection.task_id];

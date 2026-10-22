@@ -10,7 +10,7 @@ This document defines the production contract that replaces the single-active-re
 
 One installed Repo MCP service MUST serve multiple operator-approved Git checkouts concurrently without restart. Different ChatGPT or Claude conversations MAY select different approved repositories at the same time. Repository selection MUST be explicit, immutable for the lifetime of a workspace selection, and authenticated by server-issued capability tokens.
 
-Repository registration, policy selection, task lifecycle changes, write-grant issuance, service control, Git commit/push, and arbitrary shell execution remain outside MCP.
+Repository registration, policy selection, task lifecycle changes, write-grant issuance, service control, Git commit/push, and arbitrary shell execution remain outside MCP. Exception: the `exec` tools in code workspaces whose write grant enabled exec (`docs/EXEC-TOOL.md`).
 
 The service MUST start with an empty repository catalog. Registering, selecting, switching, disabling, or finishing a repository/task MUST NOT require a service restart.
 

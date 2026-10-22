@@ -4,7 +4,7 @@ This is the detailed operator reference that used to be the project README. Star
 
 Repo MCP is a local MCP service for policy-bounded coding and review across multiple operator-approved Git checkouts. Install one permanent service, register repositories locally, and let different ChatGPT or Claude conversations use different approved repositories at the same time without retargeting or restarting the service.
 
-The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and unrestricted shell commands stay outside MCP.
+The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and shell commands stay outside MCP. The one exception is the `exec` shell in code workspaces whose write grant was issued with `--exec` (`docs/EXEC-TOOL.md`).
 
 **Status:** v0.2.3 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
 

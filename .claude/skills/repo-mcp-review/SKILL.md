@@ -61,6 +61,11 @@ or a Claude review as a fallback.
   digest exists.
 - If `go` reports a failure the recipe below cannot resolve, return `NOT TESTABLE` with
   its `failure_code`.
+- `go` records every step in the durable `chatgpt-run` journal. It refuses to send when
+  the exact immutable resolved base commit recorded by `chatgpt-run` (and, for
+  commit-pinned work, the head) differs from the requested one. Never rewrite the hashed
+  prompt, reinterpret a movable name, or choose `HEAD^` after preparation.
+- Do not substitute Claude's own review or silently invoke Oracle.
 
 ## Command recipe: commit-pinned review
 
