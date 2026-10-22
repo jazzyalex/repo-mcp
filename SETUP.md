@@ -727,8 +727,8 @@ stale `.recovery.json` markers retain the existing manual-inspection rule.
 
 The run record binds coordinator (`codex` or `claude`), actual execution surface
 (`ChatGPT web`), work kind, model profile, repository/task epochs, policy digest, branch,
-HEAD, requested/resolved diff base, prompt digest and hashed browser context. Claude may
-prepare `review` and `architecture`; `code` is refused unless Codex is the coordinator.
+HEAD, requested/resolved diff base, prompt digest and hashed browser context. Codex and
+Claude may both coordinate every work kind: `review`, `architecture` and `code`.
 
 `npm run --silent coord -- --help` and `npm run --silent chatgpt-run -- --help` print
 complete static command/flag help, exit successfully, and do not initialize operator state.
