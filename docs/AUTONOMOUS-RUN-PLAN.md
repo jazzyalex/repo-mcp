@@ -57,6 +57,10 @@ about 2,000 changed lines):
 | Direct review by the agent | 141,710 | 3.5 min | 4 P2 + 8 P3, NO-SHIP |
 | Review skill with `go` (ChatGPT Extra High) | 68,576 | 18 min | 2 P1 + 6 P2, NO-SHIP |
 
+- The reviewers differ: the direct review was Sonnet at default effort, the `go` review
+  was ChatGPT Extra High, which went deeper (2 P1 that Sonnet missed or rated lower). A
+  direct review of equal depth would need Opus at high effort and cost more, so 52% is a
+  floor, not the equal-quality saving.
 - Saving on this task: about 52%. Most of the remaining 68k is fixed overhead (system
   prompt, reading the skill, binding the task, writing the prompt). It does not grow
   with the diff, so larger tasks should save more; small tasks save less.
