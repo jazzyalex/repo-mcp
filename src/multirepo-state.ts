@@ -491,7 +491,17 @@ async function writeAuth(store: StateStore, auth: AuthState) {
 }
 async function withControlLock<T>(stateDir: string, purpose: string, fn: (store: StateStore) => Promise<T>, forbiddenRoots: string[] = []) {
   const store = await StateStore.open(stateDir, { forbiddenRoots });
-  const lock = await acquireLock(store, CONTROL_LOCK, purpose);
+  // Parallel coordinators contend for this lock; wait for a live holder (never replay `fn`).
+  // Stale, corrupt and foreign-host locks still fail at once.
+  const deadline = Date.now() + 30_000;
+  let lock;
+  while (true) {
+    try { lock = await acquireLock(store, CONTROL_LOCK, purpose); break; }
+    catch (error) {
+      if (Date.now() > deadline || !(error instanceof Error) || !/already owned by live process/.test(error.message)) throw error;
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
   try { return await fn(store); } finally { await lock.release(); }
 }
 function activeRepositoryTask(catalog: MultiRepoCatalog, repositoryId: string) {
@@ -1141,6 +1151,10 @@ export async function finishRegisteredTask(options: { stateDir?: string; taskId:
 
   return withTaskShareGate(stateDir, taskId, async () => {
     await assertReviewLifecycleAllowedUnderGate(stateDir, taskId);
+    // Another session's `go` request may still use this task (docs/GO-CONCURRENCY-SPEC.md section 9).
+    const { activeGoRequestsForTask } = await import('./chatgpt-go.js');
+    const inUse = await activeGoRequestsForTask(stateDir, taskId);
+    if (inUse.length) throw new SafeError(`TASK_IN_USE: task ${taskId} is still used by go request(s) ${inUse.join(', ')}; the last one to finish closes it.`);
     const markDraining = () => withControlLock(stateDir, `drain task ${taskId}`, async store => {
       let catalog = await readCatalogStore(store);
       const registered = catalog.tasks[taskId];

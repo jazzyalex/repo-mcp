@@ -66,8 +66,10 @@ sent, so the agent may only resume. Exit 1 means nothing was sent, or the run fa
 
 ### Guard rails
 
-- One unresolved ChatGPT job per machine, and at most 4 sends per hour by default
-  (`--max-per-hour`). A second job waits instead of overlapping.
+- Several ChatGPT jobs run at once (unreleased, after 0.3.0): coding in different checkouts, and reviews
+  and architecture passes on one checkout. Owner limits: `max_concurrent` (10),
+  `max_per_hour` (25), `min_gap_seconds` (30) and a stop latch, set with
+  `chatgpt-run account config-set`. A job with no free slot waits in code.
 - Each workspace request ID can be used only once, so an old workspace or report can
   never attach to a new job.
 - A review completes only with a workspace that ChatGPT opened after this job's send.

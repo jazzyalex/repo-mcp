@@ -38,8 +38,8 @@ connection prompts the owner again.
 1. **Resolve and bind.** `npm run --silent coord -- repository resolve --repo "$ROOT"`
    gives `REPO`. If the repository has no unfinished task, bind one and use it as `TASK`:
    `npm run --silent coord -- task bind --repository "$REPO" --task "$REPO-architect-$(date +%Y%m%d)"`.
-   Set `GOREQ=$REPO-architect-$(date +%Y%m%dT%H%M%S)` and
-   `WSREQ=$REPO-architect-ws-$(date +%Y%m%dT%H%M%S)`.
+   Set `GOREQ=$REPO-architect-$(date +%Y%m%dT%H%M%S)-$RANDOM` and
+   `WSREQ=$REPO-architect-ws-$(date +%Y%m%dT%H%M%S)-$RANDOM`.
 2. **Write the prompt** to `$R/prompt.txt`: repository ID, task ID, `inspect` mode,
    request ID `$WSREQ`, expected root/branch/HEAD, the question, "make no edits",
    "end with one VERDICT line", and "before `workspace_close`, call `finish` once with
@@ -68,11 +68,14 @@ connection prompts the owner again.
      `failed-pre-submit`. For `UI_*`, `COMPOSER_*` or `BROWSER_SETUP_FAILED`, retry once with
      a new `GOREQ`. For `BROWSER_UNAVAILABLE` or `BROWSER_APPROVAL_TIMEOUT`, ask the owner to
      approve the Chrome prompt or enable remote debugging, then retry.
-   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. For
-     `ACCOUNT_BUSY` (another pass is unresolved) or `RATE_LIMITED`, report it and stop;
-     do not work around it. `REQUEST_CONFLICT` means `GOREQ` was reused with other inputs.
+   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. `go` waits in code for a free
+     slot, so other sessions' runs do not block it. For `ACCOUNT_LATCHED` (the owner or a
+     browser challenge stopped new work) or `RATE_LIMITED`, report it and stop; do not
+     work around it. `REQUEST_CONFLICT` means `GOREQ` was reused with other inputs.
    - `go --request-id "$GOREQ" --status` prints the stored result at any time.
 5. **Finish** a task you bound for this pass: `npm run --silent coord -- task finish --task "$TASK"`.
+   `TASK_IN_USE` means another session's run still uses the task: leave it; the last one to
+   finish closes it. Never finish a task you reused from another session.
 
 If `go` cannot run at all (for example ChatGPT changed its page and the selectors fail
 repeatedly), use the manual recipe in `docs/ARCHITECT-MANUAL-RECIPE.md` in the control

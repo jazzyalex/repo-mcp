@@ -266,8 +266,8 @@ yourself.
 
 1. **Set the run variables.** `npm run --silent coord -- repository resolve --repo "$ROOT"`
    gives `REPO` and its unfinished coding `TASK` (bind one with `coord task bind` when
-   there is none). Set `GOREQ=$REPO-code-$(date +%Y%m%dT%H%M%S)` and
-   `WSREQ=$REPO-code-ws-$(date +%Y%m%dT%H%M%S)`. The phase must be coding:
+   there is none). Set `GOREQ=$REPO-code-$(date +%Y%m%dT%H%M%S)-$RANDOM` and
+   `WSREQ=$REPO-code-ws-$(date +%Y%m%dT%H%M%S)-$RANDOM`. The phase must be coding:
    ```bash
    npm run --silent coord -- task status --task "$TASK"                 # phase must be coding
    npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if it is in review; refuses protected reviewers
@@ -298,8 +298,8 @@ yourself.
    - `exit=1`, `phase: failed`: nothing was sent when `run_id` is null or the run is
      `failed-pre-submit`; the grant is already revoked. Retry once with a new `GOREQ`
      and `WSREQ` for `UI_*`, `COMPOSER_*` or `BROWSER_SETUP_FAILED`.
-   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. Stop on `ACCOUNT_BUSY` and
-     `RATE_LIMITED`.
+   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. Stop on `ACCOUNT_LATCHED`,
+     `RATE_LIMITED` and `REPOSITORY_BUSY` (another coding run owns this checkout).
 5. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the check logs, and
    anything the checks do not cover. Commit and push only when the user asks. To move
    the task to review: `npm run --silent coord -- task phase --task "$TASK" --phase review`.

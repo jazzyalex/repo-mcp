@@ -498,11 +498,38 @@ npm run --silent chatgpt-run -- go --release-admission --request-id ID --reason 
   `--exec`. `go` issues the single-use write grant itself. It seals (revokes) the
   workspace when the run ends, then runs the `--check` commands. It never commits.
 
-### Account admission
+### Account admission and limits
 
-One unresolved ChatGPT run is allowed per machine. `--max-per-hour` limits sends
-(default 4). A second request gets `ACCOUNT_BUSY`. Too many sends gets `RATE_LIMITED`.
-A crash or timeout does not release the account. Do not bulk-run `go`.
+Several `go` runs may run at once: coding runs in different checkouts, and review and
+architecture runs on one checkout. One coding run per checkout stays the rule. A request
+with no free slot waits in code (`--no-wait` fails with `ACCOUNT_BUSY` instead). Design:
+`docs/GO-CONCURRENCY-SPEC.md`.
+
+The limits are owner settings in
+`~/Library/Application Support/repo-mcp/chatgpt-account/config.json`:
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `max_concurrent` | 10 | 1-50 | Requests admitted at once, all repositories together. |
+| `max_per_hour` | 25 | 1-500 | Sends in any rolling hour, all runs together. |
+| `min_gap_seconds` | 30 | 0-3600 | Minimum time between two sends. |
+| `latch_enabled` | true | true/false | A browser challenge stops new work until the owner clears it. |
+
+```sh
+npm run --silent chatgpt-run -- account status
+npm run --silent chatgpt-run -- account config
+npm run --silent chatgpt-run -- account config-set max_concurrent=10
+npm run --silent chatgpt-run -- account latch --reason "pause all ChatGPT work"
+npm run --silent chatgpt-run -- account unlatch --reason "checked the account"
+npm run --silent chatgpt-run -- account release-slot --key KEY --reason "checked the chat by hand"
+```
+
+- `go --max-per-hour N` can only lower the cap for that call.
+- A crash or timeout does not free a slot that may hide a sent message. Resume the
+  request, or release it with a reason after checking the chat by hand.
+- The latch stops new work only. Runs already sent keep being watched and saved.
+- `account status` shows slots, the queue, sends in the last hour, the latch and the
+  last owner actions.
 
 ### After a tool change
 
@@ -544,7 +571,13 @@ does not delete the chat.
 | `CHATGPT_SIGNED_OUT` | The page is signed out. Sign in by hand, then run again. |
 | `BROWSER_CHALLENGE` | ChatGPT shows a bot check. Solve it by hand. Do not automate it. |
 | `UI_MISSING:<name>` / `UI_AMBIGUOUS:<name>` / `UI_DISABLED:<name>` | A control was not found, matched more than once, or was disabled. ChatGPT may have changed its UI. Run `probe`. The run failed before sending, so a new request can start. For the Repo MCP menu item and the Archive item, `relay/shots/` holds a failure screenshot. |
-| `ACCOUNT_BUSY` / `RATE_LIMITED` | Another run is active, or the hourly limit is reached. Resume with the same command later. |
+| `ACCOUNT_BUSY` | Only with `--no-wait`: every slot is in use. Run again later, or without `--no-wait`. |
+| `RATE_LIMITED` | The hourly send cap is reached. Nothing was sent. Run again later. |
+| `SEND_GAP` / `SELECTION_STALE` | The send commit was refused (gap not passed, or the effort reading is too old). Nothing was sent; the run failed pre-submit. Start a new request. |
+| `ACCOUNT_LATCHED` | New ChatGPT work is stopped. Check the account, then `account unlatch --reason TEXT`. |
+| `REPOSITORY_BUSY` | Another coding run owns this checkout. Wait for it. |
+| `ACCOUNT_CONFIG_INVALID` | `config.json` has a bad key or value; the message names it. |
+| `TASK_IN_USE` | `task finish` was refused: another session's `go` request still uses the task. The last one to finish closes it. |
 | `REQUEST_BUSY` | Another `go` process holds this request. Wait for it. |
 | `REQUEST_CONFLICT` | The request ID was used with different inputs. Use a new ID. |
 | `SEND_UNCONFIRMED` | The send click may have happened but the message was not seen. The run is `uncertain` (exit 3). Check the chat. Never resend. Resume. |

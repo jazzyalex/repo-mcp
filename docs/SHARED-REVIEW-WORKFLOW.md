@@ -142,7 +142,7 @@ Review through `go` is commit-pinned only. The coordinator still does the owner-
 
 `go` then does the rest:
 
-1. **Admission.** One unresolved ChatGPT run per machine, and `--max-per-hour` (default 4). Refusal codes are `ACCOUNT_BUSY` and `RATE_LIMITED`.
+1. **Admission.** A slot among the owner's `max_concurrent` (default 10), waiting in FIFO order when none is free; an hourly send cap (default 25), a send gap (default 30 s) and a stop latch (`docs/GO-CONCURRENCY-SPEC.md`). Refusal codes are `ACCOUNT_LATCHED`, `RATE_LIMITED`, and `ACCOUNT_BUSY` with `--no-wait`.
 2. **Prepare or join.** It calls prepare-or-join with a preallocated run ID. It then checks that `participant.task_id` and `run.task_id` equal the requested task, and that the run's `commit_binding` names exactly the requested base and head and equals the participant's. A mismatch runs `fail-pre-submit REVIEW_TARGET_MISMATCH` before any send. It never rewrites the prompt.
 3. **Target check, observe, reserve, send once.** It selects the effort, records the observation, reserves, persists the send intent, then clicks Send. Recovery never resends.
 4. **Wait and capture.** It waits for the finished turn and saves the answer. If ChatGPT delivered a `finish` report, that report is the output (`output_source: mcp-report`) and its outcome is `ship` or `no-ship`. Otherwise the outcome is the last `VERDICT: SHIP|NO-SHIP` line of the page text, and a missing verdict fails closed to `no-ship`.

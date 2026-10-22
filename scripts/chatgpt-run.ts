@@ -24,6 +24,8 @@ import { recordTrustedBrowserObservation } from '../src/model-policy.js';
 import { defaultStateDir } from '../src/task-state.js';
 import { GoError, goStatus, releaseGoAdmission, runGo } from '../src/chatgpt-go.js';
 import { CdpChatGptPage } from '../src/chatgpt-browser.js';
+import { AccountError, DEFAULT_ACCOUNT_DIR, accountConfig, accountStatus, clearLatch, releaseSlot, setAccountConfig, setLatch } from '../src/go-account.js';
+import { StateStore } from '../src/task-state.js';
 import { ensureRelay, runRelay } from '../src/cdp-relay.js';
 
 const HELP = `Repo MCP ChatGPT run journal
@@ -53,13 +55,21 @@ Usage:
   chatgpt-run fail-pre-submit [--state-dir PATH] --run RUN_ID --failure-code CODE
   chatgpt-run go [--state-dir PATH] --request-id ID --repository ID --task ID
     --coordinator codex|claude --kind architecture|review|code [--profile PROFILE] --prompt-file FILE
-    [--timeout-minutes N] [--max-per-hour N]
+    [--timeout-minutes N] [--max-per-hour N] [--no-wait]
+    (waits in code for a free slot; --no-wait fails with ACCOUNT_BUSY instead)
     review also needs: --workspace-request-id ID --base-ref COMMIT --head-ref COMMIT [--scope-prefix P]
     code also needs: --workspace-request-id ID [--base-ref REF] [--check CMD]... [--exec]
       (go issues the single-use write grant and appends it to the sent text; never put one in the prompt)
   chatgpt-run go [--state-dir PATH] --request-id ID --resume [--prompt-file FILE]
   chatgpt-run go [--state-dir PATH] --request-id ID --status
   chatgpt-run go [--state-dir PATH] --request-id ID --release-admission --reason TEXT
+  chatgpt-run account status                      slots, queue, sends in the last hour, latch, config
+  chatgpt-run account config                      effective limits and where each comes from
+  chatgpt-run account config-set KEY=VALUE        max_concurrent (1-50, default 10), max_per_hour (1-500, default 25),
+                                                  min_gap_seconds (0-3600, default 30), latch_enabled (true/false, default true)
+  chatgpt-run account latch --reason TEXT         stop new ChatGPT work now
+  chatgpt-run account unlatch --reason TEXT       allow new ChatGPT work again
+  chatgpt-run account release-slot --key KEY --reason TEXT
   chatgpt-run relay   start the CDP relay to your main Chrome (approve once per Chrome start)
   chatgpt-run probe   read-only check of ChatGPT controls; never sends
 
@@ -109,7 +119,8 @@ const { positionals, values } = parseArgs({
     'submission-event-sha256': { type: 'string' }, 'output-sha256': { type: 'string' }, 'response-state': { type: 'string' },
     'request-id': { type: 'string' }, 'timeout-minutes': { type: 'string' }, 'max-per-hour': { type: 'string' },
     resume: { type: 'boolean' }, status: { type: 'boolean' },
-    'release-admission': { type: 'boolean' }, reason: { type: 'string' }
+    'release-admission': { type: 'boolean' }, reason: { type: 'string' },
+    'no-wait': { type: 'boolean' }, key: { type: 'string' }
   }
 });
 
@@ -162,8 +173,15 @@ const validateCommandOptions = () => {
   if (command === 'fail-pre-submit') return assertOnly('state-dir', 'run', 'failure-code');
   if (command === 'go') {
     return assertOnly('state-dir', 'request-id', 'repository', 'task', 'coordinator', 'kind', 'profile', 'prompt-file',
-      'timeout-minutes', 'max-per-hour', 'resume', 'status', 'release-admission', 'reason',
+      'timeout-minutes', 'max-per-hour', 'resume', 'status', 'release-admission', 'reason', 'no-wait',
       'workspace-request-id', 'base-ref', 'head-ref', 'scope-prefix', 'check', 'exec');
+  }
+  if (command === 'account') {
+    const sub = positionals[1];
+    if (sub === 'latch' || sub === 'unlatch') return assertOnly('reason');
+    if (sub === 'release-slot') return assertOnly('key', 'reason');
+    if (sub === 'status' || sub === 'config' || sub === 'config-set') return assertOnly();
+    throw new Error('Use: chatgpt-run account status|config|config-set KEY=VALUE|latch|unlatch|release-slot.');
   }
   if (command === 'relay' || command === 'cdp-relay') return assertOnly();
   if (command === 'probe') return assertOnly();
@@ -185,7 +203,8 @@ try {
     }
     process.stdout.write(HELP);
   } else {
-    if (positionals.length !== 1) throw new Error('Use: chatgpt-run prepare|status|output|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit|go|relay|probe.');
+    const expected = command === 'account' ? (positionals[1] === 'config-set' ? 3 : 2) : 1;
+    if (positionals.length !== expected) throw new Error(command === 'account' ? 'Use: chatgpt-run account status|config|config-set KEY=VALUE|latch|unlatch|release-slot.' : 'Use: chatgpt-run prepare|status|output|observe|reserve|submitted|complete|uncertain|recover|recover-lock|recover-request|fail-pre-submit|go|relay|probe.');
     validateCommandOptions();
     if (command === 'prepare') {
       const promptFile = need('prompt-file');
@@ -259,12 +278,32 @@ try {
           timeoutMinutes: int('timeout-minutes'), maxPerHour: int('max-per-hour'),
           workspaceRequestId: values['workspace-request-id'], baseRef: values['base-ref'],
           headRef: values['head-ref'], scopePrefix: values['scope-prefix'],
-          checks: values.check, exec: values.exec
+          checks: values.check, exec: values.exec, noWait: values['no-wait'],
+          onWait: (() => {
+            let last = 0;
+            return (position: number, used: number, max: number) => {
+              if (Date.now() - last < 60_000) return;
+              last = Date.now();
+              process.stderr.write(`waiting for a ChatGPT slot: position ${position}, ${used}/${max} slots in use\n`);
+            };
+          })()
         }, { page: new CdpChatGptPage() });
         const phase = (result as { phase: string }).phase;
         process.exitCode = phase === 'cleaned' ? 0 : phase === 'uncertain' ? 3 : 1;
       }
       process.stdout.write(JSON.stringify(result) + '\n');
+    } else if (command === 'account') {
+      const sub = positionals[1];
+      const store = await StateStore.open(DEFAULT_ACCOUNT_DIR);
+      if (sub === 'status') print(await accountStatus());
+      else if (sub === 'config') print(await accountConfig());
+      else if (sub === 'config-set') print(await setAccountConfig(positionals[2]));
+      else if (sub === 'latch') print({ latched: await setLatch(store, DEFAULT_ACCOUNT_DIR, { code: 'OWNER_STOP', by: 'owner', reason: values.reason ?? '' }, new Date()) });
+      else if (sub === 'unlatch') print({ cleared: await clearLatch(store, values.reason ?? '', new Date()) });
+      else if (sub === 'release-slot') {
+        if (!values.reason?.trim()) throw new AccountError('REASON_REQUIRED', 'Releasing a slot needs a reason.');
+        print({ released: await releaseSlot(store, need('key'), { action: 'release-slot', reason: values.reason, now: new Date() }) });
+      }
     } else if (command === 'cdp-relay') {
       await runRelay();
     } else if (command === 'relay') {
@@ -280,8 +319,9 @@ try {
   }
 } catch (error) {
   process.exitCode = 1;
-  const code = error instanceof GoError ? error.code : 'GO_ERROR';
-  let report: Record<string, unknown> | undefined = error instanceof GoError ? { error: code, message: error.message } : undefined;
+  const failure = error instanceof AccountError ? new GoError(error.code, error.message) : error;
+  const code = failure instanceof GoError ? failure.code : 'GO_ERROR';
+  let report: Record<string, unknown> | undefined = failure instanceof GoError ? { error: code, message: failure.message } : undefined;
   if (command === 'go' && typeof values['request-id'] === 'string') {
     // An error after the send must not read as "nothing was sent": report the stored
     // request, and exit 3 whenever its run may have been submitted.

@@ -87,6 +87,36 @@ about 2,000 changed lines):
 6. **`exec` (P1), then `go` for code with project checks.** Section C.
 7. **Descriptions and read limits (P2).** Patch and fuzzy feedback only if measurements
    show a need (P3).
+8. **Parallel `go` runs (P0, owner decision 2026-10-22).** Replace the single
+   machine-wide admission with owner-configured slots, send cap, send gap and stop latch.
+   Spec: `docs/GO-CONCURRENCY-SPEC.md`. ChatGPT architecture review before code.
+9. **Ignored-file allowlist (P1).** Section E.
+
+## E. Opt-in exact paths for Git-ignored files
+
+Found 2026-10-22 in a CourtVision review. Its `.gitignore` ignores `research/`, so a
+glob policy `research/**` exposed nothing: glob-mode inventory hides untracked
+Git-ignored files by design (`docs/DESIGN-2B-PATH-POLICY.md` Inventory;
+`test/discovery.test.ts:209`). Repo MCP then returned the generic "not exposed" error,
+which is also what a missing path returns.
+
+- **Workaround today:** an exact-mode policy listing each file. Exact mode is not
+  filtered.
+- **Feature:** a policy key such as `read.ignored_exact: ["research/a.md", ...]`, default
+  empty (off). Each entry is a literal path, never a glob. A listed ignored file enters
+  the glob inventory only if it also passes the normal read policy, dotfile and secret
+  gates, size, link and regular-file checks. Nothing else changes: the default still
+  hides every ignored file.
+- **Diagnostics:** count such entries in `inventory.skipped` and name them in
+  `repo_info` / `service_info`, so the operator can see why a listed path is missing
+  (ignored and not listed, or absent). Keep the single "not exposed" error to ChatGPT;
+  missing and denied paths must stay indistinguishable to the model.
+- **Related:** an untracked new file does not appear in `git_diff`. A review of
+  untracked work needs the file committed (commit-pinned review) or an intent-to-add
+  entry. Document this in the review recipe; do not change `git_diff` here.
+- **Tests:** an ignored literal entry is listed, read and searched; an ignored file not
+  listed stays hidden; a listed entry that fails the secret or dotfile gate stays
+  hidden; a listed entry that does not exist is reported to the operator only.
 
 ## A. `go`: one-shot run command
 

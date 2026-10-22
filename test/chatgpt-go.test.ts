@@ -27,6 +27,9 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   await registerRepository({ stateDir, repositoryId: 'repo', root, policyPath });
   await bindRegisteredTask({ stateDir, repositoryId: 'repo', taskId: 'task' });
   await writeFile(path.join(base, 'prompt.txt'), PROMPT);
+  // Tests drive many sends at once on a fake clock; the send gap is covered by its own tests.
+  await mkdir(path.join(base, 'account'), { recursive: true });
+  await writeFile(path.join(base, 'account', 'config.json'), JSON.stringify({ min_gap_seconds: 0 }));
   t.after(() => rm(base, { recursive: true, force: true }));
   return { stateDir };
 }
@@ -70,6 +73,9 @@ const base = (stateDir: string, requestId = 'req-1') => ({
   stateDir, requestId, accountDir: path.join(stateDir, '..', 'account'), repositoryId: 'repo', taskId: 'task',
   coordinator: 'claude' as const, kind: 'architecture', prompt: PROMPT, promptFile: path.join(stateDir, '..', 'prompt.txt')
 });
+/** Owner config for the test account store; tests keep the send gap at 0 unless they test it. */
+const configure = (stateDir: string, config: Record<string, unknown>) =>
+  writeFile(path.join(stateDir, '..', 'account', 'config.json'), JSON.stringify({ min_gap_seconds: 0, ...config }));
 const crashAt = (phase: GoPhase) => (p: GoPhase) => { if (p === phase) throw new Error(`crash at ${phase}`); };
 
 test('go happy path sends once, completes, archives and releases the account', async t => {
@@ -139,13 +145,14 @@ test('unconfirmed send is held as uncertain, keeps the account, and never resend
   let clock = Date.now();
   const now = () => new Date(clock);
   const tick = async (ms: number) => { clock += ms; };
+  await configure(stateDir, { max_concurrent: 1 });
   const first = new FakePage({ showMessage: false, now });
   const r = await runGo(base(stateDir), { page: first, sleep: tick, now });
   assert.equal(r.phase, 'uncertain');
   assert.equal(r.run_state, 'uncertain');
   assert.equal(r.failure_code, 'SEND_UNCONFIRMED');
   assert.equal(first.clicks, 1);
-  await assert.rejects(runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep, now }), (e: unknown) => e instanceof GoError && e.code === 'ACCOUNT_BUSY');
+  await assert.rejects(runGo({ ...base(stateDir, 'req-2'), noWait: true }, { page: new FakePage(), sleep, now }), (e: unknown) => e instanceof GoError && e.code === 'ACCOUNT_BUSY');
   const again = new FakePage({ showMessage: false, sentAlready: true });
   const r2 = await runGo(base(stateDir), { page: again, sleep: tick, now });
   assert.equal(r2.phase, 'uncertain');
@@ -256,11 +263,12 @@ test('a stale account lock from a dead process does not block the next run', asy
 test('admission is shared across state directories through one account store', async t => {
   const { stateDir } = await fixture(t);
   const other = await fixture(t);
+  await configure(stateDir, { max_concurrent: 1 });
   let clock = Date.now();
   const now = () => new Date(clock);
   const held = await runGo(base(stateDir), { page: new FakePage({ showMessage: false, now }), sleep: async ms => { clock += ms; }, now });
   assert.equal(held.phase, 'uncertain');
-  await assert.rejects(runGo({ ...base(other.stateDir), accountDir: base(stateDir).accountDir }, { page: new FakePage(), sleep }),
+  await assert.rejects(runGo({ ...base(other.stateDir), accountDir: base(stateDir).accountDir, noWait: true }, { page: new FakePage(), sleep }),
     (e: unknown) => e instanceof GoError && e.code === 'ACCOUNT_BUSY');
 });
 
@@ -268,9 +276,10 @@ test('a request refused for a busy account stays resumable once the account is f
   const { stateDir } = await fixture(t);
   let clock = Date.now();
   const now = () => new Date(clock);
+  await configure(stateDir, { max_concurrent: 1 });
   const held = await runGo(base(stateDir), { page: new FakePage({ showMessage: false, now }), sleep: async ms => { clock += ms; }, now });
   assert.equal(held.phase, 'uncertain');
-  await assert.rejects(runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep }),
+  await assert.rejects(runGo({ ...base(stateDir, 'req-2'), noWait: true }, { page: new FakePage(), sleep }),
     (e: unknown) => e instanceof GoError && e.code === 'ACCOUNT_BUSY');
   await releaseGoAdmission(stateDir, 'req-1', 'inspected by hand', base(stateDir).accountDir);
   // req-2's manifest exists without admission; the same command now proceeds.

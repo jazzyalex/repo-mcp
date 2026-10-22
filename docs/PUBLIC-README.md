@@ -132,7 +132,8 @@ its final report through `finish`, and `go` uses that report as the run output.
   never signs in.
 - Switch on remote debugging in `chrome://inspect/#remote-debugging`. Chrome asks you to
   approve the relay once per Chrome start.
-- One unresolved ChatGPT run per machine, and at most four sends per hour by default.
+- Up to 10 ChatGPT runs at once, 25 sends per hour and 30 s between sends by default.
+  All are owner settings (`chatgpt-run account config-set`).
 
 **Limits and honest numbers.**
 

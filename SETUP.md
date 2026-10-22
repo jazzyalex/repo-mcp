@@ -995,8 +995,9 @@ The skills build the command for you. A coordinator starts `go` in the backgroun
 reads the one-line JSON result. Exit 0 means cleaned. Exit 3 means the prompt may have been
 sent: run `go --resume` once and never start a new request. Exit 1 means failed.
 `go --status` shows the run state. `go --release-admission --reason TEXT` frees a stuck
-run slot. The account allows one unresolved run per machine and four sends per hour by
-default (`--max-per-hour`).
+run slot. Up to 10 runs may be active at once by default, with at most 25 sends per hour
+and 30 s between sends. All three are owner settings
+(`npm run --silent chatgpt-run -- account config-set KEY=VALUE`; see `docs/OPERATIONS.md`).
 
 **After any change to an MCP tool**, ChatGPT keeps its old tool list until you refresh it:
 

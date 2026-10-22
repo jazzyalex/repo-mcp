@@ -201,6 +201,14 @@ export class CdpChatGptPage implements ChatGptPage {
     } catch { /* diagnosis only */ }
   }
 
+  currentTargetId() { return this.targetId; }
+
+  /** The verified Cloudflare check page; never a scan of page or conversation text. */
+  async accountSignal() {
+    if (!this.session) return null;
+    return await this.eval<string>('document.title').catch(() => '') === 'Just a moment...' ? 'BROWSER_CHALLENGE' : null;
+  }
+
   async closeTab() {
     if (!this.cdp || !this.targetId) return;
     await this.cdp.send('Target.closeTarget', { targetId: this.targetId }).catch(() => {});

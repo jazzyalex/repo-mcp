@@ -310,12 +310,13 @@ per Chrome start. Never connect to Chrome's debugging port yourself.
 1. **Resolve.** `npm run --silent coord -- repository resolve --repo "$ROOT"` gives
    `REPO` and the sole unfinished review `TASK`. Pin the target with full commits:
    `BASE=$(git -C "$ROOT" rev-parse BASE_REF)`, `HEADC=$(git -C "$ROOT" rev-parse HEAD)`.
-   Set `GOREQ=$REPO-review-$(date +%Y%m%dT%H%M%S)` and
-   `WSREQ=$REPO-review-ws-$(date +%Y%m%dT%H%M%S)` (fresh, unique each run).
-2. **Rebind first.** `npm run --silent coord -- task rebind --task "$TASK"`. This clears
-   "Task binding is stale" after HEAD moved. It refuses when another reviewer or a
-   coding owner is protected; then stop and report that blocker. Mention the rebind in
-   the report.
+   Set `GOREQ=$REPO-review-$(date +%Y%m%dT%H%M%S)-$RANDOM` and
+   `WSREQ=$REPO-review-ws-$(date +%Y%m%dT%H%M%S)-$RANDOM` (fresh, unique each run).
+2. **Rebind only when stale.** If repository status shows the task binding is stale
+   (HEAD moved), run `npm run --silent coord -- task rebind --task "$TASK"`. Skip it when the
+   binding is current, so a second session can join a review already running on the same
+   head. Rebind refuses when another reviewer or a coding owner is protected; then stop
+   and report that blocker. Mention any rebind in the report.
 3. **Write the final prompt** to `$R/prompt.txt`: repository ID, task ID, `review` mode,
    `workspace_open` request ID `$WSREQ`, `base_ref` `$BASE` and `head_ref` `$HEADC`
    (and `scope_prefix` if used), what to review, "make no edits", "end with one line
@@ -352,8 +353,8 @@ per Chrome start. Never connect to Chrome's debugging port yourself.
      `WSREQ` (and a new prompt naming it). For `BROWSER_UNAVAILABLE` or
      `BROWSER_APPROVAL_TIMEOUT`, ask the owner to approve the Chrome prompt or enable
      remote debugging, then retry.
-   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. For `ACCOUNT_BUSY` or
-     `RATE_LIMITED`, report it and stop. `REQUEST_CONFLICT` means `GOREQ` was reused
+   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. `go` waits in code for a free
+     slot. For `ACCOUNT_LATCHED` or `RATE_LIMITED`, report it and stop. `REQUEST_CONFLICT` means `GOREQ` was reused
      with other inputs. `REVIEW_SHARE_STATE_STALE` means step 2 was skipped.
    - `go --request-id "$GOREQ" --status` prints the stored result at any time.
 
@@ -462,8 +463,8 @@ yourself.
 
 1. **Set the run variables.** `npm run --silent coord -- repository resolve --repo "$ROOT"`
    gives `REPO` and its unfinished coding `TASK` (bind one with `coord task bind` when
-   there is none). Set `GOREQ=$REPO-code-$(date +%Y%m%dT%H%M%S)` and
-   `WSREQ=$REPO-code-ws-$(date +%Y%m%dT%H%M%S)`. The phase must be coding:
+   there is none). Set `GOREQ=$REPO-code-$(date +%Y%m%dT%H%M%S)-$RANDOM` and
+   `WSREQ=$REPO-code-ws-$(date +%Y%m%dT%H%M%S)-$RANDOM`. The phase must be coding:
    ```bash
    npm run --silent coord -- task status --task "$TASK"                 # phase must be coding
    npm run --silent coord -- task phase --task "$TASK" --phase coding   # only if it is in review; refuses protected reviewers
@@ -494,8 +495,8 @@ yourself.
    - `exit=1`, `phase: failed`: nothing was sent when `run_id` is null or the run is
      `failed-pre-submit`; the grant is already revoked. Retry once with a new `GOREQ`
      and `WSREQ` for `UI_*`, `COMPOSER_*` or `BROWSER_SETUP_FAILED`.
-   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. Stop on `ACCOUNT_BUSY` and
-     `RATE_LIMITED`.
+   - `{"error": CODE, ...}` with `exit=1`: nothing was sent. Stop on `ACCOUNT_LATCHED`,
+     `RATE_LIMITED` and `REPOSITORY_BUSY` (another coding run owns this checkout).
 5. **Check the result locally, outside MCP:** `git -C "$ROOT" diff`, the check logs, and
    anything the checks do not cover. Commit and push only when the user asks. To move
    the task to review: `npm run --silent coord -- task phase --task "$TASK" --phase review`.

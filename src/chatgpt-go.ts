@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile, realpath, rename, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { readRegularFile } from './bounded-file.js';
@@ -24,24 +24,27 @@ import { recordTrustedBrowserObservation, type ModelProfile } from './model-poli
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
 import { activeExecSessions } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
+import {
+  AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
+  releaseSlot, setLatch, waitForSendWindow, type SlotRequest
+} from './go-account.js';
 import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
 import { ReviewShareError } from './review-state.js';
-import { StateStore, acquireLock } from './task-state.js';
+import { StateStore, acquireLock, lockOwnerAlive, validateLockRecord, type Lock } from './task-state.js';
 
 // One-shot ChatGPT web run driver (docs/GO-DRIVER-SPEC.md). The run journal stays the
-// authority; this module only sequences it, keeps a private manifest for recovery and
-// holds the account-wide admission so at most one ChatGPT turn is unresolved at a time.
+// authority; this module only sequences it and keeps a private manifest for recovery.
+// Account-wide slots, the send budget, the setup lease and the latch live in
+// `go-account.ts` (docs/GO-CONCURRENCY-SPEC.md).
 
+export { DEFAULT_ACCOUNT_DIR };
 export const GO_KIND = 'chatgpt-go-v1';
-const ACCOUNT_KIND = 'chatgpt-go-account-v1';
-const ACCOUNT_PATH = 'account';
 const WS_CLAIM_KIND = 'chatgpt-go-ws-claim-v1';
-/** One admission store per machine: every state dir drives the same main-Chrome ChatGPT account. */
-export const DEFAULT_ACCOUNT_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'repo-mcp', 'chatgpt-account');
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-const HOUR_MS = 3_600_000;
+/** Longest gap between the effort observation and the send commit. */
+const OBSERVATION_MAX_AGE_MS = 10_000;
 const POLL_MS = 15_000;
 const SEND_CONFIRM_MS = 30_000;
 const UNKNOWN_LIMIT_MS = 10 * 60_000;
@@ -71,6 +74,10 @@ export interface ChatGptPage {
   /** Close this run's own tab; never any other tab. */
   closeTab(): Promise<void>;
   close(): Promise<void>;
+  /** The tab now attached; reattach may have opened a replacement. */
+  currentTargetId?(): string | undefined;
+  /** A verified account-level warning on the page (`BROWSER_CHALLENGE`), or null. */
+  accountSignal?(): Promise<string | null>;
 }
 
 export type GoPhase = 'admitted' | 'tab-ready' | 'prepared' | 'reserved' | 'send-intent' |
@@ -107,6 +114,8 @@ export type GoManifest = {
   participant?: string;
   prompt_file: string; session_id: string; created_at: string; updated_at: string;
   phase: GoPhase; target_id?: string; pending_run_id?: string; run_id?: string; selection_id?: string; send_intent_at?: string;
+  /** The account send attempt committed before the click (docs/GO-CONCURRENCY-SPEC.md section 5). */
+  send_attempt_id?: string;
   conversation_url?: string; submission_event_id?: string; output_file?: string; output_sha256?: string;
   cleanup?: string; failure_code?: string;
 };
@@ -115,6 +124,10 @@ export type GoOptions = {
   stateDir: string; requestId: string; accountDir?: string;
   repositoryId?: string; taskId?: string; coordinator?: ChatGptCoordinator; kind?: string; profile?: ModelProfile;
   prompt?: string; promptFile?: string; timeoutMinutes?: number; maxPerHour?: number;
+  /** Fail with ACCOUNT_BUSY instead of waiting for a free slot. */
+  noWait?: boolean;
+  /** Called while the request waits for a slot. */
+  onWait?: (position: number, used: number, max: number) => void;
   workspaceRequestId?: string; baseRef?: string; headRef?: string; scopePrefix?: string;
   /** Code only: commands run in the checkout after the workspace is sealed. */
   checks?: string[];
@@ -166,60 +179,8 @@ function result(m: GoManifest, run?: ChatGptRunRecord): GoResult {
   };
 }
 
-type AccountRecord = { active_request_id: string | null; since: string | null; sends: string[] };
-
-async function readAccount(store: StateStore): Promise<AccountRecord> {
-  const raw = await store.read<AccountRecord>(ACCOUNT_PATH, ACCOUNT_KIND);
-  if (raw === undefined) return { active_request_id: null, since: null, sends: [] };
-  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.sends) ||
-      (raw.active_request_id !== null && typeof raw.active_request_id !== 'string')) {
-    throw new SafeError('Corrupt ChatGPT account admission record; inspect it before continuing.');
-  }
-  return raw;
-}
-
-/** Account lock that recovers a lock left by a dead process, so a crash cannot block resume. */
-async function withAccount<T>(store: StateStore, fn: (account: AccountRecord) => Promise<T>) {
-  const deadline = Date.now() + 10_000;
-  while (true) {
-    let lock;
-    try { lock = await acquireLock(store, 'chatgpt-go-account', 'chatgpt-go account admission', { recoverStale: true }); }
-    catch (error) {
-      if (Date.now() > deadline || !(error instanceof Error) || !/live process|recovery is already in progress/.test(error.message)) throw error;
-      await new Promise(r => setTimeout(r, 25));
-      continue;
-    }
-    try { return await fn(await readAccount(store)); } finally { await lock.release(); }
-  }
-}
-
-/** Hold the account for `requestId`, or fail with ACCOUNT_BUSY / RATE_LIMITED. A request may re-enter its own admission. */
-async function admit(store: StateStore, requestId: string, maxPerHour: number, now: Date) {
-  await withAccount(store, async account => {
-    if (account.active_request_id === requestId) return;
-    if (account.active_request_id !== null) {
-      throw new GoError('ACCOUNT_BUSY', `ChatGPT account is held by unresolved request ${account.active_request_id}; resume or release it first.`);
-    }
-    const recent = account.sends.filter(at => now.getTime() - Date.parse(at) < HOUR_MS);
-    if (recent.length >= maxPerHour) throw new GoError('RATE_LIMITED', `${recent.length} ChatGPT sends in the last hour (limit ${maxPerHour}).`);
-    await store.write(ACCOUNT_PATH, ACCOUNT_KIND, { ...account, active_request_id: requestId, since: now.toISOString() });
-  });
-}
-
-async function recordSend(store: StateStore, requestId: string, now: Date) {
-  await withAccount(store, async account => {
-    if (account.active_request_id !== requestId) throw new GoError('ADMISSION_LOST', 'Account admission is not held by this request; refusing to send.');
-    const sends = [...account.sends.filter(at => now.getTime() - Date.parse(at) < 24 * HOUR_MS), now.toISOString()];
-    await store.write(ACCOUNT_PATH, ACCOUNT_KIND, { ...account, sends });
-  });
-}
-
-async function releaseAccount(store: StateStore, requestId: string) {
-  await withAccount(store, async account => {
-    if (account.active_request_id !== requestId) return;
-    await store.write(ACCOUNT_PATH, ACCOUNT_KIND, { ...account, active_request_id: null, since: null });
-  });
-}
+/** Account-module failures surface with their own codes. */
+const asGo = (error: unknown) => error instanceof AccountError ? new GoError(error.code, error.message) : error;
 
 /** Operator escape for an `uncertain` request after its conversation was inspected by other means. */
 export async function releaseGoAdmission(stateDir: string, requestId: string, reason: string, accountDir = DEFAULT_ACCOUNT_DIR) {
@@ -234,7 +195,8 @@ export async function releaseGoAdmission(stateDir: string, requestId: string, re
     const run = m.run_id ? await chatGptRunStatus(m.run_id, stateDir) : undefined;
     if (run?.state === 'submitted') throw new GoError('RUN_ACTIVE', 'The run is submitted; resume it instead of releasing the account.');
     if (!reason.trim()) throw new GoError('REASON_REQUIRED', 'Releasing the account needs a reason.');
-    await releaseAccount(await StateStore.open(accountDir), accountKey(store.dir, requestId));
+    await releaseSlot(await StateStore.open(accountDir), accountKey(store.dir, requestId),
+      { action: 'release-admission', reason, now: new Date() });
     return { request_id: requestId, released: true, run_state: run?.state ?? null, reason };
   } finally { await lock.release(); }
 }
@@ -244,6 +206,30 @@ export async function goStatus(stateDir: string, requestId: string) {
   const m = await store?.read<GoManifest>(manifestPath(requestId), GO_KIND);
   if (!m) throw new GoError('NO_SUCH_REQUEST', `No go request ${requestId}.`);
   return result(m, m.run_id ? await chatGptRunStatus(m.run_id, stateDir) : undefined);
+}
+
+/**
+ * `go` requests that still use `taskId`: non-terminal manifests that have a run, or whose
+ * request lock a live process holds (waiting for a slot or setting up). `task finish`
+ * refuses while any exist (docs/GO-CONCURRENCY-SPEC.md section 9).
+ */
+export async function activeGoRequestsForTask(stateDir: string, taskId: string) {
+  const store = await StateStore.inspect(stateDir);
+  if (!store) return [];
+  const active: string[] = [];
+  for (const name of await store.list('chatgpt-go')) {
+    if (!/^[0-9a-f]{64}$/.test(name)) continue;
+    const m = await store.read<GoManifest>(`chatgpt-go/${name}`, GO_KIND).catch(() => undefined);
+    if (!m || m.task_id !== taskId || m.phase === 'cleaned' || m.phase === 'failed') continue;
+    let live = false;
+    const lock = await store.read<unknown>(`locks/${requestLockKey(m.request_id)}.json`, 'lock').catch(() => undefined);
+    if (lock) {
+      try { const r = validateLockRecord(lock, 'chatgpt-go request'); live = r.hostname !== os.hostname() || lockOwnerAlive(r.pid); }
+      catch { live = true; }
+    }
+    if (live || m.run_id || m.pending_run_id) active.push(m.request_id);
+  }
+  return active;
 }
 
 export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult> {
@@ -373,26 +359,75 @@ class Driver {
     return `Run ${requestHash(this.m.request_id).slice(0, 16)}\n\n${this.prompt}`;
   }
 
+  private get key() { return accountKey(this.store.dir, this.m.request_id); }
+  private get accountDir() { return this.options.accountDir ?? DEFAULT_ACCOUNT_DIR; }
+
+  private async releaseSlot() { await releaseSlot(this.account, this.key); }
+
+  /** The setup lease covers every step that activates a tab or sends input; it is never held while waiting for an answer. */
+  private lease?: Lock;
+  private async takeLease() { this.lease ??= await acquireSetupLease(this.account, this.sleep); }
+  private async dropLease() { const lease = this.lease; this.lease = undefined; await lease?.release().catch(() => {}); }
+
+  /** Record a tab that reattach replaced, so cleanup closes the right one. */
+  private async trackTarget() {
+    const current = this.page.currentTargetId?.();
+    if (current && current !== this.m.target_id) await this.save({ target_id: current });
+  }
+
+  /** Latch the account on a verified page warning (docs/GO-CONCURRENCY-SPEC.md section 6). */
+  private async checkSignal() {
+    const signal = await this.page.accountSignal?.().catch(() => null);
+    if (signal) await setLatch(this.account, this.accountDir, { code: signal, key: this.key, by: 'driver' }, this.now()).catch(() => {});
+    return signal ?? null;
+  }
+
   private async finish(phase: 'cleaned' | 'failed', patch: Partial<GoManifest> = {}) {
+    await this.dropLease();
     // The run is terminal: release the account even if a manifest or cleanup write fails.
     try {
       await this.save({ ...patch, phase });
       await this.closeReview();
       await this.seal();
     } finally {
-      await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+      await this.releaseSlot();
     }
     return result(this.m, this.m.run_id ? await this.run() : undefined);
   }
 
   private async hold(code: string) {
+    await this.dropLease();
     const run = await this.run();
     if (run.state === 'submission-reserved' || run.state === 'submitted') await markChatGptRunUncertain(run.run_id, code, this.stateDir, this.now());
     await this.save({ phase: 'uncertain', failure_code: code });
     return result(this.m, await this.run());
   }
 
+  private async slotRequest(): Promise<SlotRequest> {
+    let checkout: string | null = null;
+    if (this.m.kind === 'code') {
+      const root = (await readMultiRepoCatalog(this.stateDir)).repositories[this.m.repository_id]?.root;
+      checkout = root ? await realpath(root).catch(() => path.resolve(root)) : `unknown:${this.m.repository_id}`;
+    }
+    return { key: this.key, requestId: this.m.request_id, stateDir: this.store.dir, kind: this.m.kind, checkout };
+  }
+
   async drive(): Promise<GoResult> {
+    try {
+      return await this.driveInner();
+    } catch (error) {
+      await this.dropLease();
+      // A slot means "this request may have an unresolved turn". Without a journal run
+      // nothing was sent, and a terminal run has nothing left to send: free the slot.
+      const runId = this.m.run_id ?? this.m.pending_run_id;
+      const run = runId ? await chatGptRunStatus(runId, this.stateDir).catch(() => undefined) : undefined;
+      const unreadable = runId && !run && this.m.run_id;
+      if (!unreadable && (!run || run.state === 'completed' || run.state === 'failed-pre-submit')) await this.releaseSlot().catch(() => {});
+      throw asGo(error);
+    }
+  }
+
+  private async driveInner(): Promise<GoResult> {
     if (this.m.phase === 'cleaned' || this.m.phase === 'failed') {
       // A finished request must never keep the account; output repair is reported separately.
       let repair: unknown;
@@ -401,24 +436,42 @@ class Driver {
         await this.closeReview();
         await this.seal();
       } finally {
-        await releaseAccount(this.account, accountKey(this.store.dir, this.m.request_id));
+        await this.releaseSlot();
       }
       if (repair) throw repair;
       return result(this.m, this.m.run_id ? await this.run() : undefined);
     }
-    await admit(this.account, accountKey(this.store.dir, this.m.request_id), this.options.maxPerHour ?? 4, this.now());
     if (!this.m.run_id && this.m.pending_run_id) {
       // Preparation may have become durable before the manifest recorded it.
       const exists = await chatGptRunStatus(this.m.pending_run_id, this.stateDir).then(() => true, () => false);
       if (exists) await this.save({ run_id: this.m.pending_run_id });
     }
-    if (!this.m.run_id) return this.fresh();
-    return this.recover();
+    if (this.m.run_id) {
+      // Recovery never sends, so it never waits for capacity, the queue or the latch.
+      await adoptSlot(this.account, await this.slotRequest(), this.now());
+      return this.recover();
+    }
+    await admitSlot(this.account, this.accountDir, await this.slotRequest(),
+      { noWait: this.options.noWait, sleep: this.sleep, now: this.now, onWait: this.options.onWait });
+    return this.fresh();
   }
 
   /** No run exists yet: set up the tab, then prepare, select, reserve and send once. */
   private async fresh(): Promise<GoResult> {
     const prompt = this.requirePrompt();
+    // Wait for the send gap before taking the lease and before preparing, so no wait
+    // sits inside the selection window. Recheck under the lease.
+    while (true) {
+      await waitForSendWindow(this.account, this.accountDir, { maxPerHour: this.options.maxPerHour, sleep: this.sleep, now: this.now });
+      await this.takeLease();
+      try {
+        await waitForSendWindow(this.account, this.accountDir, { maxPerHour: this.options.maxPerHour, sleep: async () => { throw new GoError('GAP_RECHECK'); }, now: this.now });
+        break;
+      } catch (error) {
+        await this.dropLease();
+        if (!(error instanceof GoError && error.code === 'GAP_RECHECK')) throw error;
+      }
+    }
     // The text actually sent; for code it ends with the write grant. Page matching uses
     // `prompt`, a prefix of it, so recovery never needs the grant again.
     let sent = prompt;
@@ -430,6 +483,9 @@ class Driver {
       await this.save({ phase: 'tab-ready', target_id: targetId, pending_run_id: this.m.pending_run_id ?? randomUUID() });
     } catch (error) {
       process.stderr.write(`browser setup failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      if (error instanceof GoError && error.code === 'BROWSER_CHALLENGE') {
+        await setLatch(this.account, this.accountDir, { code: 'BROWSER_CHALLENGE', key: this.key, by: 'driver' }, this.now()).catch(() => {});
+      }
       await this.page.closeTab().catch(() => {});
       return this.finish('failed', { failure_code: codeOf(error, 'BROWSER_SETUP_FAILED') });
     }
@@ -478,11 +534,13 @@ class Driver {
       return this.finish('failed', { failure_code: 'REVIEW_TARGET_MISMATCH' });
     }
     let authorized: boolean;
+    let observedAt: Date;
     try {
       const picked = await this.page.selectEffort(target ?? '');
+      observedAt = this.now();
       const evidence = await recordTrustedBrowserObservation({
         selectionId: prepared.selection.selection_id, surface: 'chat', controlLabel: picked.observedLabel,
-        selectedAt: picked.selectedAt.toISOString(), observedAt: this.now().toISOString(), sessionId: this.m.session_id
+        selectedAt: picked.selectedAt.toISOString(), observedAt: observedAt.toISOString(), sessionId: this.m.session_id
       }, { stateDir: path.join(this.stateDir, 'model-policy'), now: this.now() });
       const reserved = await reserveChatGptRun({ stateDir: this.stateDir, runId: prepared.run_id, contract: prepared.selection, evidence, now: this.now() });
       authorized = reserved.submission_authorized;
@@ -500,12 +558,26 @@ class Driver {
     }
     if (!authorized) return this.recover();
     await this.save({ phase: 'reserved' });
-    return this.send(prompt);
+    return this.send(prompt, observedAt);
   }
 
-  private async send(prompt: string): Promise<GoResult> {
-    await recordSend(this.account, accountKey(this.store.dir, this.m.request_id), this.now());
-    await this.save({ phase: 'send-intent', send_intent_at: this.now().toISOString() });
+  private async send(prompt: string, observedAt: Date): Promise<GoResult> {
+    // The send commit (spec section 5): slot, latch, cap and gap are checked and one
+    // attempt is recorded atomically. A denial means nothing was clicked.
+    let attemptId: string;
+    try {
+      if (this.now().getTime() - observedAt.getTime() > OBSERVATION_MAX_AGE_MS) throw new GoError('SELECTION_STALE', 'The effort observation is too old to send on.');
+      attemptId = await commitSend(this.account, this.accountDir, this.key, { maxPerHour: this.options.maxPerHour, now: this.now() });
+    } catch (error) {
+      const code = codeOf(asGo(error), 'SEND_DENIED');
+      const run = await this.run();
+      await markChatGptRunUncertain(run.run_id, code, this.stateDir, this.now());
+      await recoverChatGptRun(run.run_id, 'not-submitted', this.receipt(await this.run(),
+        `chatgpt-go-denied-${requestHash(this.m.request_id).slice(0, 16)}-${this.now().toISOString()}`), this.stateDir, this.now());
+      await this.page.closeTab().catch(() => {});
+      return this.finish('failed', { failure_code: code });
+    }
+    await this.save({ phase: 'send-intent', send_intent_at: this.now().toISOString(), send_attempt_id: attemptId });
     try { await this.page.clickSend(); }
     catch { return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED'); }
     return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED');
@@ -521,6 +593,7 @@ class Driver {
       if (this.now().getTime() >= deadline) return this.hold(code);
       await this.sleep(2_000);
     }
+    if (this.m.send_attempt_id) await confirmSend(this.account, this.m.send_attempt_id, this.now()).catch(() => {});
     const run = await this.run();
     const eventId = `chatgpt-go-send-${conversationId(this.m.conversation_url)}-${this.now().toISOString()}`;
     if (run.state === 'uncertain') {
@@ -533,10 +606,15 @@ class Driver {
   }
 
   private async awaitAnswer(prompt: string): Promise<GoResult> {
+    // Waiting for the answer runs in parallel with other requests.
+    await this.dropLease();
     const deadline = this.now().getTime() + (this.options.timeoutMinutes ?? 45) * 60_000;
     let previous: TurnState | undefined;
     let unknownSince: number | undefined;
+    let signalled = false;
     while (true) {
+      // A challenge stops new work account-wide; this turn keeps being watched.
+      if (!signalled) signalled = (await this.checkSignal()) !== null;
       const state = await this.page.turnState(prompt).catch((): TurnState => ({ state: 'unknown', chars: 0 }));
       const at = this.now().getTime();
       if (state.state === 'done') {
@@ -613,16 +691,26 @@ class Driver {
   }
 
   private async cleanup(): Promise<GoResult> {
-    await this.closeReview();
-    await this.seal();
-    await this.runChecks();
     let cleanup = 'archived';
     try {
-      if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) throw new GoError('TAB_GONE');
-      await this.page.archive();
-      await this.page.closeTab();
+      await this.closeReview();
+      await this.seal();
+      await this.runChecks();
+      try {
+        await this.takeLease();
+        if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) throw new GoError('TAB_GONE');
+        await this.trackTarget();
+        await this.page.archive();
+        await this.page.closeTab();
+      } catch (error) {
+        cleanup = `warning:${codeOf(error, 'ARCHIVE_FAILED')}`;
+      } finally {
+        await this.dropLease();
+      }
     } catch (error) {
-      cleanup = `warning:${codeOf(error, 'ARCHIVE_FAILED')}`;
+      // The journal run is terminal: a failed cleanup write must not keep the slot.
+      await this.releaseSlot().catch(() => {});
+      throw error;
     }
     return this.finish('cleaned', { cleanup });
   }
@@ -740,6 +828,7 @@ class Driver {
 
   /** Continue from whatever the journal says happened (spec section 4). */
   private async recover(): Promise<GoResult> {
+    await this.dropLease();
     // A crash can leave the journal's own run lock behind; it is removed only if its owner is dead.
     await recoverChatGptRunLock(this.m.run_id!, this.stateDir).catch(() => {});
     const run = await this.run();
@@ -779,7 +868,10 @@ class Driver {
         return this.reattachAndConfirm(run.failure_code ?? 'SEND_UNCONFIRMED');
       case 'submitted': {
         const prompt = this.requirePrompt();
+        await this.takeLease();
         if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) return this.hold('TAB_GONE');
+        await this.trackTarget();
+        await this.dropLease();
         if (this.m.phase !== 'submitted') await this.save({ phase: 'submitted' });
         return this.awaitAnswer(prompt);
       }
@@ -790,7 +882,10 @@ class Driver {
 
   private async reattachAndConfirm(code: string): Promise<GoResult> {
     const prompt = this.requirePrompt();
+    await this.takeLease();
     if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) return this.hold(code);
+    await this.trackTarget();
+    await this.checkSignal();
     return this.confirmOrHold(prompt, code);
   }
 }

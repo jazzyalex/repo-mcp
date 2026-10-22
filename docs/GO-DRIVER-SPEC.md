@@ -113,22 +113,17 @@ which removes a journal run lock only when its owner process is dead.
   process.
   - A second `go` for the same request fails with `REQUEST_BUSY`.
   - A lock whose owner PID is dead is recovered.
-- **Account admission:** one record per machine, in
-  `~/Library/Application Support/repo-mcp/chatgpt-account/account` (kind
-  `chatgpt-go-account-v1`), because every state dir drives the same ChatGPT account.
-  It holds `{active_request_id, since, sends: [ISO times, last 24 h]}`. The admission
-  key is `<request_id>@<hash of state dir>`.
-  - It is changed only under the `chatgpt-go-account` lock.
-  - A lock left by a dead process is recovered, so a crash cannot block resume.
+- **Account admission:** replaced by slots (unreleased, after 0.3.0); see `docs/GO-CONCURRENCY-SPEC.md`.
+  Several requests run at once, up to the owner's `max_concurrent` (default 10), with an
+  hourly send cap (default 25), a minimum gap between sends (default 30 s) and a stop
+  latch. The admission key is still `<request_id>@<hash of state dir>`.
 - **Acquire:**
-  - The request manifest is written first, then admission is claimed. A crash between
-    the two leaves a resumable request, never an orphaned admission. A request refused
-    with `ACCOUNT_BUSY` resumes with the same command once the account is free.
+  - The request manifest is written first, then a slot is claimed. A crash between the
+    two leaves a resumable request, never an orphaned slot.
   - The step runs before the browser is touched and before any grant or prepare.
-  - It fails with `ACCOUNT_BUSY` if another request is active.
-  - It fails with `RATE_LIMITED` if the number of sends in the last hour is at least
-    `--max-per-hour` (default 4).
-  - A request may re-acquire its own admission.
+  - A fresh request waits in FIFO order for a free slot (`--no-wait`: `ACCOUNT_BUSY`).
+  - A request with a journal run takes its slot back at once (recovery never sends).
+  - A request may re-acquire its own slot.
 - **Release:** only when the request reaches `cleaned` or `failed`. The release runs in a
   `finally` step, so a failed manifest, participant or seal write cannot keep the account.
   - A finished request releases admission even if the output-file repair fails. The
@@ -220,8 +215,7 @@ which removes a journal run lock only when its owner process is dead.
    then `cleaned`, with exactly one click.
 5. A crash after the intent, with the message absent: resume gives `uncertain`, exit 3,
    admission held, and a second resume still makes no click.
-6. A second request while one is active gives `ACCOUNT_BUSY`. Over the rate gives
-   `RATE_LIMITED`.
+6. Concurrency, queue, gap, cap and latch: see `docs/GO-CONCURRENCY-SPEC.md` section 12.
 7. The same `request_id` with a different prompt gives `REQUEST_CONFLICT`.
 8. An archive failure gives `cleaned` with `warning`, and the output is kept.
 9. An ambiguous selector before send gives `failed` before prepare, or

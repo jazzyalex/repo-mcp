@@ -159,9 +159,12 @@ flowchart LR
 
 How a run goes:
 
-1. **Admission.** The account allows one unresolved ChatGPT run per machine. It also
-   limits sends per hour (`--max-per-hour`, default 4). `go` takes the admission before it
-   touches the browser.
+1. **Admission.** Several runs may be active at once, across repositories and on one
+   repository, up to `max_concurrent` (default 10). A request with no free slot waits in
+   code. Sends are capped per hour (`max_per_hour`, default 25) and spaced
+   (`min_gap_seconds`, default 30). Steps that click or type run one at a time under a
+   short setup lease; the answer waits run in parallel. All limits are owner settings
+   (`chatgpt-run account config-set KEY=VALUE`; see `OPERATIONS.md`).
 2. **Browser setup.** `go` connects to the owner's main Chrome through a local relay. The
    relay owns one DevTools connection. Chrome asks the owner to approve it once per Chrome
    start. It needs remote debugging switched on in `chrome://inspect/#remote-debugging`.
