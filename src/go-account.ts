@@ -19,8 +19,13 @@ const KIND = 'chatgpt-go-account-v2';
 const PATH = 'account-v2';
 const CONFIG_FILE = 'config.json';
 const HOUR_MS = 3_600_000;
-/** Latest time a committed send can still reach ChatGPT when its confirmation is never seen. */
-export const SEND_BOUND_MS = 60_000;
+/**
+ * Latest time a committed send can still reach ChatGPT when its confirmation is never
+ * seen. The driver clicks only within SEND_CLICK_DEADLINE_MS of the commit, and one CDP
+ * command times out after 30 s, so the click cannot land later than this.
+ */
+export const SEND_BOUND_MS = 120_000;
+export const SEND_CLICK_DEADLINE_MS = 45_000;
 const WAIT_POLL_MS = 5_000;
 const LEASE_POLL_MS = 1_000;
 const LEASE_SETTLE_MS = 5_000;
@@ -212,8 +217,10 @@ const UNKNOWN_START_TRUST_MS = 6 * HOUR_MS;
 function ownerAlive(o: Owner, since: string) {
   if (o.host !== os.hostname()) return true;
   if (!lockOwnerAlive(o.pid)) return false;
-  if (o.started === null) return Date.now() - Date.parse(since) < UNKNOWN_START_TRUST_MS;
-  return processStart(o.pid) === o.started;
+  // A start time we cannot read now is unknown, not different: trust it for a bounded time.
+  const current = processStart(o.pid);
+  if (o.started === null || current === null) return Date.now() - Date.parse(since) < UNKNOWN_START_TRUST_MS;
+  return current === o.started;
 }
 const waiterAlive = (w: Waiter) => ownerAlive(w, w.since);
 
@@ -249,9 +256,10 @@ export async function admitSlot(store: StateStore, dir: string, req: SlotRequest
   const onSignal = (signal: NodeJS.Signals) => { void leave().finally(() => process.exit(signal === 'SIGINT' ? 130 : 143)); };
   try {
     while (true) {
-      const { config } = await accountConfig(dir);
       type State = { admitted: boolean; position?: number; used?: number; max?: number };
-      const state = await update<State>(store, account => {
+      const state = await update<State>(store, async account => {
+        // Read the limits under the account lock, the same lock config-set holds.
+        const { config } = await accountConfig(dir);
         if (account.slots.some(s => s.key === req.key)) return { value: { admitted: true } };
         if (account.latch) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT work is stopped: ${account.latch.code} at ${account.latch.at}. The owner clears it with chatgpt-run account unlatch --reason TEXT.`);
         if (req.kind === 'code') {
@@ -353,8 +361,8 @@ export async function confirmSend(store: StateStore, attemptId: string, now: Dat
   await update(store, account => {
     const a = account.attempts.find(x => x.id === attemptId);
     if (!a || a.confirmed_at) return { value: undefined };
-    const at = Math.min(now.getTime(), Date.parse(a.bound));
-    return { value: undefined, next: { ...account, attempts: account.attempts.map(x => x.id === attemptId ? { ...x, confirmed_at: new Date(at).toISOString() } : x) } };
+    // The message was observed at `now`: never record an earlier, speculative time.
+    return { value: undefined, next: { ...account, attempts: account.attempts.map(x => x.id === attemptId ? { ...x, confirmed_at: now.toISOString() } : x) } };
   });
 }
 
@@ -420,7 +428,9 @@ export async function acquireSetupLease(store: StateStore, sleep: (ms: number) =
     const recovered = await withAccountLock(store, async () => {
       const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND);
       if (!current) return false;
-      if (!Number.isSafeInteger(current.pid) || typeof current.host !== 'string' || typeof current.since !== 'string') {
+      if (!current || typeof current !== 'object' || !Number.isSafeInteger(current.pid) || current.pid <= 0 ||
+          typeof current.host !== 'string' || !current.host || typeof current.token !== 'string' || !current.token ||
+          !iso(current.since) || !(current.started === null || (typeof current.started === 'string' && current.started.length > 0))) {
         throw new AccountError('ACCOUNT_STATE_CORRUPT', `Corrupt setup lease; inspect ${LEASE_PATH} before continuing.`);
       }
       if (ownerAlive(current, current.since)) return false;

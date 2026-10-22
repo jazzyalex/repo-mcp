@@ -98,7 +98,9 @@ record `setup-lease` in the account store, owned by PID plus process start time 
 reused PID never holds it), polled every 1 s, and removed under the account lock when its
 owner is dead. After recovering a dead owner's lease, wait 5 s so any command it already
 sent settles. The lease serializes command issuance; it never replays a dead owner's
-command. `chatgpt-run probe` takes the same lease.
+command. `chatgpt-run probe` takes the same lease. A malformed lease record fails closed
+(`ACCOUNT_STATE_CORRUPT`). A release that keeps failing before the answer wait raises
+`LEASE_RELEASE_FAILED`, so the lease is never silently left behind a live process.
 
 Lease sections (each acquired and released explicitly, never held during the answer
 wait, checks, or a recursive recovery):
@@ -118,9 +120,14 @@ reserve.
 **Send commit.** After reserve, under the task share gate (the gate `task finish` holds):
 the task is still unfinished, then under the account lock, atomically: own slot present,
 latch clear, attempts in the last hour below the effective cap, newest attempt bound at
-least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 60 s}`, then write
+least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 120 s}`, then write
 `send_intent_at` before leaving the share gate, and click once. After the user message is seen, set `confirmed_at`.
-The gap and the hourly count use `confirmed_at` when present, else `bound`. If the
+The gap and the hourly count use `confirmed_at` (the observed time, never earlier) when
+present, else `bound`. The click is made only within 45 s of the commit; a later click is
+not made, the run is resolved `not-submitted` (`SEND_LATE`) and the attempt stays charged.
+One CDP command times out after 30 s, so no click lands after `bound`. A verified
+challenge right before the commit, on every send-confirmation poll and after a click
+error latches the account; before the commit it also stops this send. If the
 commit is denied (latch, cap, gap), nothing was clicked: mark the run uncertain, recover
 it as `not-submitted`, finish `failed` with the denial code, release the slot (exit 1).
 An already committed attempt may still click even if the latch is set after its commit.

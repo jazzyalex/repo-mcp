@@ -10,7 +10,7 @@ import { bindRegisteredTask, finishRegisteredTask, registerRepository } from '..
 import { StateStore } from '../src/task-state.js';
 import { GoError, activeGoRequestsForTask, releaseGoAdmission, runGo, type ChatGptPage, type TurnState } from '../src/chatgpt-go.js';
 import {
-  AccountError, accountConfig, accountStatus, acquireSetupLease, admitSlot, clearLatch, releaseSlot, setAccountConfig, setLatch
+  AccountError, accountConfig, accountStatus, acquireSetupLease, admitSlot, clearLatch, commitSend, confirmSend, releaseSlot, setAccountConfig, setLatch
 } from '../src/go-account.js';
 
 const PROMPT = 'Architecture pass. Use Repo MCP only. Make no edits.\n\nEnd with VERDICT.';
@@ -38,7 +38,7 @@ type Log = { opens: Map<string, number>; waits: Map<string, number>; clicked: Se
 class Page implements ChatGptPage {
   sent = false; clicks = 0; polls = 0;
   constructor(private id: string, private log: Log, private opts: {
-    doneWhen?: () => boolean; showMessage?: boolean; sentAlready?: boolean; signal?: string | null; onSelect?: () => Promise<void>; now?: () => Date;
+    doneWhen?: () => boolean; showMessage?: boolean; sentAlready?: boolean; signal?: string | null; signalAfterSend?: boolean; onSelect?: () => Promise<void>; now?: () => Date;
   } = {}) { this.sent = !!opts.sentAlready; }
   async open() { this.log.opens.set(this.id, performance.now()); await tick(); return { targetId: `t-${this.id}` }; }
   async reattach() { return true; }
@@ -57,7 +57,7 @@ class Page implements ChatGptPage {
   async archive() {}
   async closeTab() {}
   async close() {}
-  async accountSignal() { return this.opts.signal ?? null; }
+  async accountSignal() { return this.opts.signalAfterSend && !this.sent ? null : this.opts.signal ?? null; }
 }
 
 const tick = () => new Promise(r => setTimeout(r, 2));
@@ -149,7 +149,7 @@ test('a latch set after reserve but before the commit stops the send with no cli
 
 test('a browser challenge during the wait latches the account; the run still completes', async t => {
   const f = await fixture(t);
-  const r = await runGo(req(f, 'a'), { page: new Page('a', newLog(), { signal: 'BROWSER_CHALLENGE' }), sleep });
+  const r = await runGo(req(f, 'a'), { page: new Page('a', newLog(), { signal: 'BROWSER_CHALLENGE', signalAfterSend: true }), sleep });
   assert.equal(r.phase, 'cleaned');
   assert.equal((await accountStatus(f.accountDir)).latch?.code, 'BROWSER_CHALLENGE');
   await assert.rejects(runGo(req(f, 'b'), { page: new Page('b', newLog()), sleep }), e => code(e, 'ACCOUNT_LATCHED'));
@@ -358,4 +358,88 @@ test('a challenge seen after a setup failure latches the account', async t => {
   const r = await runGo(req(f, 'a'), { page, sleep });
   assert.equal(r.phase, 'failed');
   assert.equal((await accountStatus(f.accountDir)).latch?.code, 'BROWSER_CHALLENGE');
+});
+
+// --- review round 2 fixes -------------------------------------------------------------------
+
+test('a challenge before the commit stops the send, latches, and clicks nothing', async t => {
+  const f = await fixture(t);
+  const page = new Page('a', newLog(), { signal: 'BROWSER_CHALLENGE' });
+  page.open = async () => ({ targetId: 't-a' });
+  // The challenge appears only after selection, right before the commit.
+  let selected = false;
+  page.accountSignal = async () => selected ? 'BROWSER_CHALLENGE' : null;
+  const select = page.selectEffort.bind(page);
+  page.selectEffort = async (label: string) => { const r = await select(label); selected = true; return r; };
+  const r = await runGo(req(f, 'a'), { page, sleep });
+  assert.equal(r.phase, 'failed');
+  assert.equal(r.failure_code, 'BROWSER_CHALLENGE');
+  assert.equal(r.run_state, 'failed-pre-submit');
+  assert.equal(page.clicks, 0);
+  assert.equal((await accountStatus(f.accountDir)).latch?.code, 'BROWSER_CHALLENGE');
+});
+
+test('a challenge during send confirmation latches the account', async t => {
+  const f = await fixture(t);
+  const h = held('a', newLog());
+  (h.page as Page).accountSignal = async () => (h.page as Page).sent ? 'BROWSER_CHALLENGE' : null;
+  assert.equal((await runGo(req(f, 'a'), h)).phase, 'uncertain');
+  assert.equal((await accountStatus(f.accountDir)).latch?.code, 'BROWSER_CHALLENGE');
+});
+
+test('a click later than the deadline after the commit is not made; the attempt stays charged', async t => {
+  const f = await fixture(t);
+  const ft = fakeTime();
+  const page = new Page('a', newLog(), { now: ft.now });
+  // Model a slow intent write: 50 s pass between the commit and the click.
+  const late = async (phase: string) => { if (phase === 'send-intent') await ft.sleep(50_000); };
+  const r = await runGo(req(f, 'a'), { page, ...ft, afterPhase: late });
+  assert.equal(r.phase, 'failed');
+  assert.equal(r.failure_code, 'SEND_LATE');
+  assert.equal(page.clicks, 0);
+  assert.equal((await accountStatus(f.accountDir, ft.now())).sends_last_hour, 1);
+});
+
+test('a confirmed send records the observed time, never an earlier bound', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  await admitSlot(store, f.accountDir, { key: 'k', requestId: 'k', stateDir: f.stateDir, kind: 'architecture', checkout: null }, { sleep });
+  const t0 = new Date('2026-10-22T10:00:00Z');
+  const id = await commitSend(store, f.accountDir, 'k', { now: t0 });
+  const late = new Date(t0.getTime() + 300_000);
+  await confirmSend(store, id, late);
+  const record = await store.read<any>('account-v2', 'chatgpt-go-account-v2');
+  assert.equal(record.attempts.find((a: any) => a.id === id).confirmed_at, late.toISOString());
+});
+
+test('a journal-completed run frees its slot even when a later step fails', async t => {
+  const f = await fixture(t);
+  await assert.rejects(runGo(req(f, 'a'), { page: new Page('a', newLog()), sleep, afterPhase: p => { if (p === 'completed') throw new Error('crash'); } }), /crash/);
+  assert.equal((await accountStatus(f.accountDir)).slots_in_use, 0);
+  assert.equal((await runGo(req(f, 'a'), { page: new Page('a', newLog()), sleep })).phase, 'cleaned');
+});
+
+test('a malformed setup lease fails closed instead of being reclaimed', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  await store.write('setup-lease', 'chatgpt-go-setup-lease-v1', { pid: process.pid, host: os.hostname(), token: 'x', since: new Date().toISOString() });
+  await assert.rejects(acquireSetupLease(store, sleep), e => code(e, 'ACCOUNT_STATE_CORRUPT'));
+});
+
+test('an unreadable request lock counts as a live request for task finish', async t => {
+  const f = await fixture(t, { max_concurrent: 1 });
+  const store = await StateStore.open(f.accountDir);
+  await admitSlot(store, f.accountDir, { key: 'other', requestId: 'other', stateDir: f.stateDir, kind: 'architecture', checkout: null }, { sleep });
+  let waiting = false;
+  const run = runGo({ ...req(f, 'a'), onWait: () => { waiting = true; } }, { page: new Page('a', newLog()), sleep });
+  while (!waiting) await tick();
+  const locks = path.join(f.stateDir, 'locks');
+  const { readdir } = await import('node:fs/promises');
+  const name = (await readdir(locks)).find(n => n.startsWith('chatgpt-go-'))!;
+  const original = await readFile(path.join(locks, name));
+  await writeFile(path.join(locks, name), 'garbage');
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['a']);
+  await writeFile(path.join(locks, name), original);
+  await releaseSlot(store, 'other');
+  assert.equal((await run).phase, 'cleaned');
 });
