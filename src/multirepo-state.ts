@@ -25,6 +25,13 @@ const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
 
 export type WorkspaceMode = 'inspect' | 'code' | 'review';
+
+/**
+ * The workspace authority is really gone: closed, revoked, expired, a bad token, a missing
+ * capability, or a repository/task epoch, identity or phase change. Transient failures
+ * (state read races, I/O errors) stay plain SafeError/Error.
+ */
+export class WorkspaceInvalidError extends SafeError {}
 /** 'exec' (the exec shell tools) exists only on code workspaces whose write grant was issued with exec enabled. */
 export type WorkspaceCapability = 'read' | 'write' | 'check' | 'exec';
 
@@ -797,10 +804,10 @@ async function selectionFromToken(store: StateStore, auth: AuthState, token: str
   const key = await tokenKey(store);
   if (parts.keyId !== key.key_id) throw new SafeError('Invalid workspace_token.');
   const selection = auth.workspaces[parts.id];
-  if (!selection || !safeEqual(parts.mac, hmac(key.secret, 'workspace', selectionPayload(selection)))) throw new SafeError('Invalid workspace_token.');
+  if (!selection || !safeEqual(parts.mac, hmac(key.secret, 'workspace', selectionPayload(selection)))) throw new WorkspaceInvalidError('Invalid workspace_token.');
   if (!allowInactive) {
-    if (selection.status !== 'open') throw new SafeError('Workspace selection is closed or revoked. Open a new workspace.');
-    if (Date.now() >= Date.parse(selection.expires_at)) throw new SafeError('Workspace selection expired. Open a new workspace.');
+    if (selection.status !== 'open') throw new WorkspaceInvalidError('Workspace selection is closed or revoked. Open a new workspace.');
+    if (Date.now() >= Date.parse(selection.expires_at)) throw new WorkspaceInvalidError('Workspace selection expired. Open a new workspace.');
   }
   return selection;
 }
@@ -1472,26 +1479,26 @@ export async function authorizeWorkspace(stateDir: string, token: string, capabi
   const selection = await selectionFromToken(store, auth, token);
   if (!selection.capabilities.includes(capability)) {
     if (capability === 'exec') {
-      throw new SafeError(selection.mode === 'code'
+      throw new WorkspaceInvalidError(selection.mode === 'code'
         ? 'This code workspace does not grant exec: its write_grant was issued without exec enabled.'
         : `Workspace mode ${selection.mode} does not grant exec capability; exec exists only in code workspaces whose grant enabled it.`);
     }
-    throw new SafeError(`Workspace mode ${selection.mode} does not grant ${capability} capability.`);
+    throw new WorkspaceInvalidError(`Workspace mode ${selection.mode} does not grant ${capability} capability.`);
   }
   const catalog = await readCatalogStore(store);
   const repository = catalog.repositories[selection.repository_id];
   const task = catalog.tasks[selection.task_id];
-  if (!repository || !repository.enabled || !task || task.repository_id !== repository.repository_id || task.completed) throw new SafeError('Workspace repository/task is no longer active.');
+  if (!repository || !repository.enabled || !task || task.repository_id !== repository.repository_id || task.completed) throw new WorkspaceInvalidError('Workspace repository/task is no longer active.');
   if (repository.registration_epoch !== selection.registration_epoch || repository.policy_digest !== selection.policy_digest || task.binding_epoch !== selection.binding_epoch || task.phase_epoch !== selection.phase_epoch) {
-    throw new SafeError('Workspace selection is stale because repository/task authorization changed. Open a new workspace.');
+    throw new WorkspaceInvalidError('Workspace selection is stale because repository/task authorization changed. Open a new workspace.');
   }
   const live = await taskStatus(stateDir, task.task_id);
   taskFromLive(task, live);
   if (live.root !== repository.root || live.git_dir !== repository.git_dir || live.common_dir !== repository.common_dir || live.policy_digest !== repository.policy_digest) {
-    throw new SafeError('Workspace repository/task identity no longer matches the registered checkout.');
+    throw new WorkspaceInvalidError('Workspace repository/task identity no longer matches the registered checkout.');
   }
-  if (selection.mode === 'code' && live.phase !== 'coding') throw new SafeError('Coding workspace is no longer valid because the task phase changed. Open a new workspace after coordinator reconciliation.');
-  if (selection.mode === 'review' && live.phase !== 'review') throw new SafeError('Review workspace is no longer valid because the task phase changed. Open a new workspace.');
+  if (selection.mode === 'code' && live.phase !== 'coding') throw new WorkspaceInvalidError('Coding workspace is no longer valid because the task phase changed. Open a new workspace after coordinator reconciliation.');
+  if (selection.mode === 'review' && live.phase !== 'review') throw new WorkspaceInvalidError('Review workspace is no longer valid because the task phase changed. Open a new workspace.');
   return { selection, repository, task, live_task: live, scope: scopeFor(selection, live) };
 }
 
@@ -1553,6 +1560,17 @@ export async function revokeWorkspace(options: { stateDir?: string; workspaceId:
     await invalidateReviewShareUnderGate(stateDir, initial.task_id, 'workspace-revoked', options.workspaceId);
     return result;
   }, 'revoke review workspace ' + options.workspaceId);
+}
+
+/** A grant's status and, once consumed, the workspace it opened. */
+export async function grantState(options: { stateDir?: string; grantId: string }) {
+  const stateDir = options.stateDir ?? defaultStateDir();
+  if (!HEX32.test(options.grantId)) throw new SafeError('Invalid grant ID.');
+  return withControlLock(stateDir, `read grant ${options.grantId}`, async store => {
+    const grant = (await readAuthStore(store)).grants[options.grantId];
+    if (!grant) throw new SafeError('Workspace grant is unknown.');
+    return { status: grant.status, consumed_by: grant.consumed_by ?? null };
+  });
 }
 
 export async function revokeGrant(options: { stateDir?: string; grantId: string }) {

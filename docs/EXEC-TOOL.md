@@ -13,6 +13,10 @@ ChatGPT can run builds, tests, lint and type checks in the owner's repository.
 - There is no sandbox and no extra worktree. This is the owner's decision.
 - The command can read and write anything the user can. This includes the Repo MCP
   state directory. Only grant exec for repositories and prompts you trust.
+- **exec is trusted, owner-level access.** A command can leave its process group (for
+  example with `setsid`, `nohup` plus a new session, or a launchd job). Such a process
+  keeps running after cancel, close, revoke, timeout or broker shutdown. Repo MCP only
+  stops the process group it started.
 
 ## Who gets it
 
@@ -51,6 +55,8 @@ All three need the `exec` capability and the workspace token.
 - Sends SIGTERM to the whole process group, then SIGKILL after 3 s.
 - Returns after the command ended, or after about 9 s at most.
 - Safe to repeat. On a finished session it changes nothing (`cancel_applied: false`).
+- If the shell already exited by itself, its exit result stays. A cancel then only
+  waits for the cleanup of leftovers (`cancel_applied: false`).
 
 ## States
 
@@ -106,8 +112,12 @@ All three need the `exec` capability and the workspace token.
   become U+FFFD.
 - Text that looks like a workspace token (`ws1.…`) or write grant (`wg1.…`) becomes
   `[redacted-token]`. The token key secret becomes `[redacted-secret]`.
-- A full page ends at a line break when one is in its second half. Otherwise it does not
-  split a run of token characters (up to 512 bytes back), so redaction sees whole tokens.
+- A full page ends at a line break when one is in its second half. The broker reads
+  256 bytes past the page end and never cuts inside a whole token or the key secret.
+- While the command runs, the last run of token characters (at most 160 bytes) is held
+  back. A token that arrives in two parts is shown only when it is complete and redacted.
+- For a finished session, paging stops at the real log size. A missing or short log gives
+  `has_more: false`.
 
 ## Lifecycle
 
@@ -115,11 +125,22 @@ All three need the `exec` capability and the workspace token.
 |---|---|
 | `workspace_close` | Cancelled before the close returns (`workspace_closed`). |
 | Broker shutdown (`service.close`) | Cancelled (`broker_shutdown`). |
-| Revoke, expiry, phase change, rebind, repository disable, task finish | A 1 s watcher re-checks the workspace token. Two failed checks in a row cancel the command (`workspace_no_longer_valid`), so within about 2–3 s. |
+| Revoke, expiry, phase change, rebind, repository disable, task finish | A 1 s watcher re-checks the workspace token. Two checks in a row that fail with `WorkspaceInvalidError` (closed, revoked, expired, bad token, missing capability, epoch, identity or phase change) cancel the command (`workspace_no_longer_valid`), so within about 2–3 s. Transient errors (state read races, I/O errors) never count. |
 | Broker crash or `kill -9` | Not covered. The detached process group keeps running. Its record becomes `uncertain` on the next read. The orphan is not killed. |
 
 After close or revoke, the old token cannot poll. The stored record and log remain for
 the operator.
+
+## Records and other processes
+
+- `activeExecSessions(stateDir, taskId)` (exported from `src/exec-tool.ts`) reads the
+  on-disk records. It returns `{ session_id, workspace_id, state, broker_pid,
+  created_at }[]` for records in `starting` or `running` whose broker PID is alive.
+  The `go` CLI uses it after a revoke and waits until the list is empty.
+- If the final record write fails (one retry), the broker keeps the final state in memory
+  and returns it with an `audit_warning`. It also writes a `record_write_failed` audit
+  entry. The disk record then still says `running` while that broker lives, so
+  `activeExecSessions` reports it until the broker restarts. Callers must use a timeout.
 
 ## Audit
 
@@ -141,6 +162,7 @@ Entries go to `<state>/multirepo-audit.jsonl`, as for other tools.
 - No stdin and no interactive programs.
 - A retry with a `request_id` whose session was already deleted by retention runs the
   command again.
+- A command that leaves its process group is not stopped (see the top of this file).
 - Redaction is pattern-based. A command can still print other secrets that the user's
   account can read.
 - The verification step of plan section C (drain sessions, fingerprint the candidate,

@@ -47,6 +47,24 @@ than doing the work directly.
     is `completed` with junk output ("ChatGPT said:"). An early busy-detection bug
     caused it. Journal records are immutable; ignore that run.
 
+## Measurement 1 (2026-10-21)
+
+One task, two ways, same model (Claude Sonnet subagents), same diff (`fa1b470..e269e71`,
+about 2,000 changed lines):
+
+| Way | Coordinator tokens | Wall time | Result |
+|---|---|---|---|
+| Direct review by the agent | 141,710 | 3.5 min | 4 P2 + 8 P3, NO-SHIP |
+| Review skill with `go` (ChatGPT Extra High) | 68,576 | 18 min | 2 P1 + 6 P2, NO-SHIP |
+
+- Saving on this task: about 52%. Most of the remaining 68k is fixed overhead (system
+  prompt, reading the skill, binding the task, writing the prompt). It does not grow
+  with the diff, so larger tasks should save more; small tasks save less.
+- A failed attempt before the fix (the "+" menu item not found) cost another 73k with
+  no result. Reliability matters as much as the per-run cost.
+- Not yet measured: coding tasks, the manual recipe, and more than one task. 80–90% is
+  not shown yet.
+
 ## Order of work
 
 1. **Measure and specify (P0).** Record coordinator tokens on 3 equal tasks done three

@@ -491,14 +491,14 @@ const repoRoot = (stateDir: string) => path.join(stateDir, '..', 'repo');
 const grantOf = (text: string) => text.match(/write_grant: (wg1\.\S+)$/)?.[1];
 
 /** A page that records the pasted text and, on send, opens the coding workspace with the pasted grant and edits a file. */
-function codePage(stateDir: string, opts: ConstructorParameters<typeof FakePage>[0] = {}, edit = true) {
+function codePage(stateDir: string, opts: ConstructorParameters<typeof FakePage>[0] = {}, edit = true, openAs: string | null = CODE_WS) {
   const pasted: string[] = [];
   const page = new FakePage({
     ...opts,
     onSend: async () => {
       const grant = grantOf(pasted.at(-1)!);
       assert.ok(grant, 'the sent text ends with a write grant');
-      await openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'code', requestId: CODE_WS, writeGrant: grant });
+      if (openAs) await openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'code', requestId: openAs, writeGrant: grant });
       if (edit) await writeFile(path.join(repoRoot(stateDir), 'src', 'go-edit.txt'), 'edited by chatgpt\n');
     }
   });
@@ -618,4 +618,79 @@ test('the account is released even when the manifest can no longer be written', 
   await chmod(dir, 0o700);
   const other = await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep });
   assert.equal(other.phase, 'cleaned');
+});
+
+test('seal follows the grant even when ChatGPT opened the workspace under another request ID', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir, {}, true, 'some-other-open-id');
+  const res = await runGo(codeBase(stateDir), { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.sealed, 'revoked');
+  assert.equal((await workspaceForOpenRequest(stateDir, 'some-other-open-id'))?.status, 'revoked');
+});
+
+test('a code answer without any opened workspace is held and runs no checks', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir, {}, false, null);
+  const res = await runGo({ ...codeBase(stateDir), checks: ['echo hi'] }, { page, sleep });
+  assert.equal(res.phase, 'uncertain');
+  assert.equal(res.failure_code, 'WORKSPACE_NOT_OPENED');
+  assert.equal(res.checks, null);
+  assert.equal(page.clicks, 1);
+});
+
+test('a failure in the check machinery is recorded and still releases the account', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir);
+  const onSend = page.opts.onSend!;
+  // The first check log path is a directory, so the log cannot be created.
+  page.opts.onSend = async () => {
+    await onSend();
+    await mkdir(path.join(stateDir, 'chatgpt-go', `${sha256('chatgpt-go\0code-1')}.check-0.log`), { recursive: true });
+  };
+  const res = await runGo({ ...codeBase(stateDir), checks: ['echo hi'] }, { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.ok(res.checks_error, 'the machinery failure is recorded');
+  assert.equal(res.checks, null);
+  assert.equal((await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep })).phase, 'cleaned');
+});
+
+test('a background child of a check is killed and cannot edit the checkout later', async t => {
+  const { stateDir } = await fixture(t);
+  const readme = path.join(repoRoot(stateDir), 'README.md');
+  const before = await readFile(readme, 'utf8');
+  const { page } = codePage(stateDir);
+  const res = await runGo({ ...codeBase(stateDir), checks: [`sh -c 'sleep 2; echo late >> README.md' >/dev/null 2>&1 &`] }, { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  await new Promise(r => setTimeout(r, 3_000));
+  assert.equal(await readFile(readme, 'utf8'), before);
+});
+
+test('a resume after a crash between checks does not rerun a finished check', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir);
+  const res = await runGo({ ...codeBase(stateDir), checks: ['echo one >> ran-one.txt', 'echo two >> ran-two.txt'] }, { page, sleep });
+  assert.equal(res.checks?.length, 2);
+  // Model the crash after the first result was saved: the second result and everything after it is gone.
+  const store = await StateStore.open(stateDir);
+  const rel = `chatgpt-go/${sha256('chatgpt-go\0code-1')}`;
+  const m = await store.read<any>(rel, 'chatgpt-go-v1');
+  const { candidate_changed: _c, cleanup: _k, ...rest } = m;
+  await store.write(rel, 'chatgpt-go-v1', { ...rest, phase: 'completed', checks: m.checks.slice(0, 1) });
+  const again = await runGo(codeBase(stateDir), { page: new FakePage(), sleep });
+  assert.equal(again.phase, 'cleaned');
+  assert.equal(again.checks?.length, 2);
+  assert.equal(await readFile(path.join(repoRoot(stateDir), 'ran-one.txt'), 'utf8'), 'one\n');
+  assert.equal(await readFile(path.join(repoRoot(stateDir), 'ran-two.txt'), 'utf8'), 'two\ntwo\n');
+});
+
+test('rerunning a code request with the same base ref resumes instead of conflicting', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir);
+  const first = await runGo({ ...codeBase(stateDir), baseRef: 'HEAD' }, { page, sleep });
+  assert.equal(first.phase, 'cleaned');
+  const again = await runGo({ ...codeBase(stateDir), baseRef: 'HEAD' }, { page: new FakePage(), sleep });
+  assert.deepEqual(again, first);
+  await assert.rejects(runGo({ ...codeBase(stateDir), baseRef: 'HEAD^' }, { page: new FakePage(), sleep }),
+    (e: unknown) => e instanceof GoError && e.code === 'REQUEST_CONFLICT');
 });

@@ -22,8 +22,9 @@ import {
 } from './chatgpt-run.js';
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
+import { activeExecSessions } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
-import { issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
+import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
 import { ReviewShareError } from './review-state.js';
 import { StateStore, acquireLock } from './task-state.js';
@@ -96,6 +97,10 @@ export type GoManifest = {
   sealed?: string;
   checks?: CheckResult[];
   candidate_changed?: boolean;
+  /** Code only: candidate digest taken before the first check. */
+  check_baseline?: string;
+  /** Code only: why the checks could not run or finish; the run still completes. */
+  checks_error?: string;
   /** Where the saved answer came from: the `finish` MCP report, or the page text. */
   output_source?: 'mcp-report' | 'page';
   /** Review only: `closed`, or `warning:<code>` when the shared-review participant could not be closed. */
@@ -129,7 +134,7 @@ export type GoResult = {
   request_id: string; phase: GoPhase; run_id: string | null; run_state: string | null;
   conversation_url: string | null; output_file: string | null; cleanup: string | null; failure_code: string | null;
   outcome: string | null; participant: string | null; output_source: string | null;
-  sealed: string | null; checks: CheckResult[] | null; candidate_changed: boolean | null;
+  sealed: string | null; checks: CheckResult[] | null; candidate_changed: boolean | null; checks_error: string | null;
 };
 
 const requestHash = (requestId: string) => sha256(`chatgpt-go\0${requestId}`);
@@ -156,7 +161,8 @@ function result(m: GoManifest, run?: ChatGptRunRecord): GoResult {
     conversation_url: m.conversation_url ?? null, output_file: m.output_file ?? null,
     cleanup: m.cleanup ?? null, failure_code: m.failure_code ?? null,
     outcome: run?.outcome ?? null, participant: m.participant ?? null, output_source: m.output_source ?? null,
-    sealed: m.sealed ?? null, checks: m.checks ?? null, candidate_changed: m.candidate_changed ?? null
+    sealed: m.sealed ?? null, checks: m.checks ?? null, candidate_changed: m.candidate_changed ?? null,
+    checks_error: m.checks_error ?? null
   };
 }
 
@@ -268,7 +274,7 @@ export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult>
           (options.profile !== undefined && options.profile !== saved.profile) ||
           (options.workspaceRequestId !== undefined &&
             options.workspaceRequestId !== (saved.review?.workspace_request_id ?? saved.workspace_request_id)) ||
-          (options.baseRef !== undefined && options.baseRef !== saved.review?.base_ref) ||
+          (options.baseRef !== undefined && options.baseRef !== (saved.review?.base_ref ?? saved.code?.base_ref)) ||
           (options.headRef !== undefined && options.headRef !== saved.review?.head_ref) ||
           (options.scopePrefix !== undefined && options.scopePrefix !== saved.review?.scope_prefix) ||
           (options.checks !== undefined && JSON.stringify(options.checks) !== JSON.stringify(saved.code?.checks ?? [])) ||
@@ -581,6 +587,12 @@ class Driver {
         return this.hold('WORKSPACE_STALE');
       }
     }
+    if (this.m.kind === 'code' && this.m.grant_id) {
+      // A coding answer without a coding workspace changed nothing; never report it as done.
+      // The grant exists only in the sent text, so a consumed grant proves a fresh workspace.
+      const grant = await grantState({ stateDir: this.stateDir, grantId: this.m.grant_id });
+      if (grant.status !== 'consumed') return this.hold('WORKSPACE_NOT_OPENED');
+    }
     const outputFile = path.join(this.store.dir, `${manifestPath(this.m.request_id)}.output.md`);
     await writeFile(outputFile, answer, { mode: 0o600 });
     const outcome = this.m.kind !== 'review' ? 'completed'
@@ -638,26 +650,49 @@ class Driver {
     }
     let status = 'revoked';
     try {
-      const selection = this.m.workspace_request_id ? await workspaceForOpenRequest(this.stateDir, this.m.workspace_request_id) : null;
-      if (selection) await revokeWorkspace({ stateDir: this.stateDir, workspaceId: selection.workspace_id });
-      else await revokeGrant({ stateDir: this.stateDir, grantId: this.m.grant_id });
+      // The grant names the workspace it actually opened, whatever request ID ChatGPT used.
+      const grant = await grantState({ stateDir: this.stateDir, grantId: this.m.grant_id });
+      if (grant.status === 'open') await revokeGrant({ stateDir: this.stateDir, grantId: this.m.grant_id });
+      else if (grant.consumed_by) await revokeWorkspace({ stateDir: this.stateDir, workspaceId: grant.consumed_by });
     } catch (error) {
       status = `warning:${codeOf(error, 'SEAL_FAILED')}`;
     }
     await this.save({ sealed: status });
   }
 
-  /** Run the requested project checks once, after sealing, and report whether they changed the candidate. */
+  /**
+   * Run the requested project checks after sealing and report whether they changed the
+   * candidate. Each result is saved as it lands, so a crash never reruns a finished check.
+   * A failure here is recorded, never thrown: the run is terminal and must still finish.
+   */
   private async runChecks() {
-    if (this.m.kind !== 'code' || !this.m.code?.checks.length || this.m.checks) return;
-    const root = (await readMultiRepoCatalog(this.stateDir)).repositories[this.m.repository_id]?.root;
-    if (!root) throw new GoError('REPOSITORY_UNAVAILABLE', 'Registered repository is missing.');
-    const before = await candidateDigest(root);
-    const checks: CheckResult[] = [];
-    for (const [i, cmd] of this.m.code.checks.entries()) {
-      checks.push(await runCheck(root, cmd, path.join(this.store.dir, `${manifestPath(this.m.request_id)}.check-${i}.log`)));
+    if (this.m.kind !== 'code' || !this.m.code?.checks.length) return;
+    if (this.m.checks?.length === this.m.code.checks.length || this.m.checks_error) return;
+    try {
+      // Checks against a workspace that may still accept edits would prove nothing.
+      if (this.m.sealed !== 'revoked') throw new GoError('NOT_SEALED', `Workspace is not sealed (${this.m.sealed ?? 'unknown'}); checks skipped.`);
+      const root = (await readMultiRepoCatalog(this.stateDir)).repositories[this.m.repository_id]?.root;
+      if (!root) throw new GoError('REPOSITORY_UNAVAILABLE', 'Registered repository is missing.');
+      if (!this.m.check_baseline && this.m.code.exec) {
+        // A revoked workspace's exec command is cancelled within seconds; never take the
+        // baseline while one still runs.
+        const deadline = Date.now() + 20_000;
+        while ((await activeExecSessions(this.stateDir, this.m.task_id)).length) {
+          if (Date.now() > deadline) throw new GoError('EXEC_STILL_RUNNING', 'An exec command still runs after the seal; checks skipped.');
+          await this.sleep(1_000);
+        }
+      }
+      const before = this.m.check_baseline ?? await candidateDigest(root);
+      if (!this.m.check_baseline) await this.save({ check_baseline: before });
+      const checks = [...(this.m.checks ?? [])];
+      for (let i = checks.length; i < this.m.code.checks.length; i++) {
+        checks.push(await runCheck(root, this.m.code.checks[i], path.join(this.store.dir, `${manifestPath(this.m.request_id)}.check-${i}.log`)));
+        await this.save({ checks });
+      }
+      await this.save({ candidate_changed: (await candidateDigest(root)) !== before });
+    } catch (error) {
+      await this.save({ checks_error: error instanceof Error ? error.message.slice(0, 500) : 'Checks failed.' });
     }
-    await this.save({ checks, candidate_changed: (await candidateDigest(root)) !== before });
   }
 
   /**

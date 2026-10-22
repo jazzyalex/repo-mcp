@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -9,7 +9,7 @@ import { defaultPolicy } from '../src/repo.js';
 import { migrateV1 } from '../src/policy.js';
 import { sha256 } from '../src/errors.js';
 import { startMultiRepoServer } from '../src/multirepo-server.js';
-import { EXEC_OUTPUT_CAP_BYTES, EXEC_PAGE_BYTES } from '../src/exec-tool.js';
+import { EXEC_OUTPUT_CAP_BYTES, EXEC_PAGE_BYTES, activeExecSessions } from '../src/exec-tool.js';
 import { bindRegisteredTask, issueWorkspaceGrant, registerRepository, revokeWorkspace, setRegisteredTaskPhase } from '../src/multirepo-state.js';
 import { StateStore } from '../src/task-state.js';
 
@@ -366,5 +366,120 @@ test('retention keeps at most 20 sessions per task', async () => {
     assert.equal(names.includes(`${ids[22]}.json`), true);
     const gone = await poll(client, token, ids[0]);
     assert.equal(gone.error, true);
+  });
+});
+
+test('a finished session with a missing or short log stops paging', async () => {
+  await withService(async ({ client, token, stateDir }) => {
+    const gone = await exec(client, token, 'log-gone', 'echo hello');
+    assert.equal(gone.data.state, 'exited');
+    await rm(path.join(stateDir, 'exec-logs', 'task', `${gone.data.session_id}.log`));
+    const pollGone = await poll(client, token, gone.data.session_id);
+    assert.equal(pollGone.error, false, String(pollGone.data));
+    assert.equal(pollGone.data.output, '');
+    assert.equal(pollGone.data.has_more, false);
+    const short = await exec(client, token, 'log-short', 'echo abcdef');
+    await truncate(path.join(stateDir, 'exec-logs', 'task', `${short.data.session_id}.log`), 2);
+    const first = await poll(client, token, short.data.session_id);
+    assert.equal(first.data.output, 'ab');
+    assert.equal(first.data.has_more, false);
+    const later = await poll(client, token, short.data.session_id, { cursor: '5' });
+    assert.equal(later.error, false, String(later.data));
+    assert.equal(later.data.has_more, false);
+  });
+});
+
+test('a token split across output flushes of a running command is never shown unredacted', async () => {
+  await withService(async ({ client, token }) => {
+    const head = `ws1.k1.${'a'.repeat(32)}.${'B'.repeat(10)}`;
+    const tail = 'B'.repeat(33);
+    const started = await exec(client, token, 'split-1', `printf 'start ${head}'; sleep 1.5; printf '${tail} end\\n'; sleep 30`, { yield_ms: 800 });
+    assert.equal(started.error, false, String(started.data));
+    assert.equal(started.data.state, 'running');
+    let text = started.data.output as string;
+    let cursor = started.data.cursor as string;
+    const deadline = Date.now() + 10_000;
+    while (!text.includes('end') && Date.now() < deadline) {
+      const next = await poll(client, token, started.data.session_id, { cursor, wait_ms: 1_000 });
+      text += next.data.output;
+      cursor = next.data.cursor;
+    }
+    assert.equal(text, 'start [redacted-token] end\n');
+    await call(client, 'exec_cancel', { workspace_token: token, session_id: started.data.session_id, request_id: 'split-cancel' });
+  });
+});
+
+test('a failed final record write keeps the exit result for this broker', async () => {
+  await withService(async ({ client, token, stateDir }) => {
+    const started = await exec(client, token, 'persist-1', 'sleep 1; echo done', { yield_ms: 300 });
+    assert.equal(started.data.state, 'running');
+    const dir = path.join(stateDir, 'exec-sessions', 'task');
+    await chmod(dir, 0o500);
+    try {
+      const result = await poll(client, token, started.data.session_id, { wait_ms: 5_000 });
+      assert.equal(result.error, false, String(result.data));
+      const finalView = result.data.state === 'running'
+        ? (await poll(client, token, started.data.session_id, { wait_ms: 5_000, cursor: result.data.cursor })).data
+        : result.data;
+      assert.equal(finalView.state, 'exited');
+      assert.equal(finalView.exit_code, 0);
+      assert.match(finalView.audit_warning, /could not be saved/);
+    } finally { await chmod(dir, 0o700); }
+    const again = await poll(client, token, started.data.session_id);
+    assert.equal(again.data.state, 'exited');
+    assert.equal(again.data.output, 'done\n');
+    assert.equal(again.data.output_bytes, 5);
+    const audit = await readFile(path.join(stateDir, 'multirepo-audit.jsonl'), 'utf8');
+    assert.match(audit, /"phase":"record_write_failed"/);
+  });
+});
+
+test('exec_cancel after the shell already exited keeps the clean exit', async () => {
+  await withService(async ({ client, token }) => {
+    // The background sleep ignores SIGTERM and holds the pipes, so the session stays open after exit.
+    const started = await exec(client, token, 'exit-win-1', "trap '' TERM; sleep 5 & echo bye; exit 0", { yield_ms: 800 });
+    assert.equal(started.error, false, String(started.data));
+    assert.equal(started.data.state, 'running');
+    const cancelled = await call(client, 'exec_cancel', { workspace_token: token, session_id: started.data.session_id, request_id: 'exit-win-cancel' });
+    assert.equal(cancelled.error, false, String(cancelled.data));
+    assert.equal(cancelled.data.state, 'exited');
+    assert.equal(cancelled.data.exit_code, 0);
+    assert.equal(cancelled.data.cancel_applied, false);
+  });
+});
+
+test('a transient authorization failure does not cancel a running command', async () => {
+  await withService(async ({ client, token, stateDir }) => {
+    const started = await exec(client, token, 'transient-1', 'sleep 30', { yield_ms: 300 });
+    assert.equal(started.data.state, 'running');
+    const store = await StateStore.open(stateDir);
+    const phase = await store.read<any>('tasks/task/phase.json', 'phase');
+    // Live phase epoch disagrees with the catalog: authorizeWorkspace fails, but not as an invalid workspace.
+    await store.write('tasks/task/phase.json', 'phase', { ...phase, epoch: (phase.epoch ?? 1) + 1 });
+    await new Promise(resolve => setTimeout(resolve, 3_500));
+    await store.write('tasks/task/phase.json', 'phase', phase);
+    const view = await poll(client, token, started.data.session_id);
+    assert.equal(view.error, false, String(view.data));
+    assert.equal(view.data.state, 'running');
+    await call(client, 'exec_cancel', { workspace_token: token, session_id: started.data.session_id, request_id: 'transient-cancel' });
+  });
+});
+
+test('activeExecSessions reports running sessions from disk and ignores dead brokers', async () => {
+  await withService(async ({ client, token, stateDir, workspaceId }) => {
+    assert.deepEqual(await activeExecSessions(stateDir, 'task'), []);
+    const store = await StateStore.open(stateDir);
+    const deadId = 'e'.repeat(32);
+    await store.write(`exec-sessions/task/${deadId}.json`, 'exec-session-v1', {
+      session_id: deadId, workspace_id: workspaceId, task_id: 'task', state: 'running', broker_pid: 999999,
+      broker_instance: 'f'.repeat(32), created_at: new Date(0).toISOString()
+    });
+    const started = await exec(client, token, 'active-1', 'sleep 30', { yield_ms: 300 });
+    const active = await activeExecSessions(stateDir, 'task');
+    assert.deepEqual(active.map(item => item.session_id), [started.data.session_id]);
+    assert.equal(active[0].broker_pid, process.pid);
+    await call(client, 'exec_cancel', { workspace_token: token, session_id: started.data.session_id, request_id: 'active-cancel' });
+    assert.deepEqual(await activeExecSessions(stateDir, 'task'), []);
+    assert.deepEqual(await activeExecSessions(path.join(stateDir, 'missing'), 'task'), []);
   });
 });

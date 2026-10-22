@@ -302,10 +302,18 @@ chatgpt-run go --kind code [--profile code|code-hard] --workspace-request-id WSR
   interrupted setup revokes its old grant before it issues a new one.
 - **Seal:** once the run is terminal (`completed` or `failed-pre-submit`), `go` revokes the
   workspace opened with `WSREQ`, or the grant when no workspace was opened. The result
-  reports `sealed: revoked` or `sealed: warning:<code>`. No edit can land after the answer
-  is saved.
+  reports `sealed: revoked` or `sealed: warning:<code>`. Without `--exec`, no edit can land
+  after the seal. With `--exec`, `go` waits until the task has no running exec session
+  before its check baseline, but a command that escaped its process group (`setsid`) can
+  outlive the seal: `--exec` is owner-level trust. If ChatGPT opened the workspace with
+  another request ID, the seal reports a warning and that workspace stays writable until
+  it expires.
 - **Checks:** after sealing, each `--check` command runs once through `/bin/sh -c` in the
-  checkout, as the owner, with a 15-minute limit. Output goes to owner-only
+  checkout, as the owner, with a 15-minute limit and a scrubbed environment (PATH, HOME,
+  USER, shell, temp dir and locale only; no coordinator tokens), because it runs code
+  ChatGPT may have edited. Each result is saved as it lands, so a crash never reruns a
+  finished check. A failure of the check machinery is recorded as `checks_error` and the
+  run still finishes and releases the account. Output goes to owner-only
   `<manifest>.check-<n>.log` files. The result lists `{cmd, exit_code, timed_out, log,
   tail}` and `candidate_changed`: whether HEAD, the tracked diff or untracked content
   changed while the checks ran.

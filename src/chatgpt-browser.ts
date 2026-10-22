@@ -33,7 +33,9 @@ const PAGE_HELPERS = String.raw`
   const EFFORTS = ${JSON.stringify(EFFORTS)};
   const visible = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-  const text = e => (e.innerText || e.getAttribute('aria-label') || '').trim();
+  // innerText is empty for content the browser skipped rendering (a long menu's lower
+  // items), so fall back to textContent before the accessible label.
+  const text = e => (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
   const norm = t => t.replace(/\s+/g, ' ').trim();
   window.__go = {
     find(name) {
@@ -337,8 +339,20 @@ export class CdpChatGptPage implements ChatGptPage {
 
   async archive() {
     const before = await this.conversationUrl();
-    await this.click(await this.waitFor('more', 5_000));
-    await this.click(await this.waitFor('archiveItem', 5_000));
+    // Like the "+" menu, the "More" menu may not open on a click that lands before the
+    // page is interactive; retry it a few times.
+    let item: { x: number; y: number } | undefined;
+    for (let attempt = 0; attempt < 3 && !item; attempt++) {
+      await this.sleep(attempt === 0 ? 1_000 : 2_500);
+      await this.click(await this.waitFor('more', 5_000));
+      try { item = await this.waitFor('archiveItem', 5_000); }
+      catch (error) {
+        await this.screenshot(`archive-item-${attempt}`);
+        if (attempt === 2) throw error;
+        await this.key('Escape');
+      }
+    }
+    await this.click(item!);
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       if ((await this.conversationUrl()) !== before) return;

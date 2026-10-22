@@ -1,12 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
-import { mkdir, open, rm } from 'node:fs/promises';
+import { mkdir, open, rm, stat } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
-import { authorizeWorkspace, type AuthorizedWorkspace } from './multirepo-state.js';
-import { StateStore } from './task-state.js';
+import { authorizeWorkspace, WorkspaceInvalidError, type AuthorizedWorkspace } from './multirepo-state.js';
+import { StateStore, lockOwnerAlive } from './task-state.js';
 
 // The exec shell for code workspaces (docs/EXEC-TOOL.md). A command runs as the broker
 // user through /bin/sh in the registered checkout, with no sandbox. Each session has a
@@ -25,6 +25,12 @@ const KILL_GRACE_MS = 3_000;
 const CLOSE_FALLBACK_MS = 5_000;
 const WATCH_INTERVAL_MS = 1_000;
 const RECORD_KIND = 'exec-session-v1';
+/** Raw bytes per page leave room for a token that must not be split. */
+const PAGE_SLACK = 256;
+/** Bytes read past the page end so a token that crosses the cut is seen whole. */
+const LOOKAHEAD = 256;
+/** Longest token-like text (ws1/wg1 token is at most 134 chars) held back at a growing end. */
+const HOLD_BYTES = 160;
 
 export type ExecState = 'starting' | 'running' | 'exited' | 'failed' | 'cancelled' | 'timed_out' | 'uncertain';
 const FINISHED: ExecState[] = ['exited', 'failed', 'cancelled', 'timed_out', 'uncertain'];
@@ -75,6 +81,7 @@ type Running = {
   timedOut: boolean;
   spawnFailed: boolean;
   logFailed: boolean;
+  exited: boolean;
   terminating: boolean;
   killTimer?: NodeJS.Timeout;
   timeoutTimer?: NodeJS.Timeout;
@@ -104,6 +111,8 @@ const isFinished = (state: ExecState) => FINISHED.includes(state);
 
 export class ExecManager {
   private readonly running = new Map<string, Running>();
+  /** Final records whose disk write failed; authoritative for this broker's lifetime. */
+  private readonly unsaved = new Map<string, ExecSessionRecord>();
   private readonly taskSerial = new Map<string, Promise<void>>();
   private readonly instance = randomBytes(16).toString('hex');
   private readonly toolchainPath: string;
@@ -155,19 +164,25 @@ export class ExecManager {
     for (const resolve of waiters) resolve();
   }
 
-  private persist(entry: Running) {
+  /** Write the record (one retry). Resolves false when both attempts failed. */
+  private persist(entry: Running): Promise<boolean> {
     const snapshot = { ...entry.record };
-    entry.persistChain = entry.persistChain.then(async () => {
+    const write = async () => {
       const store = await StateStore.open(this.stateDir);
       await store.write(this.recordPath(snapshot.task_id, snapshot.session_id), RECORD_KIND, snapshot);
-    }).catch(() => {});
-    return entry.persistChain;
+    };
+    const result = entry.persistChain.then(() => write().then(() => true, () =>
+      new Promise(resolve => setTimeout(resolve, 100)).then(write).then(() => true, () => false)));
+    entry.persistChain = result.then(() => {});
+    return result;
   }
 
   /** A stored record, with starting/running records left by another broker instance turned into uncertain. */
   private async readRecord(taskId: string, sessionId: string): Promise<ExecSessionRecord | undefined> {
     const live = this.running.get(sessionId);
     if (live) return live.record;
+    const unsaved = this.unsaved.get(sessionId);
+    if (unsaved) return unsaved;
     const store = await StateStore.open(this.stateDir);
     const record = await store.read<ExecSessionRecord>(this.recordPath(taskId, sessionId), RECORD_KIND);
     if (!record || record.session_id !== sessionId || record.task_id !== taskId) return undefined;
@@ -198,6 +213,7 @@ export class ExecManager {
       if (!isFinished(record.state) || this.running.has(record.session_id)) continue;
       await rm(await this.logPath(taskId, record.session_id), { force: true });
       await store.remove(this.recordPath(taskId, record.session_id));
+      this.unsaved.delete(record.session_id);
       count--;
     }
   }
@@ -242,7 +258,7 @@ export class ExecManager {
       const done = new Promise<void>(resolve => { resolveDone = resolve; });
       const entry: Running = {
         record, token, era, authorized, flushed: 0, written: 0, waiters: new Set(), done, resolveDone, finalized: false,
-        persistChain: Promise.resolve(), timedOut: false, spawnFailed: false, logFailed: false, terminating: false, exitCode: null,
+        persistChain: Promise.resolve(), timedOut: false, spawnFailed: false, logFailed: false, exited: false, terminating: false, exitCode: null,
         exitSignal: null, startedMs: performance.now(), watchFailures: 0, watching: false
       };
       const store = await StateStore.open(this.stateDir);
@@ -335,6 +351,7 @@ export class ExecManager {
       if (!child.pid) { entry.spawnFailed = true; void this.finalize(entry, 'spawn_failed'); }
     });
     child.on('exit', (code, signal) => {
+      entry.exited = true;
       entry.exitCode = code;
       entry.exitSignal = signal;
       // Stop any background leftovers of the command; the pipes then close.
@@ -393,7 +410,12 @@ export class ExecManager {
     } catch {
       entry.record = { ...entry.record, audit_warning: 'The command finished, but the completion audit record could not be written.' };
     }
-    await this.persist(entry);
+    if (!await this.persist(entry)) {
+      // Keep the final state in memory so this broker never reports it running or uncertain.
+      entry.record = { ...entry.record, audit_warning: [entry.record.audit_warning, 'The final session record could not be saved; this result is kept only until the broker restarts.'].filter(Boolean).join(' ') };
+      this.unsaved.set(entry.record.session_id, entry.record);
+      await this.audit('exec', entry.era, false, entry.authorized, { phase: 'record_write_failed', session_id: entry.record.session_id, state }).catch(() => {});
+    }
     this.running.delete(entry.record.session_id);
     this.notify(entry);
     entry.resolveDone();
@@ -436,12 +458,19 @@ export class ExecManager {
   async view(authorized: AuthorizedWorkspace, sessionId: string, cursor?: string) {
     const record = await this.owned(authorized.selection.workspace_id, authorized.task.task_id, sessionId);
     const live = this.running.get(sessionId);
-    const available = live ? live.flushed : record.output_bytes;
-    const offset = cursor === undefined ? 0 : Number(cursor);
-    if (!/^(?:0|[1-9][0-9]{0,9})$/.test(cursor ?? '0') || !Number.isSafeInteger(offset) || offset > available) {
+    const finished = !live && isFinished(record.state);
+    const total = live ? live.flushed : record.output_bytes;
+    let offset = cursor === undefined ? 0 : Number(cursor);
+    if (!/^(?:0|[1-9][0-9]{0,9})$/.test(cursor ?? '0') || !Number.isSafeInteger(offset) || offset > total) {
       throw new SafeError('Invalid exec cursor; pass the cursor value a previous exec or exec_poll returned.');
     }
-    const finished = isFinished(record.state);
+    // A finished session can only page through what its log really holds.
+    let available = total;
+    if (finished) {
+      const size = await stat(await this.logPath(record.task_id, record.session_id)).then(info => info.size, () => 0);
+      available = Math.min(total, size);
+      offset = Math.min(offset, available);
+    }
     const page = await this.readPage(record, offset, available, finished);
     const next = offset + page.bytes;
     return {
@@ -452,9 +481,9 @@ export class ExecManager {
       ...(record.signal ? { signal: record.signal } : {}),
       output: page.text,
       cursor: String(next),
-      has_more: next < available || !finished,
-      truncated: record.truncated || (live?.record.truncated ?? false),
-      output_bytes: available,
+      has_more: finished ? next < available : true,
+      truncated: record.truncated,
+      output_bytes: total,
       duration_ms: live ? Math.round(performance.now() - live.startedMs) : record.duration_ms,
       timeout_s: record.timeout_s,
       ...(record.audit_warning ? { audit_warning: record.audit_warning } : {})
@@ -462,36 +491,43 @@ export class ExecManager {
   }
 
   private async readPage(record: ExecSessionRecord, offset: number, available: number, finished: boolean) {
-    const want = Math.min(EXEC_PAGE_BYTES, available - offset);
+    const want = Math.min(EXEC_PAGE_BYTES - PAGE_SLACK, available - offset);
     if (want <= 0) return { text: '', bytes: 0 };
-    let buffer: Buffer;
     const handle = await open(await this.logPath(record.task_id, record.session_id), 'r').catch(() => undefined);
     if (!handle) return { text: '', bytes: 0 };
+    let buffer: Buffer;
     try {
-      buffer = Buffer.alloc(want);
-      const { bytesRead } = await handle.read(buffer, 0, want, offset);
+      buffer = Buffer.alloc(Math.min(available - offset, want + LOOKAHEAD));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
       buffer = buffer.subarray(0, bytesRead);
     } finally { await handle.close(); }
-    let end = buffer.length;
-    const atEnd = offset + end >= available;
-    if (!atEnd) {
-      // Prefer a line break; else do not split a run of token characters, so redaction sees whole tokens.
-      const newline = buffer.lastIndexOf(0x0a);
-      if (newline >= end / 2) end = newline + 1;
-      else {
-        for (let i = end - 1; i >= Math.max(0, end - 512); i--) {
-          if (!TOKEN_CHAR.test(String.fromCharCode(buffer[i]))) { end = i + 1; break; }
-        }
-      }
-    }
-    if (!atEnd || !finished) end = utf8Boundary(buffer, end);
+    // tailKnown: the buffer ends where the output will always end, so nothing can be appended to a token there.
+    const tailKnown = finished && offset + buffer.length >= available;
     const secrets = await this.secrets();
+    const spans = secretSpans(buffer, secrets);
+    let end = Math.min(want, buffer.length);
+    if (end < buffer.length) {
+      const newline = buffer.lastIndexOf(0x0a, end - 1);
+      if (newline >= end / 2) end = newline + 1;
+    }
+    const settle = (cut: number) => {
+      cut = avoidSpans(spans, cut);
+      if (!tailKnown) {
+        // The token-character run at the buffer end may be the first half of a token: hold it back.
+        let runStart = buffer.length;
+        while (runStart > 0 && TOKEN_CHAR.test(String.fromCharCode(buffer[runStart - 1]))) runStart--;
+        const holdFrom = Math.max(runStart, buffer.length - HOLD_BYTES);
+        if (holdFrom < cut) cut = holdFrom;
+      }
+      return cut < buffer.length || !tailKnown ? utf8Boundary(buffer, cut) : cut;
+    };
+    end = settle(end);
     let text = '';
     for (;;) {
       text = redactSecrets(sanitize(new TextDecoder('utf-8').decode(buffer.subarray(0, end))), secrets);
       const over = Buffer.byteLength(text, 'utf8') - EXEC_PAGE_BYTES;
       if (over <= 0 || end <= 1) break;
-      end = utf8Boundary(buffer, Math.max(1, end - over));
+      end = settle(Math.max(1, end - over));
     }
     return { text, bytes: end };
   }
@@ -500,6 +536,9 @@ export class ExecManager {
   async cancel(sessionId: string, reason: string) {
     const entry = this.running.get(sessionId);
     if (!entry) return false;
+    const grace = () => Promise.race([entry.done, new Promise(resolve => setTimeout(resolve, KILL_GRACE_MS + CLOSE_FALLBACK_MS + 1_000).unref())]);
+    // A command that already exited by itself keeps its exit result; only wait for its cleanup.
+    if (entry.exited || entry.finalized) { await grace(); return false; }
     entry.cancelReason ??= reason;
     if (!entry.child) return true;
     this.terminate(entry);
@@ -522,7 +561,8 @@ export class ExecManager {
       authorizeWorkspace(this.stateDir, entry.token, 'exec').then(
         () => { entry.watchFailures = 0; },
         error => {
-          if (!(error instanceof SafeError)) return;
+          // Only a real loss of authority counts; transient read or I/O errors never cancel.
+          if (!(error instanceof WorkspaceInvalidError)) return;
           if (++entry.watchFailures >= 2) void this.cancel(entry.record.session_id, 'workspace_no_longer_valid');
         }
       ).finally(() => { entry.watching = false; });
@@ -534,6 +574,42 @@ export class ExecManager {
     clearInterval(this.watchTimer);
     await Promise.all([...this.running.keys()].map(sessionId => this.cancel(sessionId, 'broker_shutdown')));
   }
+}
+
+/** Byte ranges of whole tokens and secrets in `buffer` (all are ASCII, so latin1 keeps offsets). */
+function secretSpans(buffer: Buffer, secrets: string[]) {
+  const text = buffer.toString('latin1');
+  const spans: [number, number][] = [];
+  for (const match of text.matchAll(TOKEN_PATTERN)) spans.push([match.index!, match.index! + match[0].length]);
+  for (const secret of secrets) {
+    if (secret.length < 20) continue;
+    for (let i = text.indexOf(secret); i >= 0; i = text.indexOf(secret, i + 1)) spans.push([i, i + secret.length]);
+  }
+  return spans;
+}
+
+/** Move a cut out of any span: before it, or after it when the span starts the page. */
+function avoidSpans(spans: [number, number][], cut: number) {
+  for (const [start, stop] of spans) if (start < cut && stop > cut) cut = start > 0 ? start : stop;
+  return cut;
+}
+
+/** Are any exec sessions of `taskId` still starting or running, per the on-disk records? */
+export async function activeExecSessions(stateDir: string, taskId: string) {
+  const store = await StateStore.inspect(stateDir);
+  if (!store) return [];
+  const names = (await store.list(`exec-sessions/${taskId}`)).filter(name => /^[a-f0-9]{32}\.json$/.test(name));
+  const active: { session_id: string; workspace_id: string; state: ExecState; broker_pid: number; created_at: string }[] = [];
+  for (const name of names) {
+    const record = await store.read<ExecSessionRecord>(`exec-sessions/${taskId}/${name}`, RECORD_KIND).catch(() => undefined);
+    if (!record || (record.state !== 'starting' && record.state !== 'running')) continue;
+    // A dead broker cannot be running it (an orphaned process group is not tracked).
+    let alive = true;
+    try { alive = lockOwnerAlive(record.broker_pid); } catch { alive = true; }
+    if (!alive) continue;
+    active.push({ session_id: record.session_id, workspace_id: record.workspace_id, state: record.state, broker_pid: record.broker_pid, created_at: record.created_at });
+  }
+  return active;
 }
 
 /** Largest end <= `end` that does not cut a UTF-8 sequence. */
