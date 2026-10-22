@@ -59,8 +59,10 @@ audit:    [{ at, action, key, reason }]               // last 100 owner releases
   null. Coding exclusion compares `checkout`, not the catalog-local repository ID.
 - `started` is the process start time (`ps -o lstart=`), so a reused PID is not mistaken
   for a live owner.
-- Validation on every read: unique keys, slot and waiter keys disjoint, integer
-  sequence numbers, valid times. Corrupt record: `ACCOUNT_STATE_CORRUPT`, fail closed.
+- Validation on every read: unique keys, slot and waiter keys disjoint, known slot kinds,
+  a checkout on every code slot, owner identity fields, strictly increasing waiter
+  sequence numbers, unique attempt IDs, valid times. Corrupt record:
+  `ACCOUNT_STATE_CORRUPT`, fail closed.
 
 ## 4. Admission
 
@@ -92,9 +94,11 @@ While waiting, `go` prints one stderr line per minute: queue position and slots 
 
 Each run has its own window and its own CDP session, so the answer wait is safe in
 parallel. Steps that activate a tab or send input run under one **setup lease**: the
-lock `chatgpt-go-setup` in the account store, polled every 1 s, recovered from a dead
-owner. After recovering a dead owner's lease, wait 5 s so any command it already sent
-settles. The lease serializes command issuance; it never replays a dead owner's command.
+record `setup-lease` in the account store, owned by PID plus process start time (so a
+reused PID never holds it), polled every 1 s, and removed under the account lock when its
+owner is dead. After recovering a dead owner's lease, wait 5 s so any command it already
+sent settles. The lease serializes command issuance; it never replays a dead owner's
+command. `chatgpt-run probe` takes the same lease.
 
 Lease sections (each acquired and released explicitly, never held during the answer
 wait, checks, or a recursive recovery):
@@ -111,10 +115,11 @@ again. A reached hourly cap does not wait: the request fails `RATE_LIMITED` befo
 tab opens, and the same command resumes later. So no wait sits between selection (120 s window, 10 s observation) and
 reserve.
 
-**Send commit.** After reserve, under the account lock, atomically: own slot present,
+**Send commit.** After reserve, under the task share gate (the gate `task finish` holds):
+the task is still unfinished, then under the account lock, atomically: own slot present,
 latch clear, attempts in the last hour below the effective cap, newest attempt bound at
-least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 60 s}`. Then write
-`send_intent_at` and click once. After the user message is seen, set `confirmed_at`.
+least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 60 s}`, then write
+`send_intent_at` before leaving the share gate, and click once. After the user message is seen, set `confirmed_at`.
 The gap and the hourly count use `confirmed_at` when present, else `bound`. If the
 commit is denied (latch, cap, gap), nothing was clicked: mark the run uncertain, recover
 it as `not-submitted`, finish `failed` with the denial code, release the slot (exit 1).
@@ -143,6 +148,9 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
   unreadable journal), records the reason in `audit`, and removes only that slot.
 - `chatgpt-run account release-slot --key KEY --reason TEXT` removes any slot,
   including a `legacy` one, and records the reason.
+- SIGINT or SIGTERM: the driver frees its slot only when no send intent exists and the
+  journal shows no run or a terminal run; otherwise the slot stays for `--resume`.
+- A waiter or lease owner without a recorded start time is trusted for at most 6 h.
 
 ## 8. Migration from v1
 
@@ -151,8 +159,9 @@ Under the account lock, restartable:
 1. If `account-v2` is missing: read `account` (v1). Create `account-v2` with its sends as
    attempts (`bound = at`, `confirmed_at = at`) and, if `active_request_id` is set and
    not the sentinel, one `legacy` slot with that key.
-2. If `account` (v1) is not the sentinel, overwrite it with
-   `active_request_id: "migrated-to-v2"`. Any 0.3 binary then gets `ACCOUNT_BUSY`.
+2. If `account` (v1) is missing or not the sentinel, write it with
+   `active_request_id: "migrated-to-v2"`, also on a fresh install. Any 0.3 binary then
+   gets `ACCOUNT_BUSY`.
 3. Every v2 access repeats step 2 if needed, so a crash between the writes is repaired.
 
 The owner deploys by stopping old `go` processes first (`account status` shows a legacy
@@ -162,9 +171,11 @@ finish under v2 (same key) or by `account release-slot`.
 ## 9. Task lifecycle
 
 - A `go` manifest is durable before admission. `task finish` (multirepo) refuses with
-  `TASK_IN_USE` while any `go` manifest for the task is non-terminal and either has a
-  run (`run_id`/`pending_run_id`) or its request lock is held by a live process. A run
-  that loses this race fails at prepare or reserve (task not current): nothing is sent.
+  `TASK_IN_USE`, under the task share gate, while any `go` manifest for the task is
+  non-terminal and either has a run (`run_id`/`pending_run_id`) or its request lock is
+  held by a live process. An unreadable or malformed manifest also refuses (fail closed).
+- The send commit rechecks the task under the same gate, so a run that loses the race
+  fails `TASK_FINISHED` before its intent: nothing is sent.
 - Catalog control-lock contention waits up to 30 s (only acquisition is retried; the
   mutation is never replayed). Stale, corrupt and foreign-host locks still fail
   explicitly.

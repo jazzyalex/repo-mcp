@@ -4,7 +4,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SafeError } from './errors.js';
-import { StateStore, acquireLock, lockOwnerAlive, validateLockRecord, type Lock } from './task-state.js';
+import { StateStore, acquireLock, lockOwnerAlive } from './task-state.js';
 
 // Account-wide admission for `chatgpt-run go` (docs/GO-CONCURRENCY-SPEC.md). Every state
 // dir drives the same main-Chrome ChatGPT account, so slots, the send budget, the setup
@@ -110,6 +110,7 @@ type Latch = { code: string; at: string; key?: string; reason?: string; by: 'dri
 type Audit = { at: string; action: string; key: string | null; reason: string };
 export type AccountRecord = { slots: Slot[]; waiting: Waiter[]; next_seq: number; attempts: Attempt[]; latch: Latch | null; audit: Audit[] };
 
+const SLOT_KINDS = new Set<string>(['architecture', 'review', 'code', 'legacy']);
 const empty = (): AccountRecord => ({ slots: [], waiting: [], next_seq: 1, attempts: [], latch: null, audit: [] });
 const iso = (v: unknown) => typeof v === 'string' && Number.isFinite(Date.parse(v));
 const corrupt = (why: string) => new AccountError('ACCOUNT_STATE_CORRUPT', `Corrupt ChatGPT account record (${why}); inspect ${PATH} before continuing.`);
@@ -119,17 +120,27 @@ function validate(raw: unknown): AccountRecord {
   const r = raw as AccountRecord;
   if (!Array.isArray(r.slots) || !Array.isArray(r.waiting) || !Array.isArray(r.attempts) || !Array.isArray(r.audit)) throw corrupt('missing lists');
   if (!Number.isSafeInteger(r.next_seq) || r.next_seq < 1) throw corrupt('next_seq');
+  const str = (v: unknown) => typeof v === 'string';
+  const owner = (o: Owner) => Number.isSafeInteger(o.pid) && o.pid >= 0 && str(o.host) && (o.started === null || str(o.started));
   const keys = new Set<string>();
   for (const s of r.slots) {
-    if (typeof s.key !== 'string' || keys.has(s.key) || !iso(s.since) || !Number.isSafeInteger(s.pid)) throw corrupt('slot');
+    if (!s || !str(s.key) || !s.key || keys.has(s.key) || !iso(s.since) || !owner(s) || !str(s.request_id) || !str(s.state_dir) ||
+        !SLOT_KINDS.has(s.kind) || (s.checkout !== null && !str(s.checkout)) || (s.kind === 'code' && !s.checkout)) throw corrupt('slot');
     keys.add(s.key);
   }
+  let seq = 0;
   for (const w of r.waiting) {
-    if (typeof w.key !== 'string' || keys.has(w.key) || !Number.isSafeInteger(w.seq) || w.seq >= r.next_seq || !iso(w.since)) throw corrupt('waiter');
+    if (!w || !str(w.key) || keys.has(w.key) || !str(w.token) || !w.token || !Number.isSafeInteger(w.seq) || w.seq <= seq ||
+        w.seq >= r.next_seq || !iso(w.since) || !owner(w)) throw corrupt('waiter');
     keys.add(w.key);
+    seq = w.seq;
   }
-  for (const a of r.attempts) if (typeof a.id !== 'string' || !iso(a.at) || !iso(a.bound) || (a.confirmed_at !== undefined && !iso(a.confirmed_at))) throw corrupt('attempt');
-  if (r.latch !== null && (typeof r.latch !== 'object' || typeof r.latch.code !== 'string' || !iso(r.latch.at))) throw corrupt('latch');
+  const ids = new Set<string>();
+  for (const a of r.attempts) {
+    if (!a || !str(a.id) || ids.has(a.id) || !str(a.key) || !iso(a.at) || !iso(a.bound) || (a.confirmed_at !== undefined && !iso(a.confirmed_at))) throw corrupt('attempt');
+    ids.add(a.id);
+  }
+  if (r.latch !== null && (typeof r.latch !== 'object' || !str(r.latch.code) || !iso(r.latch.at) || (r.latch.by !== 'driver' && r.latch.by !== 'owner'))) throw corrupt('latch');
   return r;
 }
 
@@ -149,9 +160,10 @@ async function load(store: StateStore): Promise<AccountRecord> {
     await store.write(PATH, KIND, next);
     current = next;
   }
-  // Fence 0.3 binaries: they only know v1 and now always see an unresolved request.
-  if (v1 && v1.active_request_id !== V1_SENTINEL) {
-    await store.write(V1_PATH, V1_KIND, { active_request_id: V1_SENTINEL, since: new Date().toISOString(), sends: v1.sends ?? [] });
+  // Fence 0.3 binaries, even on a fresh install: they only know v1 and now always see an
+  // unresolved request.
+  if (!v1 || v1.active_request_id !== V1_SENTINEL) {
+    await store.write(V1_PATH, V1_KIND, { active_request_id: V1_SENTINEL, since: new Date().toISOString(), sends: v1?.sends ?? [] });
   }
   return validate(current);
 }
@@ -193,12 +205,17 @@ function processStart(pid: number): string | null {
 
 const self = (): Owner => ({ pid: process.pid, host: os.hostname(), started: processStart(process.pid) });
 
-/** A waiter is live while its process (same PID and start time) runs on this host. */
-function waiterAlive(w: Waiter) {
-  if (w.host !== os.hostname()) return true;
-  if (!lockOwnerAlive(w.pid)) return false;
-  return w.started === null || processStart(w.pid) === w.started;
+/** A process with no recorded start time is trusted for at most this long. */
+const UNKNOWN_START_TRUST_MS = 6 * HOUR_MS;
+
+/** Same PID and same start time on this host; an owner on another host cannot be checked. */
+function ownerAlive(o: Owner, since: string) {
+  if (o.host !== os.hostname()) return true;
+  if (!lockOwnerAlive(o.pid)) return false;
+  if (o.started === null) return Date.now() - Date.parse(since) < UNKNOWN_START_TRUST_MS;
+  return processStart(o.pid) === o.started;
 }
+const waiterAlive = (w: Waiter) => ownerAlive(w, w.since);
 
 // --- admission ---------------------------------------------------------------------------
 
@@ -378,26 +395,39 @@ export async function accountStatus(dir = DEFAULT_ACCOUNT_DIR, now = new Date())
 
 // --- setup lease -------------------------------------------------------------------------
 
+const LEASE_PATH = 'setup-lease';
+const LEASE_KIND = 'chatgpt-go-setup-lease-v1';
+type LeaseRecord = Owner & { token: string; since: string };
+export type SetupLease = { release(): Promise<void> };
+
 /**
- * The setup lease serializes the steps that activate a tab or send input. A dead owner's
- * lease is recovered, then we wait for anything it already sent to settle; nothing it
- * sent is ever replayed.
+ * The setup lease serializes the steps that activate a tab or send input. Its owner is a
+ * PID plus process start time, so a reused PID never holds it. A dead owner's lease is
+ * removed under the account lock, then we wait for anything it already sent to settle;
+ * nothing it sent is ever replayed.
  */
-export async function acquireSetupLease(store: StateStore, sleep: (ms: number) => Promise<void>): Promise<Lock> {
+export async function acquireSetupLease(store: StateStore, sleep: (ms: number) => Promise<void>): Promise<SetupLease> {
+  const record: LeaseRecord = { ...self(), token: randomUUID(), since: new Date().toISOString() };
   while (true) {
-    const existing = await store.read<unknown>('locks/chatgpt-go-setup.json', 'lock').catch(() => undefined);
-    let deadOwner = false;
-    if (existing) {
-      try { const r = validateLockRecord(existing, 'chatgpt-go-setup'); deadOwner = r.hostname === os.hostname() && !lockOwnerAlive(r.pid); }
-      catch { /* acquireLock reports it */ }
+    if (await store.create(LEASE_PATH, LEASE_KIND, record)) {
+      return {
+        release: () => withAccountLock(store, async () => {
+          const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND).catch(() => undefined);
+          if (current?.token === record.token) await store.remove(LEASE_PATH);
+        })
+      };
     }
-    try {
-      const lock = await acquireLock(store, 'chatgpt-go-setup', 'chatgpt-go browser setup', { recoverStale: true });
-      if (deadOwner) await sleep(LEASE_SETTLE_MS);
-      return lock;
-    } catch (error) {
-      if (!(error instanceof Error) || !/live process|recovery is already in progress|claimed by another process|changed during recovery/.test(error.message)) throw error;
-      await sleep(LEASE_POLL_MS);
-    }
+    const recovered = await withAccountLock(store, async () => {
+      const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND);
+      if (!current) return false;
+      if (!Number.isSafeInteger(current.pid) || typeof current.host !== 'string' || typeof current.since !== 'string') {
+        throw new AccountError('ACCOUNT_STATE_CORRUPT', `Corrupt setup lease; inspect ${LEASE_PATH} before continuing.`);
+      }
+      if (ownerAlive(current, current.since)) return false;
+      await store.remove(LEASE_PATH);
+      return true;
+    });
+    if (recovered) await sleep(LEASE_SETTLE_MS);
+    else await sleep(LEASE_POLL_MS);
   }
 }

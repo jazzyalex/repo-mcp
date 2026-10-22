@@ -10,7 +10,7 @@ import { bindRegisteredTask, finishRegisteredTask, registerRepository } from '..
 import { StateStore } from '../src/task-state.js';
 import { GoError, activeGoRequestsForTask, releaseGoAdmission, runGo, type ChatGptPage, type TurnState } from '../src/chatgpt-go.js';
 import {
-  AccountError, accountConfig, accountStatus, admitSlot, clearLatch, releaseSlot, setAccountConfig, setLatch
+  AccountError, accountConfig, accountStatus, acquireSetupLease, admitSlot, clearLatch, releaseSlot, setAccountConfig, setLatch
 } from '../src/go-account.js';
 
 const PROMPT = 'Architecture pass. Use Repo MCP only. Make no edits.\n\nEnd with VERDICT.';
@@ -287,3 +287,75 @@ function fakeTime() {
   let clock = Date.now();
   return { now: () => new Date(clock), sleep: async (ms: number) => { clock += ms; await tick(); } };
 }
+
+// --- review round 1 fixes -------------------------------------------------------------------
+
+test('a task finished after prepare stops the send under the share gate with no click', async t => {
+  const f = await fixture(t);
+  const page = new Page('a', newLog());
+  // Model `task finish` winning the race after reserve: the catalog marks the task done.
+  const finishTask = async (phase: string) => {
+    if (phase !== 'reserved') return;
+    const store = await StateStore.open(f.stateDir);
+    const catalog = await store.read<any>('control/multirepo-catalog.json', 'multirepo-catalog');
+    catalog.tasks.task.completed = true;
+    catalog.revision += 1;
+    await store.write('control/multirepo-catalog.json', 'multirepo-catalog', catalog);
+  };
+  const r = await runGo(req(f, 'a'), { page, sleep, afterPhase: finishTask });
+  assert.equal(r.phase, 'failed');
+  assert.equal(r.failure_code, 'TASK_FINISHED');
+  assert.equal(page.clicks, 0);
+  assert.equal((await accountStatus(f.accountDir)).slots_in_use, 0);
+});
+
+test('a fresh v2 account still fences 0.3 binaries with the v1 sentinel', async t => {
+  const f = await fixture(t);
+  await accountStatus(f.accountDir);
+  const v1 = await (await StateStore.open(f.accountDir)).read<{ active_request_id: string }>('account', 'chatgpt-go-account-v1');
+  assert.equal(v1?.active_request_id, 'migrated-to-v2');
+});
+
+test('an unreadable go manifest makes task finish fail closed', async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.stateDir, 'chatgpt-go', 'f'.repeat(64)), 'not json').catch(async () => {
+    await mkdir(path.join(f.stateDir, 'chatgpt-go'), { recursive: true });
+    await writeFile(path.join(f.stateDir, 'chatgpt-go', 'f'.repeat(64)), 'not json');
+  });
+  await assert.rejects(activeGoRequestsForTask(f.stateDir, 'task'), /TASK_IN_USE/);
+  await assert.rejects(finishRegisteredTask({ stateDir: f.stateDir, taskId: 'task', result: 'abandoned' }), /TASK_IN_USE/);
+});
+
+test('a damaged slot kind fails closed instead of disabling code exclusion', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  await accountStatus(f.accountDir);
+  await store.write('account-v2', 'chatgpt-go-account-v2', {
+    slots: [{ key: 'x', request_id: 'x', state_dir: f.stateDir, kind: 'coed', checkout: '/r', since: new Date().toISOString(), pid: 1, host: os.hostname(), started: null }],
+    waiting: [], next_seq: 1, attempts: [], latch: null, audit: []
+  });
+  await assert.rejects(admitSlot(store, f.accountDir, { key: 'k', requestId: 'k', stateDir: f.stateDir, kind: 'code', checkout: '/r' }, { sleep }),
+    e => code(e, 'ACCOUNT_STATE_CORRUPT'));
+});
+
+test('a setup lease held by a reused PID or a dead process is recovered', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  const since = new Date().toISOString();
+  // Live PID (this process) but another start time: a reused PID, not the owner.
+  await store.write('setup-lease', 'chatgpt-go-setup-lease-v1', { pid: process.pid, host: os.hostname(), started: 'Thu Jan  1 00:00:00 1970', token: 'old', since });
+  const lease = await acquireSetupLease(store, sleep);
+  await lease.release();
+  await store.write('setup-lease', 'chatgpt-go-setup-lease-v1', { pid: 999999, host: os.hostname(), started: null, token: 'dead', since });
+  await (await acquireSetupLease(store, sleep)).release();
+  assert.equal(await store.read('setup-lease', 'chatgpt-go-setup-lease-v1'), undefined);
+});
+
+test('a challenge seen after a setup failure latches the account', async t => {
+  const f = await fixture(t);
+  const page = new Page('a', newLog(), { signal: 'BROWSER_CHALLENGE' });
+  page.attachRepoMcp = async () => { throw new GoError('UI_MISSING:repo-mcp-item'); };
+  const r = await runGo(req(f, 'a'), { page, sleep });
+  assert.equal(r.phase, 'failed');
+  assert.equal((await accountStatus(f.accountDir)).latch?.code, 'BROWSER_CHALLENGE');
+});

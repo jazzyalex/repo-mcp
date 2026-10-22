@@ -24,7 +24,7 @@ import { recordTrustedBrowserObservation } from '../src/model-policy.js';
 import { defaultStateDir } from '../src/task-state.js';
 import { GoError, goStatus, releaseGoAdmission, runGo } from '../src/chatgpt-go.js';
 import { CdpChatGptPage } from '../src/chatgpt-browser.js';
-import { AccountError, DEFAULT_ACCOUNT_DIR, accountConfig, accountStatus, clearLatch, releaseSlot, setAccountConfig, setLatch } from '../src/go-account.js';
+import { AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, accountConfig, accountStatus, clearLatch, releaseSlot, setAccountConfig, setLatch } from '../src/go-account.js';
 import { StateStore } from '../src/task-state.js';
 import { ensureRelay, runRelay } from '../src/cdp-relay.js';
 
@@ -310,7 +310,9 @@ try {
       await ensureRelay();
       print({ relay: 'running' });
     } else if (command === 'probe') {
-      print(await new CdpChatGptPage().probe());
+      // Probe clicks and activates tabs: it takes the same setup lease as go.
+      const lease = await acquireSetupLease(await StateStore.open(DEFAULT_ACCOUNT_DIR), ms => new Promise(r => setTimeout(r, ms)));
+      try { print(await new CdpChatGptPage().probe()); } finally { await lease.release(); }
     } else if (command === 'fail-pre-submit') {
       print(await failChatGptRunBeforeSubmit(need('run'), need('failure-code'), stateDir));
     } else {

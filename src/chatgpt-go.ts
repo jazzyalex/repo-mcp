@@ -26,12 +26,13 @@ import { activeExecSessions } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
-  releaseSlot, setLatch, waitForSendWindow, type SlotRequest
+  releaseSlot, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
 } from './go-account.js';
 import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
 import { ReviewShareError } from './review-state.js';
-import { StateStore, acquireLock, lockOwnerAlive, validateLockRecord, type Lock } from './task-state.js';
+import { StateStore, acquireLock, lockOwnerAlive, validateLockRecord } from './task-state.js';
+import { withTaskShareGate } from './review-state.js';
 
 // One-shot ChatGPT web run driver (docs/GO-DRIVER-SPEC.md). The run journal stays the
 // authority; this module only sequences it and keeps a private manifest for recovery.
@@ -219,8 +220,15 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
   const active: string[] = [];
   for (const name of await store.list('chatgpt-go')) {
     if (!/^[0-9a-f]{64}$/.test(name)) continue;
-    const m = await store.read<GoManifest>(`chatgpt-go/${name}`, GO_KIND).catch(() => undefined);
-    if (!m || m.task_id !== taskId || m.phase === 'cleaned' || m.phase === 'failed') continue;
+    // An unreadable manifest may belong to a running request: fail closed, never skip it.
+    let m: GoManifest | undefined;
+    try { m = await store.read<GoManifest>(`chatgpt-go/${name}`, GO_KIND); }
+    catch (error) { throw new SafeError(`TASK_IN_USE: go manifest ${name} is unreadable (${error instanceof Error ? error.message : 'error'}); inspect it before finishing a task.`); }
+    if (!m) continue;
+    if (typeof m.task_id !== 'string' || typeof m.request_id !== 'string' || typeof m.phase !== 'string') {
+      throw new SafeError(`TASK_IN_USE: go manifest ${name} is corrupt; inspect it before finishing a task.`);
+    }
+    if (m.task_id !== taskId || m.phase === 'cleaned' || m.phase === 'failed') continue;
     let live = false;
     const lock = await store.read<unknown>(`locks/${requestLockKey(m.request_id)}.json`, 'lock').catch(() => undefined);
     if (lock) {
@@ -365,7 +373,7 @@ class Driver {
   private async releaseSlot() { await releaseSlot(this.account, this.key); }
 
   /** The setup lease covers every step that activates a tab or sends input; it is never held while waiting for an answer. */
-  private lease?: Lock;
+  private lease?: SetupLease;
   private async takeLease() { this.lease ??= await acquireSetupLease(this.account, this.sleep); }
   private async dropLease() { const lease = this.lease; this.lease = undefined; await lease?.release().catch(() => {}); }
 
@@ -412,18 +420,37 @@ class Driver {
     return { key: this.key, requestId: this.m.request_id, stateDir: this.store.dir, kind: this.m.kind, checkout };
   }
 
+  /**
+   * A slot means "this request may have an unresolved turn". Without a journal run nothing
+   * was sent, and a terminal run has nothing left to send: only then is the slot freed.
+   */
+  private async releaseIfProvablyUnsent() {
+    if (this.m.send_intent_at) return;
+    const runId = this.m.run_id ?? this.m.pending_run_id;
+    const run = runId ? await chatGptRunStatus(runId, this.stateDir).catch(() => undefined) : undefined;
+    const unreadable = runId && !run && this.m.run_id;
+    if (!unreadable && (!run || run.state === 'completed' || run.state === 'failed-pre-submit')) await this.releaseSlot().catch(() => {});
+  }
+
   async drive(): Promise<GoResult> {
+    // Ctrl-C or a kill while holding a slot: free it when nothing can have been sent.
+    const onSignal = (signal: NodeJS.Signals) => {
+      void (async () => {
+        await this.dropLease();
+        await this.releaseIfProvablyUnsent();
+      })().finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
+    };
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
     try {
       return await this.driveInner();
     } catch (error) {
       await this.dropLease();
-      // A slot means "this request may have an unresolved turn". Without a journal run
-      // nothing was sent, and a terminal run has nothing left to send: free the slot.
-      const runId = this.m.run_id ?? this.m.pending_run_id;
-      const run = runId ? await chatGptRunStatus(runId, this.stateDir).catch(() => undefined) : undefined;
-      const unreadable = runId && !run && this.m.run_id;
-      if (!unreadable && (!run || run.state === 'completed' || run.state === 'failed-pre-submit')) await this.releaseSlot().catch(() => {});
+      await this.releaseIfProvablyUnsent();
       throw asGo(error);
+    } finally {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
     }
   }
 
@@ -485,6 +512,8 @@ class Driver {
       process.stderr.write(`browser setup failed: ${error instanceof Error ? error.message : String(error)}\n`);
       if (error instanceof GoError && error.code === 'BROWSER_CHALLENGE') {
         await setLatch(this.account, this.accountDir, { code: 'BROWSER_CHALLENGE', key: this.key, by: 'driver' }, this.now()).catch(() => {});
+      } else {
+        await this.checkSignal();
       }
       await this.page.closeTab().catch(() => {});
       return this.finish('failed', { failure_code: codeOf(error, 'BROWSER_SETUP_FAILED') });
@@ -546,6 +575,7 @@ class Driver {
       authorized = reserved.submission_authorized;
     } catch (error) {
       process.stderr.write(`model selection failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      await this.checkSignal();
       const run = await this.run();
       if (run.state === 'prepared' || run.state === 'verification-pending') {
         await failChatGptRunBeforeSubmit(run.run_id, 'MODEL_SELECTION_NOT_VERIFIED', this.stateDir, this.now());
@@ -564,11 +594,19 @@ class Driver {
   private async send(prompt: string, observedAt: Date): Promise<GoResult> {
     // The send commit (spec section 5): slot, latch, cap and gap are checked and one
     // attempt is recorded atomically. A denial means nothing was clicked.
-    let attemptId: string;
+    // The commit and the send intent run under the task share gate, the same gate `task
+    // finish` holds: either finish sees this request in use, or this send sees the task done.
     try {
-      if (this.now().getTime() - observedAt.getTime() > OBSERVATION_MAX_AGE_MS) throw new GoError('SELECTION_STALE', 'The effort observation is too old to send on.');
-      attemptId = await commitSend(this.account, this.accountDir, this.key, { maxPerHour: this.options.maxPerHour, now: this.now() });
+      await withTaskShareGate(this.stateDir, this.m.task_id, async () => {
+        if (this.now().getTime() - observedAt.getTime() > OBSERVATION_MAX_AGE_MS) throw new GoError('SELECTION_STALE', 'The effort observation is too old to send on.');
+        const task = (await readMultiRepoCatalog(this.stateDir)).tasks[this.m.task_id];
+        if (!task || task.completed) throw new GoError('TASK_FINISHED', `Task ${this.m.task_id} was finished; nothing was sent.`);
+        const attemptId = await commitSend(this.account, this.accountDir, this.key, { maxPerHour: this.options.maxPerHour, now: this.now() });
+        await this.save({ phase: 'send-intent', send_intent_at: this.now().toISOString(), send_attempt_id: attemptId });
+      }, `go send ${this.m.request_id}`);
     } catch (error) {
+      // An intent that became durable means the click may follow; never treat it as denied.
+      if (this.m.send_intent_at) throw error;
       const code = codeOf(asGo(error), 'SEND_DENIED');
       const run = await this.run();
       await markChatGptRunUncertain(run.run_id, code, this.stateDir, this.now());
@@ -577,7 +615,6 @@ class Driver {
       await this.page.closeTab().catch(() => {});
       return this.finish('failed', { failure_code: code });
     }
-    await this.save({ phase: 'send-intent', send_intent_at: this.now().toISOString(), send_attempt_id: attemptId });
     try { await this.page.clickSend(); }
     catch { return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED'); }
     return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED');
@@ -700,6 +737,7 @@ class Driver {
         await this.takeLease();
         if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) throw new GoError('TAB_GONE');
         await this.trackTarget();
+        if (await this.checkSignal()) throw new GoError('BROWSER_CHALLENGE');
         await this.page.archive();
         await this.page.closeTab();
       } catch (error) {
@@ -869,8 +907,9 @@ class Driver {
       case 'submitted': {
         const prompt = this.requirePrompt();
         await this.takeLease();
-        if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) return this.hold('TAB_GONE');
+        if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) { await this.checkSignal(); return this.hold('TAB_GONE'); }
         await this.trackTarget();
+        await this.checkSignal();
         await this.dropLease();
         if (this.m.phase !== 'submitted') await this.save({ phase: 'submitted' });
         return this.awaitAnswer(prompt);
@@ -883,7 +922,7 @@ class Driver {
   private async reattachAndConfirm(code: string): Promise<GoResult> {
     const prompt = this.requirePrompt();
     await this.takeLease();
-    if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) return this.hold(code);
+    if (!(await this.page.reattach(this.m.target_id, this.m.conversation_url))) { await this.checkSignal(); return this.hold(code); }
     await this.trackTarget();
     await this.checkSignal();
     return this.confirmOrHold(prompt, code);
