@@ -62,7 +62,11 @@ about 2,000 changed lines):
   with the diff, so larger tasks should save more; small tasks save less.
 - A failed attempt before the fix (the "+" menu item not found) cost another 73k with
   no result. Reliability matters as much as the per-run cost.
-- Not yet measured: coding tasks, the manual recipe, and more than one task. 80–90% is
+- First live `go --kind code --exec` run (SECURITY.md version fix): 77,156 coordinator
+  tokens, 3.4 min, one-line diff, ChatGPT used `exec` twice, report via `finish`,
+  workspace sealed, both checks passed. A trivial edit costs about the same fixed
+  overhead, so coding runs pay off only for real-size changes.
+- Not yet measured: a direct baseline for coding tasks, the manual recipe, and more than one task. 80–90% is
   not shown yet.
 
 ## Order of work
