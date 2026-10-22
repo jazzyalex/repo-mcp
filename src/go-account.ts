@@ -315,9 +315,10 @@ export async function waitForSendWindow(store: StateStore, dir: string, options:
  * one attempt. Only after this may the caller write its send intent and click.
  */
 export async function commitSend(store: StateStore, dir: string, key: string, options: { maxPerHour?: number; now: Date }) {
-  const { config } = await accountConfig(dir);
-  const cap = effectiveCap(config, options.maxPerHour);
-  return update(store, account => {
+  return update(store, async account => {
+    // Read the limits under the account lock, so a concurrent config-set cannot race the commit.
+    const { config } = await accountConfig(dir);
+    const cap = effectiveCap(config, options.maxPerHour);
     if (!account.slots.some(s => s.key === key)) throw new AccountError('ADMISSION_LOST', 'Account admission is not held by this request; refusing to send.');
     if (account.latch) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT sends are stopped: ${account.latch.code}.`);
     const t = options.now.getTime();

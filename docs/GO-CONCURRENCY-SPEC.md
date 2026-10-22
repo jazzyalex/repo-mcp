@@ -105,9 +105,10 @@ wait, checks, or a recursive recovery):
 - cleanup: reattach, archive, close tab;
 - every error-path `closeTab`.
 
-**Gap before prepare.** Before taking the lease, wait until the next attempt is allowed
-(gap and cap), then take the lease and check again; if no longer allowed, release and
-wait again. So no wait sits between selection (120 s window, 10 s observation) and
+**Gap before prepare.** Before taking the lease, wait until the gap allows the next
+attempt, then take the lease and check again; if no longer allowed, release and wait
+again. A reached hourly cap does not wait: the request fails `RATE_LIMITED` before any
+tab opens, and the same command resumes later. So no wait sits between selection (120 s window, 10 s observation) and
 reserve.
 
 **Send commit.** After reserve, under the account lock, atomically: own slot present,
