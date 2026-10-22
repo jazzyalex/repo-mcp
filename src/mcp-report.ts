@@ -59,7 +59,7 @@ export async function readMcpReportForRequest(stateDir: string, workspaceRequest
   const report = validReport(await store?.read<McpReport>(reportPath(selection.workspace_id), MCP_REPORT_KIND));
   if (!report || report.workspace_id !== selection.workspace_id || report.repository_id !== selection.repository_id ||
       report.task_id !== selection.task_id) return undefined;
-  return report;
+  return { ...report, workspace_issued_at: selection.issued_at };
 }
 
 function validReport(value: McpReport | undefined) {

@@ -224,14 +224,16 @@ export class CdpChatGptPage implements ChatGptPage {
     await this.helpers();
     if (await this.eval<number>('window.__go.chip()') === 1) return;
     let item: { x: number; y: number } | undefined;
-    for (let attempt = 0; attempt < 2 && !item; attempt++) {
+    // A freshly loaded page can show the "+" tooltip before its click handler is live,
+    // so the menu may not open on the first click; give hydration time and retry.
+    for (let attempt = 0; attempt < 3 && !item; attempt++) {
+      await this.sleep(attempt === 0 ? 1_000 : 2_500);
       await this.click(await this.waitFor('plus'));
       try { item = await this.waitFor('repoMcpItem', 6_000); }
       catch (error) {
         await this.screenshot(`repo-mcp-item-${attempt}`);
-        if (attempt === 1) throw error;
+        if (attempt === 2) throw error;
         await this.key('Escape');
-        await this.sleep(800);
       }
     }
     await this.click(item!);

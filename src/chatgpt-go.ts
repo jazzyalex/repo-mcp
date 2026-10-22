@@ -22,6 +22,7 @@ import {
 } from './chatgpt-run.js';
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
+import { workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
 import { ReviewShareError } from './review-state.js';
 import { StateStore, acquireLock } from './task-state.js';
@@ -264,6 +265,12 @@ export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult>
       }
       const workspaceRequestId = review ? undefined : options.workspaceRequestId;
       if (workspaceRequestId !== undefined) requireNamedWorkspace(workspaceRequestId, prompt);
+      // A request ID that already opened a workspace would bind this run to an older
+      // workspace, its participant and its report.
+      const ws = review?.workspace_request_id ?? workspaceRequestId;
+      if (ws && await workspaceForOpenRequest(options.stateDir, ws)) {
+        throw new GoError('INVALID_REQUEST', `Workspace request ID ${ws} was already used; use a fresh one.`);
+      }
       const promptSha256 = sha256(prompt);
       const digest = goRequestDigest({ repositoryId: options.repositoryId, taskId: options.taskId,
         coordinator: options.coordinator, kind, profile, promptSha256, review, workspaceRequestId });
@@ -500,7 +507,10 @@ class Driver {
     const ws = this.m.review?.workspace_request_id ?? this.m.workspace_request_id;
     if (!ws) return undefined;
     const report = await readMcpReportForRequest(this.stateDir, ws).catch(() => undefined);
-    return report && report.repository_id === this.m.repository_id && report.task_id === this.m.task_id ? report : undefined;
+    // Only a workspace opened after this run's send can carry this run's report.
+    const sentAt = this.m.send_intent_at ? Date.parse(this.m.send_intent_at) : NaN;
+    return report && report.repository_id === this.m.repository_id && report.task_id === this.m.task_id &&
+      Date.parse(report.workspace_issued_at) >= sentAt ? report : undefined;
   }
 
   private async complete(answer: string, reported?: McpReportOutcome): Promise<GoResult> {
@@ -602,9 +612,14 @@ class Driver {
         return this.finish('failed', { failure_code: 'DRIVER_INTERRUPTED' });
       case 'failed-pre-submit':
         return this.finish('failed', { failure_code: this.m.failure_code ?? run.failure_code });
-      case 'completed':
-        await this.ensureOutputFile();
-        return this.cleanup();
+      case 'completed': {
+        // The run is terminal: output repair must never keep the account held.
+        let repair: unknown;
+        await this.ensureOutputFile().catch(error => { repair = error; });
+        const done = await this.cleanup();
+        if (repair) throw repair;
+        return done;
+      }
       case 'submission-reserved':
         if (!this.m.send_intent_at) {
           // The click is ordered after the intent write, so nothing was sent.

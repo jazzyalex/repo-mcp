@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { prepareFixture } from '../src/fixture.js';
@@ -8,6 +8,7 @@ import { migrateV1 } from '../src/policy.js';
 import { defaultPolicy } from '../src/repo.js';
 import { bindRegisteredTask, openWorkspace, registerRepository, rebindRegisteredTask, setRegisteredTaskPhase } from '../src/multirepo-state.js';
 import { git } from './helpers.js';
+import { recordMcpReport } from '../src/mcp-report.js';
 import { StateStore } from '../src/task-state.js';
 import { chatGptRunOutput, chatGptRunStatus } from '../src/chatgpt-run.js';
 import { GoError, goStatus, releaseGoAdmission, reviewVerdict, runGo, type ChatGptPage, type GoPhase, type TurnState } from '../src/chatgpt-go.js';
@@ -417,3 +418,63 @@ test('a review whose workspace was never opened is held, then completes on resum
   assert.equal(done.participant, 'closed');
   assert.equal(page.clicks, 1);
 });
+
+test('a workspace request ID that already opened a workspace is refused for a new request', async t => {
+  const r = await reviewFixture(t);
+  const a = await runGo(reviewBase(r), { page: new FakePage({ answer: 'ok\nVERDICT: SHIP', onSend: openOnSend(r) }), sleep });
+  assert.equal(a.phase, 'cleaned');
+  await assert.rejects(runGo(reviewBase(r, 'rev-2'), { page: new FakePage(), sleep }), invalid);
+  await assert.rejects(goStatus(r.stateDir, 'rev-2'), (e: unknown) => e instanceof GoError && e.code === 'NO_SUCH_REQUEST');
+});
+
+test('review uses the finish report as answer and outcome over the page text', async t => {
+  const r = await reviewFixture(t);
+  const REPORT = '## Review\n\nNo blocking findings.';
+  const onSend = async () => {
+    const opened = await openWorkspace({ stateDir: r.stateDir, repositoryId: 'repo', taskId: 'task', mode: 'review',
+      requestId: WS_ID, baseRef: r.baseRef, headRef: r.headRef });
+    await recordMcpReport(r.stateDir, opened.selection, { outcome: 'ship', summaryMarkdown: REPORT, requestId: 'finish-1' });
+  };
+  const res = await runGo(reviewBase(r), { page: new FakePage({ answer: 'Page text.\nVERDICT: NO-SHIP', onSend }), sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.outcome, 'ship');
+  assert.equal(res.output_source, 'mcp-report');
+  assert.equal(await readFile(res.output_file!, 'utf8'), REPORT);
+  assert.equal(await chatGptRunOutput(res.run_id!, r.stateDir), REPORT);
+});
+
+test('a report from a workspace opened before the send is ignored', async t => {
+  const { stateDir } = await fixture(t);
+  const WS = 'open-go-arch-1';
+  const prompt = `${PROMPT}\nWorkspace request id: ${WS}`;
+  const page = new FakePage();
+  page.pastePrompt = async () => {
+    // The workspace and its report exist before the manifest records a send.
+    const opened = await openWorkspace({ stateDir, repositoryId: 'repo', taskId: 'task', mode: 'inspect', requestId: WS });
+    await recordMcpReport(stateDir, opened.selection, { outcome: 'completed', summaryMarkdown: 'stale report', requestId: 'finish-old' });
+    await new Promise(r => setTimeout(r, 20));
+  };
+  const res = await runGo({ ...base(stateDir), prompt, workspaceRequestId: WS }, { page, sleep });
+  assert.equal(res.phase, 'cleaned');
+  assert.equal(res.output_source, 'page');
+  assert.equal(await readFile(res.output_file!, 'utf8'), ANSWER);
+});
+
+test('failed output repair after journal completion still releases the account', async t => {
+  const { stateDir } = await fixture(t);
+  await assert.rejects(runGo(base(stateDir), { page: new FakePage(), sleep, afterPhase: crashAt('completed') }), /crash at completed/);
+  // Journal is completed; make the output file path unrepairable by turning it into a directory.
+  const outputFile = (await readManifestOutput(stateDir));
+  await rm(outputFile, { force: true });
+  await mkdir(outputFile);
+  await writeFile(path.join(outputFile, 'keep'), 'x');
+  await assert.rejects(runGo(base(stateDir), { page: new FakePage({ sentAlready: true }), sleep }));
+  const other = await runGo(base(stateDir, 'req-2'), { page: new FakePage(), sleep });
+  assert.equal(other.phase, 'cleaned');
+});
+
+async function readManifestOutput(stateDir: string) {
+  const s = await goStatus(stateDir, 'req-1');
+  assert.ok(s.output_file);
+  return s.output_file!;
+}

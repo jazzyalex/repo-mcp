@@ -97,7 +97,7 @@ The action depends on the journal state first, then on the manifest phase.
 | `submitted` | any | Reattach, wait, capture, complete. |
 | `uncertain` | URL known and user message found | `recover submitted`, then continue as `submitted`. |
 | `uncertain` | otherwise | Report `uncertain`, exit 3, and hold admission. |
-| `completed` | any | Check `chatGptRunOutput` against `output_sha256`, rewrite the output file atomically if it is missing or altered, then retry cleanup only. Every rerun of a finished request does the same file check. |
+| `completed` | any | Check `chatGptRunOutput` against `output_sha256`, rewrite the output file atomically if it is missing or altered, then retry cleanup only. Every rerun of a finished request does the same file check. A failed repair is reported after cleanup, so it never keeps the account held. |
 | `failed-pre-submit` | any | Report the terminal failure and release admission. |
 
 A reserve result with `submission_authorized: false` means the run is already
@@ -270,6 +270,10 @@ chatgpt-run go --kind review [--profile review|review-critical] --workspace-requ
   report is stored per workspace (`mcp-reports/<workspace_id>`, kind `mcp-report-v1`),
   and `go` finds it through the request ledger (`workspaceForOpenRequest`). It must name
   the request's repository and task. No run ID passes through ChatGPT.
+- **Freshness:** `go` refuses a new request whose workspace request ID already opened a
+  workspace, and accepts a report only from a workspace opened after the run's
+  `send_intent_at`. An older workspace, participant or report can never attach to a new
+  run.
 - **Immutable:** the first report wins. The same report again returns the same `ack_id`;
   different content or outcome is rejected.
 - **Not a completion signal:** a report does not change the run state. `go` still waits
