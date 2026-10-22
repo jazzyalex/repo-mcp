@@ -23,7 +23,7 @@ can touch, and when it may write. Everything else stays on your machine.
 > **Status: v0.3.0, unreleased `main` after the v0.2.3 tag. Early release, macOS only.**
 > It is tested on the maintainer's Mac (v0.2.3: 577 tests pass, 1 optional skip). A first
 > install on a clean Mac is not yet proven. Linux and Windows are not supported.
-> See [Status and limits](#status-and-limits).
+> See [Status and limits](#status-and-limits). New in 0.3: [What's new](docs/WHATS-NEW-0.3.md).
 
 ## Who is it for
 
@@ -266,7 +266,7 @@ See [SECURITY.md](SECURITY.md) for the threat model and how to report a vulnerab
 - **Platform:** macOS only (launchd). Linux and Windows are not supported yet.
 - **Validated:** build, typecheck and the full test suite on an existing installation;
   a deployed Claude Code to ChatGPT commit-pinned review smoke test; the first live
-  `go --kind code` run (v0.2.3).
+  `go --kind code` run (0.3.0 development).
 - **Go driver:** needs the main Chrome with remote debugging, on macOS only. It is
   sensitive to ChatGPT UI changes. The saving measured so far is about 52% on one task.
 - **Not yet proven:** first install on a clean Mac, new tunnel credentials, and first
@@ -287,6 +287,7 @@ See [SECURITY.md](SECURITY.md) for the threat model and how to report a vulnerab
 
 | Document | Contents |
 | --- | --- |
+| [docs/WHATS-NEW-0.3.md](docs/WHATS-NEW-0.3.md) | What changed in 0.3: `go`, `finish`, `exec` |
 | [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | Architecture, authority model, review flow |
 | [SETUP.md](SETUP.md) | Full installation, tunnel, ChatGPT connection, troubleshooting |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Operator reference: tasks, grants, review workflow, locks, GC, migration |
