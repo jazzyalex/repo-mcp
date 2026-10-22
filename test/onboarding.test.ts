@@ -69,7 +69,8 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(setup, /chatgpt-run.*provider-neutral run journal/is);
   assert.doesNotMatch(setup, /ask Claude.*registered repository\/task IDs/i);
   const workflow = await readFile(path.join(PROJECT_BASE, 'docs/WORKFLOW-SPEC.md'), 'utf8');
-  assert.match(workflow, /Codex and Claude coordinator skills use host-native browser control/i);
+  assert.match(workflow, /coordinator skills use host-native browser control only in the manual fallback/i);
+  assert.match(workflow, /normal path starts `chatgpt-run go`/i);
   assert.match(workflow, /ChatGPT web performs every Repo MCP review and\s+architecture pass/is);
   assert.match(workflow, /Oracle remains a separate.*explicit legacy compatibility/is);
   assert.doesNotMatch(workflow, /browser mode is an optional future transport/i);

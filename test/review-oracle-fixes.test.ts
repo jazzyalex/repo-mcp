@@ -465,7 +465,9 @@ test('single-repository adapter stays eight tools while operator docs describe t
     for (const doc of ['README.md', 'SETUP.md']) {
       const text = await readFile(path.join(process.cwd(), doc), 'utf8');
       assert.doesNotMatch(text, /\bseven tools\b|\bSeven tools\b/, doc);
-      assert.match(text, /\btwelve tools\b|\bTwelve tools\b/i, doc);
+      assert.doesNotMatch(text, /\btwelve tools\b/i, doc);
+      assert.match(text, /\bsixteen tools\b/i, doc);
+      for (const name of ['finish', 'exec', 'exec_poll', 'exec_cancel']) assert.ok(text.includes(name), `${doc} mentions tool ${name}`);
       for (const name of names) assert.ok(text.includes(name), `${doc} mentions repository tool ${name}`);
       for (const name of ['service_info', 'repository_list', 'workspace_open', 'workspace_close']) assert.ok(text.includes(name), `${doc} mentions bootstrap tool ${name}`);
       assert.match(text, /workspace_token/, doc);

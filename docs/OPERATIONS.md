@@ -6,9 +6,9 @@ Repo MCP is a local MCP service for policy-bounded coding and review across mult
 
 The service makes no model inference API calls. Git commit/push, repository registration, policy changes, task lifecycle control, dependency installation, and shell commands stay outside MCP. The one exception is the `exec` shell in code workspaces whose write grant was issued with `--exec` (`docs/EXEC-TOOL.md`).
 
-**Status:** v0.2.3 source targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
+**Status:** v0.3.0 (unreleased; main after the v0.2.3 tag) targets trusted, single-user macOS operation with Python 3.9+, Node 26+, Git, npm, and the official OpenAI tunnel client. Python is required for normal installation and release validation; pytest is optional and used only by the Python fixture runner. Linux and Windows are not certified. Repo MCP reduces accidental scope expansion; it is not a hostile-code sandbox.
 
-**Release validation:** v0.2.3 is a prerelease. The release checkout passed dependency installation, build, typecheck and the complete 578-test suite (577 passed, one optional skip) on an existing Mac installation. First installation on a clean Mac, new tunnel credentials and first client registration remain unproven. See the GitHub release notes for the validation scope.
+**Release validation (v0.2.3, history):** v0.2.3 is a prerelease. The release checkout passed dependency installation, build, typecheck and the complete 578-test suite (577 passed, one optional skip) on an existing Mac installation. First installation on a clean Mac, new tunnel credentials and first client registration remain unproven. See the GitHub release notes for the validation scope. v0.3.0 (the `go` driver, `finish`, `exec`) has no release validation yet.
 
 ## Set up with Codex or Claude
 
@@ -175,7 +175,7 @@ After successful smoke, the operator may finish this disposable task with
 
 ## Production MCP tools
 
-The permanent service exposes twelve tools with fixed schemas.
+The permanent service exposes sixteen tools with fixed schemas: twelve from v0.2 and, since v0.3.0 (unreleased), `finish`, `exec`, `exec_poll` and `exec_cancel`.
 
 Bootstrap tools:
 
@@ -195,6 +195,14 @@ Repository tools:
 - `run_tests`
 - `git_diff`
 
+Report and shell tools (v0.3.0):
+
+- `finish`: ChatGPT delivers its final report once per workspace (review: `ship` or
+  `no-ship`; inspect and code: `completed`; at most 192 KiB; immutable). It changes no
+  file and does not finish the task.
+- `exec`, `exec_poll`, `exec_cancel`: a shell in code workspaces whose write grant was
+  issued with `--exec`. See [EXEC-TOOL.md](EXEC-TOOL.md).
+
 Every repository tool requires a server-issued `workspace_token`. There is no ambient or “current” repository. Old unscoped production calls fail closed after the v0.2 schema refresh.
 
 `workspace_open` accepts only registered `repository_id` and `task_id` values; it never accepts a filesystem root or policy path.
@@ -202,7 +210,7 @@ Every repository tool requires a server-issued `workspace_token`. There is no am
 Modes are:
 
 - `inspect`: read-only.
-- `code`: read/write/approved fixture checks; requires a short-lived, single-use operator write grant.
+- `code`: read/write/approved fixture checks; requires a short-lived, single-use operator write grant. With a grant issued by `--exec`, it also has the `exec` shell tools.
 - `review`: read-only and available only while the task is in review phase.
 
 Issue a coding grant locally:
@@ -210,6 +218,9 @@ Issue a coding grant locally:
 ```sh
 npm run coord -- workspace grant --task agent-sessions-20261005
 ```
+
+Add `--exec` to give the workspace the `exec` shell. exec has no sandbox and runs as you
+(see [SECURITY.md](../SECURITY.md)); use it only for repositories and prompts you trust.
 
 Pass that returned grant only to the intended coding handoff. The model uses it once with `workspace_open`; subsequent repository calls use the returned workspace token.
 
@@ -418,6 +429,127 @@ recovers terminal claim cleanup or an orphan claim whose same-host initializer i
 dead. It preserves every unresolved run. `recover-lock` also accepts a dead recovery
 operation's own replacement lock; live, corrupt, foreign-host, changed-token, and
 unrelated-purpose locks fail closed.
+
+## One-shot ChatGPT runs (`chatgpt-run go`)
+
+Status: v0.3.0, unreleased. The normative driver contract is
+[GO-DRIVER-SPEC.md](GO-DRIVER-SPEC.md). The agent skills start `go`. They do not drive
+the browser by hand. Manual browser control, polling and clipboard capture are fallback
+only (see the manual recipes in this directory).
+
+`go` runs one ChatGPT pass (kinds `architecture`, `review` and `code`) in the owner's
+main, signed-in Chrome, through the CDP relay. It opens its own tab, attaches Repo MCP,
+pastes the prompt with a `Run <hash>` marker line, selects the effort, sends once,
+waits, saves the answer, cleans up and archives the chat. It prints one JSON line.
+Exit code 0 means cleaned. Exit code 3 means the prompt may have been sent: only resume.
+Exit code 1 means failure.
+
+Profiles: `architecture` (Pro), `architecture-xhigh` (Extra High), `review` (Extra High),
+`review-critical` (Pro), `code` (High), `code-hard` (Extra High).
+
+### Prerequisites
+
+- macOS, with Chrome running and signed in to ChatGPT.
+- Remote debugging switched on at `chrome://inspect/#remote-debugging`.
+- A built tree (`npm run build`) and a running broker.
+
+### Relay start and approval
+
+`go` starts the relay when it needs it. You can start it yourself:
+
+```sh
+npm run --silent chatgpt-run -- relay
+```
+
+The relay connects to Chrome and waits up to 5 minutes. Chrome shows an approval prompt.
+Approve it once. The relay then serves any number of `go` runs until Chrome restarts.
+When Chrome restarts, the relay exits and the next `go` starts a new one, which needs
+one new approval. `go` never starts Chrome and never signs in. Without approval it
+fails with `BROWSER_APPROVAL_TIMEOUT`.
+
+### Probe
+
+```sh
+npm run --silent chatgpt-run -- probe
+```
+
+`probe` checks the ChatGPT controls read-only. It never sends. Run it after a ChatGPT
+UI change, and before a long run.
+
+### Run, status, resume, release
+
+```sh
+npm run --silent chatgpt-run -- go --request-id ID --repository REPO --task TASK \
+  --coordinator claude --kind architecture --prompt-file FILE
+npm run --silent chatgpt-run -- go --request-id ID --status
+npm run --silent chatgpt-run -- go --resume --request-id ID
+npm run --silent chatgpt-run -- go --release-admission --request-id ID --reason "TEXT"
+```
+
+- The same `--request-id` with the same inputs resumes. With different inputs it fails
+  with `REQUEST_CONFLICT`. A workspace request ID (`--workspace-request-id`) is single-use.
+- `--status` prints the stored request state without touching the browser.
+- `--resume` never sends again. If a send is unconfirmed, the run stays `uncertain`
+  (exit 3) and holds the account.
+- `--release-admission --reason` is the operator escape for a held account. It refuses
+  while the run is `submitted`. Use it only after you have checked the chat by hand.
+- Review passes use `--kind review` with `--base-ref` and `--head-ref` (full commits) and
+  `--workspace-request-id`. Code passes use `--kind code`, `--check CMD` (repeatable) and
+  `--exec`. `go` issues the single-use write grant itself. It seals (revokes) the
+  workspace when the run ends, then runs the `--check` commands. It never commits.
+
+### Account admission
+
+One unresolved ChatGPT run is allowed per machine. `--max-per-hour` limits sends
+(default 4). A second request gets `ACCOUNT_BUSY`. Too many sends gets `RATE_LIMITED`.
+A crash or timeout does not release the account. Do not bulk-run `go`.
+
+### After a tool change
+
+When a change adds or alters an MCP tool:
+
+1. `npm run build` (the broker runs `dist/`).
+2. `npm run coord -- service start` (reloads the broker; it can interrupt a request).
+3. In ChatGPT, open Settings, Plugins, Repo MCP, and click "Refresh tools". Without this,
+   ChatGPT keeps the old tool list.
+
+### Where state lives
+
+All paths are under the owner state directory (`~/Library/Application Support/repo-mcp`
+by default) unless noted. Everything is owner-only and outside every served checkout.
+
+| State | Location |
+|---|---|
+| Driver manifests, outputs, check logs | `chatgpt-go/` (`<hash>`, `<hash>.output.md`, `<hash>.check-<n>.log`) |
+| Workspace request claims | `chatgpt-go-ws/` |
+| Account admission and send history | `chatgpt-account/account` |
+| Relay socket, `relay.log`, failure screenshots | `relay/` (`cdp.sock`, `relay.log`, `shots/`) |
+| Exec session records and logs | `exec-sessions/<task>/`, `exec-logs/<task>/` |
+| `finish` reports | `mcp-reports/<workspace_id>` |
+| Saved run answers | `chatgpt-run-outputs/` |
+
+### Chat cleanup
+
+`go` archives the ChatGPT conversation when the run is cleaned. If archiving fails, the
+result shows `cleanup: warning:<code>` and the output is kept. A rerun of the same
+request retries the archive. You can also archive the chat by hand in ChatGPT. Archiving
+does not delete the chat.
+
+### Troubleshooting
+
+| Code | Meaning and action |
+|---|---|
+| `BROWSER_UNAVAILABLE` | Remote debugging is off or the endpoint is unreadable. Switch it on in `chrome://inspect/#remote-debugging`. |
+| `BROWSER_APPROVAL_TIMEOUT` | Chrome did not get approval in 5 minutes. Run `relay` again and approve the prompt. |
+| `CHATGPT_SIGNED_OUT` | The page is signed out. Sign in by hand, then run again. |
+| `BROWSER_CHALLENGE` | ChatGPT shows a bot check. Solve it by hand. Do not automate it. |
+| `UI_MISSING:<name>` / `UI_AMBIGUOUS:<name>` / `UI_DISABLED:<name>` | A control was not found, matched more than once, or was disabled. ChatGPT may have changed its UI. Run `probe`. The run failed before sending, so a new request can start. For the Repo MCP menu item and the Archive item, `relay/shots/` holds a failure screenshot. |
+| `ACCOUNT_BUSY` / `RATE_LIMITED` | Another run is active, or the hourly limit is reached. Resume with the same command later. |
+| `REQUEST_BUSY` | Another `go` process holds this request. Wait for it. |
+| `REQUEST_CONFLICT` | The request ID was used with different inputs. Use a new ID. |
+| `SEND_UNCONFIRMED` | The send click may have happened but the message was not seen. The run is `uncertain` (exit 3). Check the chat. Never resend. Resume. |
+| `COMPLETION_UNOBSERVED` | The finished answer was not seen in time. The run is `uncertain`. Resume. |
+| `WORKSPACE_NOT_OPENED` / `WORKSPACE_RECONCILIATION_REQUIRED` / `WORKSPACE_STALE` | ChatGPT did not open a workspace with the request ID, or it opened a stale one. The run is held. Resume, or check the chat. |
 
 ## Release archive
 

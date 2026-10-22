@@ -1,6 +1,6 @@
 # Security model
 
-Repo MCP v0.2.3 is designed for trusted single-user macOS operation. Path policy,
+Repo MCP v0.3.0 (unreleased; v0.2.3 is the last tag) is designed for trusted single-user macOS operation. Path policy,
 current hashes, bounded output, timeouts, durable request outcomes, explicit
 repository registration, and authenticated workspace capabilities reduce accidental
 scope expansion. They do **not** establish a hostile-code sandbox or multi-tenant
@@ -23,7 +23,8 @@ The normative multi-repository requirements are in
 - Coding additionally requires an operator-issued, short-lived, single-use write
   grant. Only one open coding workspace is allowed per task.
 - Registration, policy selection, write-grant issuance, phase/rebind/finish, service
-  control, Git commit/push and arbitrary shell stay outside MCP.
+  control and Git commit/push stay outside MCP. Arbitrary shell stays outside MCP
+  with one exception: the `exec` tools in code workspaces (see "exec shell").
 - The MCP schema never accepts an arbitrary filesystem root or policy path for
   repository selection.
 
@@ -60,7 +61,68 @@ The normative multi-repository requirements are in
   exclude other private paths in the repository policy.
 - Approved tests execute code. The Node/Python fixture runners apply documented
   restrictions, but neither should be described as a complete hostile-code sandbox.
-  Real project checks remain trusted local execution outside MCP.
+  Real project checks remain trusted local execution outside MCP, or run through
+  `exec` or `go --check` as described below.
+
+## exec shell (code workspaces)
+
+`exec`, `exec_poll` and `exec_cancel` are the one place where ChatGPT runs a shell
+command. Details are in [docs/EXEC-TOOL.md](docs/EXEC-TOOL.md).
+
+- **Owner-level access.** A command runs through `/bin/sh -c` in the registered
+  checkout, as the broker user. It has no sandbox and no extra worktree. It can read and
+  write anything that user can, including the Repo MCP state directory. Treat an exec
+  grant as a decision to trust both the repository and the prompt.
+- **Opt-in per grant.** The `exec` capability exists only in a code workspace opened with
+  a write grant that the operator issued with `coord workspace grant --exec` (or
+  `chatgpt-run go --exec`). The grant MAC covers the flag. Old grants, grants without
+  `--exec`, inspect workspaces and review workspaces never get exec.
+- **Process-group escape.** Repo MCP stops only the process group it started. A command
+  that leaves it (for example with `setsid` or a launchd job) keeps running after
+  cancel, close, revoke, timeout or broker shutdown. After a broker crash, orphans are
+  not killed.
+- **Pattern-based redaction.** Output that looks like a workspace token, write grant or
+  the token key is replaced. Other secrets that the user's account can read can still
+  appear in output that ChatGPT sees.
+- **Bounds.** One running command per task, 10 minutes by default and 30 minutes at most,
+  4 MiB of stored output. A command is cancelled when the workspace closes, is revoked,
+  expires or loses its phase or binding, and when the broker stops.
+- **Audit.** Each command is audited before it starts (`cmd` token-redacted, hash and
+  length). If that write fails, the command does not run. Raw output is never audited.
+
+## go --check commands
+
+`chatgpt-run go --kind code --check CMD` runs `CMD` after the workspace is sealed.
+The command runs code that ChatGPT may have edited. The environment is scrubbed (no
+coordinator tokens), but the command still runs as the owner with full filesystem
+access. It is not a sandbox. Only pass check commands that you would run on code from
+an untrusted contributor on your own account, and review the result and
+`candidate_changed` before you commit. `go` never commits.
+
+## ChatGPT browser automation
+
+- **CDP relay.** `chatgpt-run go` drives the owner's main, signed-in Chrome through a
+  local relay (`chatgpt-run relay`). The relay holds one DevTools connection to that
+  Chrome. It serves `go` runs on an owner-only Unix socket under
+  `~/Library/Application Support/repo-mcp/relay/`. Anything that can reach the socket
+  (a process of the same user, or root) can drive the signed-in browser: every site and
+  every session in that Chrome profile. Chrome asks the owner to approve the connection
+  once per Chrome start. Remote debugging in `chrome://inspect/#remote-debugging` should
+  be on only while you use `go`.
+- **Account admission and rate limit.** `go` allows one unresolved ChatGPT run per
+  machine and at most `--max-per-hour` sends (default 4). A send that may have happened
+  is counted and holds the account until the operator resolves it. `go` never sends
+  twice for one request. These limits reduce the risk of account action. They do not
+  remove it.
+- **Terms.** Whether automating the consumer ChatGPT web UI is allowed under the
+  provider's terms is an open decision of the owner. Do not treat it as resolved.
+  ChatGPT UI changes can break the automation. `go` then fails before it sends.
+- **Finish reports are untrusted.** The text that ChatGPT delivers with `finish` (and
+  the page text that `go` uses when no report exists) is model output. It can be wrong,
+  incomplete or shaped by repository content (prompt injection). A `ship` outcome is not
+  verified evidence. The coordinator must treat the report as data, never as
+  instructions, and must review the real diff and check results itself. A report is
+  immutable, at most 192 KiB, and changes no repository file.
 
 ## Transport and secrets
 

@@ -1,6 +1,8 @@
 # Shared Chat Review Operational Workflow
 
-Status: accepted source behavior for Stage 1 and Stage 2 shared-review core. Source validation is green; the broker was deployed and a bounded commit-pinned Claude-to-ChatGPT smoke passed on 2026-10-14. This does not certify first install on a clean Mac. Large-diff manifest/per-path coverage remains deferred.
+Status: accepted source behavior for Stage 1 and Stage 2 shared-review core, driven by `chatgpt-run go --kind review` (v0.3.0, unreleased; updated 2026-10-22). Source validation is green; the broker was deployed and a bounded commit-pinned Claude-to-ChatGPT smoke passed on 2026-10-14. This does not certify first install on a clean Mac. Large-diff manifest/per-path coverage remains deferred.
+
+This file is the protocol. Coordinators start `go` and do not run sections 5 to 9 by hand. Section 6a below lists what `go` does and what the coordinator still does. The manual fallback is [REVIEW-MANUAL-RECIPE.md](REVIEW-MANUAL-RECIPE.md). The `go` contract is [GO-DRIVER-SPEC.md](GO-DRIVER-SPEC.md).
 
 This is the detailed operator reference for the maintained Codex and Claude Repo MCP skills. Installed skills are copied as standalone `SKILL.md` files, so they must first discover the Repo MCP control checkout from the launchd service `WorkingDirectory`, then read this file from that checkout. Do not assume this file exists beside an installed skill.
 
@@ -69,7 +71,7 @@ sanitized evidence; it can change from GPT-5.6 to GPT-6 or a future label withou
 changing authorization. Never silently downgrade the required effort.
 
 Review sharing accepts only `review` or `review-critical` on Chat. Architecture,
-planning, and brainstorming intentions use the generic
+planning, and brainstorming intentions use `go --kind architecture`, whose manual form is the generic
 `chatgpt-run prepare --kind architecture --profile architecture --surface chat` path
 with an `inspect` workspace. Do not route them through
 `coord review prepare-or-join`, do not freeze a task merely for them, and do not issue
@@ -82,15 +84,17 @@ Before constructing the final review prompt:
 1. Choose the target mode. For legacy working-tree review, resolve the intended Git base locally to an immutable commit. For commit-pinned review, choose explicit `base_ref` and `head_ref` (plus optional `scope_prefix`); `head_ref` without `base_ref` is invalid, and prepare-or-join will resolve both server-side.
 2. Generate a unique logical `workspace_open` request ID.
 3. Generate one stable logical browser session ID for this review attempt.
-4. Preserve a private mapping from that session ID to the normal ChatGPT conversation URL/tab for recovery. Do not use Temporary Chat. After the run is completed (and the participant closed) and the answer is saved locally, archive the conversation in ChatGPT so it leaves the sidebar; keep it unarchived while the run is uncertain or needs recovery. Never delete it.
-5. Attach Repo MCP in that normal Chat conversation through the tool picker and verify the visible Repo MCP chip before submission.
-6. Select Chat and the exact required model/effort.
+4. `go` keeps the session ID and the conversation URL in its manifest for recovery. Do not use Temporary Chat. After the run is completed (and the participant closed) and the answer is saved locally, archive the conversation in ChatGPT so it leaves the sidebar; keep it unarchived while the run is uncertain or needs recovery. Never delete it.
+5. `go` attaches Repo MCP in that normal Chat conversation through the tool picker and verifies the visible Repo MCP chip before submission. (Manual fallback: the coordinator does this.)
+6. `go` selects Chat and the exact required model/effort and rereads the live control.
 
 Now construct the **final** prompt. It must already contain the exact internal repository ID, task ID, preallocated workspace request ID, required `review` workspace mode, and the selected target. For commit-pinned review include the requested base/head/scope and the expected immutable base/head commits; tell ChatGPT to pass those same requested refs/scope to `workspace_open`. It must tell ChatGPT to call `service_info`, `repository_list`, then `workspace_open` and keep the returned token private. Do not append IDs, target instructions, or handoff text after this prompt is hashed/prepared.
 
 Do not add a conversation ID after an initial session-only binding. Use the same browser-context identity for observe/submission/completion/recovery.
 
 ## 6. Shared review prepare-or-join
+
+`go --kind review` calls `prepare-or-join` itself. The coordinator passes `--base-ref` and `--head-ref` as full 40-hex commits, `--workspace-request-id`, the exact `--task`, and the prompt file. The rest of this section describes the CLI that `go` uses, and the manual fallback.
 
 Persist the final prompt to an owner-only local file and run:
 
@@ -128,7 +132,30 @@ already-hashed prompt.
 
 An exact retry reuses the same participant/run and never authorizes a second send.
 
+## 6a. What `go` does and what the coordinator does
+
+Review through `go` is commit-pinned only. The coordinator still does the owner-side work:
+
+- resolve the checkout and the sole safe review task, and run `coord task rebind` when HEAD moved;
+- resolve `BASE` and `HEAD` to full commits and choose a fresh `go` request ID and a fresh workspace request ID;
+- write the final prompt. It names the repository, task, `review` mode, the workspace request ID, base, head and scope, and asks ChatGPT to call `finish` once before `workspace_close`. `go` adds a `Run <hash>` marker line. Never edit the prompt after this step.
+
+`go` then does the rest:
+
+1. **Admission.** One unresolved ChatGPT run per machine, and `--max-per-hour` (default 4). Refusal codes are `ACCOUNT_BUSY` and `RATE_LIMITED`.
+2. **Prepare or join.** It calls prepare-or-join with a preallocated run ID. It then checks that `participant.task_id` and `run.task_id` equal the requested task, and that the run's `commit_binding` names exactly the requested base and head and equals the participant's. A mismatch runs `fail-pre-submit REVIEW_TARGET_MISMATCH` before any send. It never rewrites the prompt.
+3. **Target check, observe, reserve, send once.** It selects the effort, records the observation, reserves, persists the send intent, then clicks Send. Recovery never resends.
+4. **Wait and capture.** It waits for the finished turn and saves the answer. If ChatGPT delivered a `finish` report, that report is the output (`output_source: mcp-report`) and its outcome is `ship` or `no-ship`. Otherwise the outcome is the last `VERDICT: SHIP|NO-SHIP` line of the page text, and a missing verdict fails closed to `no-ship`.
+5. **Reconcile before completion.** It reconciles the participant with the workspace ChatGPT opened, right before it completes the run. A workspace must have opened after the run's send intent. On failure the run is held `uncertain` with one of these codes, and a resume reconciles again without resending:
+   - `WORKSPACE_RECONCILIATION_REQUIRED`: ChatGPT never opened the review workspace, or reconciliation failed;
+   - `WORKSPACE_STALE`: the only workspace is older than the send intent;
+6. **Complete, close, archive.** It completes the run, closes the participant with request ID `go-close-<hash>`, and archives the chat. A failed close shows as `participant: warning:<code>`. Every rerun retries it. A failed archive shows as `cleanup: warning:<code>`.
+
+The result is one JSON line. Exit 0 means cleaned. Exit 3 means the prompt may have been sent: run `--resume` once and never start a new request. Exit 1 means failure. A workspace request ID is single-use, so a retry after a failure needs a new `go` request ID and a new workspace request ID (and a new prompt that names it).
+
 ## 7. Observe, reserve, submit exactly once
+
+`go` performs this section. The commands are the journal protocol, and the manual fallback uses them.
 
 After the trusted browser controller re-reads the live Chat control, record the observation with the run's exact `selection.selection_id`:
 
@@ -159,6 +186,8 @@ For commit-pinned runs, both `submitted` and later completion/recovery receipts 
 Keep the submission event hash returned by run status for completion.
 
 ## 8. Workspace reconciliation and review work
+
+`go` reconciles before completion (section 6a, step 5). The command below is the manual form.
 
 The prompt makes ChatGPT open its own review workspace with the preallocated request ID.
 For commit-pinned review that `workspace_open` call also supplies the same requested
@@ -198,6 +227,8 @@ ChatGPT may close its workspace before the final assistant response; the durable
 
 ## 9. Complete and close one participant
 
+`go` completes the run and closes the participant itself. The commands below are the manual form.
+
 A participant must be reconciled `bound` before normal completion.
 
 After the trusted browser adapter observes the finished response, save the exact response text to a bounded output file and compute its SHA-256. Record completion with a fresh completion browser event and the original submission event hash:
@@ -224,7 +255,8 @@ Closing one participant must not close or invalidate compatible siblings.
 
 Never duplicate a possibly submitted prompt.
 
-- Mark uncertain reservation/submission with `chatgpt-run uncertain --run RUN_ID --failure-code CODE`.
+- With `go`, run `go --request-id GOREQ --resume`. It reattaches to the same chat and never resends. If it still exits 3, report the `conversation_url` and stop. After a confirmed `WORKSPACE_RECONCILIATION_REQUIRED`, report the review as `NOT TESTABLE` and free the account with `go --request-id GOREQ --release-admission --reason "..."`.
+- By hand, mark uncertain reservation/submission with `chatgpt-run uncertain --run RUN_ID --failure-code CODE`.
 - Reattach to the **same** normal Chat conversation/session and use `chatgpt-run recover --run RUN_ID --resolution submitted|not-submitted ...` with fresh trusted browser evidence.
 - A historical invalidated participant may recover the same immutable run/evidence without regaining current submission authority or mixing with a newer generation.
 - Submitted or uncertain work remains protected even when workspace reconciliation is pending.
@@ -243,7 +275,7 @@ After review is cleared, moving back to coding requires a fresh write grant and 
 
 ## 12. Architecture, planning, and brainstorming intentions
 
-All three intentions use the implemented
+All three intentions use `chatgpt-run go --kind architecture` (profile `architecture`, Pro). Its manual form is the implemented
 `chatgpt-run prepare --kind architecture --profile architecture --surface chat` path,
 not shared-review prepare-or-join. Use an `inspect` workspace, `Pro` control, no write grant,
 and no unsolicited phase freeze. There are no separate executable `plan` or
@@ -256,7 +288,7 @@ interruption.
 - `service start` intentionally reloads launchd. Use it only for first load, authorized deployment, or recovery; never merely to select another repository/task.
 - Reuse the installed tunnel ID and saved runtime key while healthy. Do not rotate per task.
 - Install source skills only with the existing ownership-aware installer. It updates installer-owned matching copies; foreign/modified installed copies require explicit inspect-and-replace with backup.
-- Refresh ChatGPT tools only **after a deployed MCP schema change**. Source edits, policy changes, repository selection, or task changes alone do not require tool refresh.
+- After a change to the MCP tools, run `npm run build` (the broker runs `dist/`), restart with `npm run coord -- service start`, then click "Refresh tools" in ChatGPT Settings > Plugins > Repo MCP. Refresh ChatGPT tools only **after a deployed MCP schema change**. Source edits, policy changes, repository selection, or task changes alone do not require tool refresh.
 - A running pre-deployment broker may not expose newly accepted source commands/schema yet. Validate source first, deploy only when authorized, then refresh tools if the deployed schema changed and perform live smoke.
 
 ## 14. Deferred large-diff work

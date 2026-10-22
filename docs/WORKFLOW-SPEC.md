@@ -1,8 +1,8 @@
 # ChatGPT local coding workflow
 
-Status: current operational overlay plus historical workflow/design context; updated 2026-10-14.
+Status: current operational overlay plus historical workflow/design context; updated 2026-10-22 for the `go` run driver (v0.3.0, unreleased).
 
-**Current contract:** [MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md) is normative for the permanent broker and [SHARED-REVIEW-WORKFLOW.md](SHARED-REVIEW-WORKFLOW.md) is the executable Codex/Claude browser handoff. The accepted source includes explicit workspace authority, durable ChatGPT run/model evidence, target-only review fingerprinting, shared review generations/participants, authoritative workspace reconciliation, lifecycle protection, and recovery/GC evidence preservation. The running broker/dist may still be pre-deployment until an authorized deployment/live smoke.
+**Current contract:** [MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md) is normative for the permanent broker and [SHARED-REVIEW-WORKFLOW.md](SHARED-REVIEW-WORKFLOW.md) is the review protocol that `chatgpt-run go` runs. [GO-DRIVER-SPEC.md](GO-DRIVER-SPEC.md) is the contract for `go`. Coordinators start `go`. Host-native browser control and manual polling are fallback only (see `docs/*-MANUAL-RECIPE.md`). The accepted source includes explicit workspace authority, durable ChatGPT run/model evidence, target-only review fingerprinting, shared review generations/participants, authoritative workspace reconciliation, lifecycle protection, and recovery/GC evidence preservation. The running broker/dist may still be pre-deployment until an authorized deployment/live smoke.
 
 The single-active/sequential workflow later in this file records the v0.1 pilot and older future-design context; follow it only where it does not conflict with the current contracts above. Large-diff manifest/per-path review coverage, asynchronous real-project check jobs/evidence, and sandbox hardening remain deferred.
 
@@ -10,11 +10,13 @@ The single-active/sequential workflow later in this file records the v0.1 pilot 
 
 ## Current operating procedure: ChatGPT owns code and review
 
-Codex coordinates coding execution, local checks, Git, and browser control without replacing the requested ChatGPT semantic review. Claude may coordinate the same Chat coding, review and architecture flows; ChatGPT still performs every repository read and write.
+Codex coordinates coding execution, local checks, Git, and the start of each `go` run without replacing the requested ChatGPT semantic review. Claude may coordinate the same Chat coding, review and architecture flows; ChatGPT still performs every repository read and write.
 
 “ChatGPT review through Repo MCP” names two independent facts: ChatGPT web Chat is the
 execution surface, and Repo MCP is the repository evidence source. A Codex subagent,
 Claude-native review, Work, Oracle, or another backend is not an equivalent fallback.
+
+The steps below are the protocol. `chatgpt-run go` performs the browser, journal and participant steps (see "Starting a pass with `go`"). A coordinator does them by hand only in a manual fallback recipe.
 
 1. Resolve the user's exact Git root and root instructions, then discover the installed Repo MCP control checkout from launchd `WorkingDirectory`. Resolve/register only that authorized checkout. Do not ask the user for repository/task/policy/token/request/session IDs.
 2. For coding, preserve one unfinished task and one coding owner/workspace. ChatGPT performs semantic edits through Repo MCP; Codex runs the prescribed local checks and records actual command/status/test inventory. Close the coding workspace and durably complete/reconcile its run before any explicit owner transition to review.
@@ -38,9 +40,25 @@ Review prompt template (construct fully before shared preparation/hashing):
 
 > Use only Repo MCP, read-only. First call service_info and repository_list, then open REPOSITORY_ID / TASK_ID in review mode using the exact preallocated WORKSPACE_REQUEST_ID and keep the returned token private. Verify repo_info, ROOT, BRANCH, HEAD, task/policy identity, and the exact immutable BASE_COMMIT. Read the complete root instructions and every required bounded git_diff page using BASE_COMMIT plus needed surrounding files. Supplied CHECK_RESULTS were executed by the coordinator. Review correctness, edge cases and regression quality; distinguish confirmed defects from hypotheses. Report actionable file/line findings, exact validation limits and SHIP/NO-SHIP/NOT TESTABLE. Do not edit or approve incomplete evidence.
 
+### Starting a pass with `go`
+
+Steps 5 to 9 above and the coding steps are the protocol. The normal path does not make the coordinator perform them by hand. The coordinator resolves the checkout and task, rebinds a stale review task, writes the final prompt, and starts one command:
+
+- `npm run chatgpt-run -- go --kind architecture` (profile `architecture`, Pro, `inspect` workspace),
+- `go --kind review` (commit-pinned only; `review` is Extra High, `review-critical` is Pro),
+- `go --kind code` (`code` is High, `code-hard` is Extra High).
+
+`go` drives the owner's main signed-in Chrome through a local CDP relay. It attaches Repo MCP, pastes the prompt with a `Run <hash>` marker, selects and verifies the effort, observes and reserves the run in the journal, sends once, waits in code, saves the answer, completes the run and archives the chat. The send intent is persisted before the click, and recovery never resends. One unresolved ChatGPT run is allowed per machine, and `--max-per-hour` (default 4) limits sends. Exit 0 means cleaned, exit 3 means the prompt may have been sent (only `--resume`), and exit 1 means failure.
+
+- **Architecture and review:** `go` prepares the run (review: prepare-or-join), checks that the bound task and commits equal the requested ones, reconciles the participant before it completes the run, and closes the participant. Hold codes such as `WORKSPACE_RECONCILIATION_REQUIRED` and `WORKSPACE_STALE` (review), and `WORKSPACE_NOT_OPENED` (code), leave the run `uncertain` instead of faking a result.
+- **Final report:** ChatGPT calls `finish` once per workspace (review: `ship` or `no-ship`; inspect and code: `completed`). `go` uses it as the output (`output_source: mcp-report`) and falls back to the page text. It is not a completion signal.
+- **Code:** `go` issues the single-use write grant itself and never puts it in a prompt file. `--exec` lets that grant enable the `exec`, `exec_poll` and `exec_cancel` tools. After the run ends, `go` revokes the workspace (seal) and runs each `--check CMD` with a scrubbed environment. The result has `checks`, `candidate_changed` and `sealed`. `go` never commits. The coordinator reviews the answer and the checks, then commits and pushes.
+
+The manual recipes ([ARCHITECT-MANUAL-RECIPE.md](ARCHITECT-MANUAL-RECIPE.md), [REVIEW-MANUAL-RECIPE.md](REVIEW-MANUAL-RECIPE.md), [CODING-MANUAL-RECIPE.md](CODING-MANUAL-RECIPE.md)) apply only when `go` cannot run and the last request is `cleaned` or `failed`. Never use them after exit 3.
+
 ## Outcome and decisions
 
-ChatGPT performs implementation and semantic code review using Repo MCP and, where useful, connected remote read context. Codex or Claude coordinates coding/write authority, local checks, browser handoff, and authorized Git operations, and either may coordinate Chat review/architecture. The durable shared-review handoff is implemented in accepted source through the review coordinator plus the existing `chatgpt-run` journal. Compatible parallel reviews are supported on one target generation with distinct participants/runs/workspaces/results; parallel coding still requires separate registered worktrees and coding owners. Large-diff manifest/per-path review coverage remains deferred.
+ChatGPT performs implementation and semantic code review using Repo MCP and, where useful, connected remote read context. Codex or Claude coordinates coding/write authority, local checks, the `go` run, and authorized Git operations, and either may coordinate Chat review/architecture. The durable shared-review handoff is implemented in accepted source through the review coordinator plus the existing `chatgpt-run` journal. Compatible parallel reviews are supported on one target generation with distinct participants/runs/workspaces/results; parallel coding still requires separate registered worktrees and coding owners. Large-diff manifest/per-path review coverage remains deferred.
 
 Use an existing checkout or a linked Git worktree. Neither a clone nor a worktree is mandatory. Prefer an existing checkout for a small task with exclusive ownership; prefer a linked worktree when the main checkout is busy or contains unrelated changes. Worktrees isolate working files and indexes but share Git metadata and are not security sandboxes.
 
@@ -53,8 +71,9 @@ A browser ChatGPT conversation can reach local MCP through the existing private 
 | Participant | Responsibility |
 | --- | --- |
 | User | Task scope, repository choice, authorization for external actions |
-| Codex coordinator | Checkout/task/policy ownership, coding grants, local checks, browser handoffs, evidence capture, Git and deployment actions |
-| Claude coordinator | Chat review/architecture preparation, coding grants for runs it coordinates, local checks and browser handoff |
+| Codex coordinator | Checkout/task/policy ownership, final prompts, starting `go`, local checks, evidence capture, Git and deployment actions |
+| Claude coordinator | Chat review/architecture preparation, final prompts, starting `go`, local checks and Git for runs it coordinates |
+| `chatgpt-run go` | Drives the main Chrome over a CDP relay, records the run journal, sends once, saves the answer or `finish` report, issues the code write grant, seals and runs checks |
 | ChatGPT coding conversation | Inspect actual source, implement and add tests through Repo MCP; do not invent local check results |
 | ChatGPT review/architecture conversation | Read-only semantic review/architecture through Repo MCP with exact bounded evidence and verified model/profile |
 | Local MCP | Repository discovery, bounded reads/search/diffs, scoped edits, approved fixture checks, durable workspace/review/run authority |
@@ -66,18 +85,18 @@ Review independence is procedural rather than cryptographic. Coding and review c
 
 Git writes remain with the local coordinator (Codex or Claude), never with ChatGPT through MCP. A remote-writing workflow requires separate explicit authorization and local synchronization before editing resumes. Never allow concurrent local and remote writers on the task branch.
 
-The Codex and Claude coordinator skills use host-native browser control plus Repo MCP's
+The Codex and Claude coordinator skills use host-native browser control only in the manual fallback recipes. Their normal path starts `chatgpt-run go`, which drives the browser in code and uses Repo MCP's
 provider-neutral `chatgpt-run` journal. ChatGPT web performs every Repo MCP review and
 architecture pass using the Chat surface; Codex or Claude coordinates coding/write access. A run uses a stable
-normal-Chat session from the start, an operator-selected conversation with Repo MCP
+normal-Chat session from the start, a new conversation opened by `go` with Repo MCP
 attached and visible, exact live model/profile evidence, durable reservation immediately
 before one submission, and recovery of the same run/conversation after interruption.
 Temporary Chat is not a recovery surface. After a run completes and its answer is
-saved locally, the coordinator archives (never deletes) the conversation so it leaves
+saved locally, `go` archives (never deletes) the conversation so it leaves
 the ChatGPT sidebar. Shared review/architecture never silently
 falls back to Work, Oracle, or a host-model semantic review. Oracle remains a separate
 explicit legacy compatibility command only when the user specifically requests Oracle;
-it is not part of this workflow.
+it is not part of this workflow. Automating the consumer ChatGPT web page may conflict with its terms. That legal question is the owner's open decision. `go` runs on macOS only and needs the main Chrome with remote debugging on; a ChatGPT page change can fail a run before send (`UI_*` codes).
 
 ## Task identity and ownership
 
@@ -169,8 +188,10 @@ The current workflow replaces the pilot's manual review handoff with the durable
 
 ## Scope excluded from current accepted source
 
-Automatic worktree creation/cleanup, MCP commit/push tools, arbitrary shell, guaranteed hostile-code isolation, automatic browser/account setup, universal OS certification, and subscription-limit claims remain out of scope. Also deferred are asynchronous MCP real-project check jobs/evidence, shared job storage, macOS sandbox profiles, and the large-diff manifest/per-path review feature. Shared review handoff itself is implemented; do not list it as deferred.
+Automatic worktree creation/cleanup, MCP commit/push tools, unrestricted shell (the owner-gated `exec` tools run unsandboxed commands in a code workspace and are owner-level trust, not isolation), guaranteed hostile-code isolation, automatic browser/account setup, universal OS certification, and subscription-limit claims remain out of scope. Also deferred are asynchronous MCP real-project check jobs/evidence, shared job storage, macOS sandbox profiles, and the large-diff manifest/per-path review feature. Shared review handoff itself is implemented; do not list it as deferred.
 
-Host-native browser control must use a normal signed-in ChatGPT conversation with Repo MCP attached through the client tool picker and a visible chip before submission. The Repo MCP service itself does not create a Chat conversation or attach the plugin, and Temporary Chat is not a recovery surface.
+Browser control, whether by `go` or by a manual recipe, must use a normal signed-in ChatGPT conversation with Repo MCP attached through the client tool picker and a visible chip before submission. The Repo MCP service itself does not create a Chat conversation or attach the plugin, and Temporary Chat is not a recovery surface.
+
+After a change to the MCP tools, run `npm run build`, restart with `npm run coord -- service start`, and click "Refresh tools" in ChatGPT Settings > Plugins > Repo MCP. Otherwise ChatGPT keeps the old tool list.
 
 Official transport reference: [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels). Connector operations remain capability-checked in the actual conversation rather than inferred from a product name.

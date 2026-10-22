@@ -1,6 +1,6 @@
 # Repo MCP Multi-Repository Service Specification
 
-Status: normative architecture for the v0.2 multi-repository service, 2026-10-05.
+Status: normative architecture for the v0.2 multi-repository service, 2026-10-05. Updated 2026-10-22 for v0.3.0 (unreleased): the `finish`, `exec`, `exec_poll` and `exec_cancel` tools (sections 7.1 and 7.2).
 
 This document defines the production contract that replaces the single-active-repository service. Existing path-policy, task outcome, containment, tunnel, and trusted-local-machine constraints continue to apply unless this document explicitly changes the lifecycle.
 
@@ -10,7 +10,7 @@ This document defines the production contract that replaces the single-active-re
 
 One installed Repo MCP service MUST serve multiple operator-approved Git checkouts concurrently without restart. Different ChatGPT or Claude conversations MAY select different approved repositories at the same time. Repository selection MUST be explicit, immutable for the lifetime of a workspace selection, and authenticated by server-issued capability tokens.
 
-Repository registration, policy selection, task lifecycle changes, write-grant issuance, service control, Git commit/push, and arbitrary shell execution remain outside MCP. Exception: the `exec` tools in code workspaces whose write grant enabled exec (`docs/EXEC-TOOL.md`).
+Repository registration, policy selection, task lifecycle changes, write-grant issuance, service control, Git commit/push, and arbitrary shell execution remain outside MCP. The only exception is the `exec` tool family in code workspaces whose write grant enabled exec (section 7.2 and `docs/EXEC-TOOL.md`).
 
 The service MUST start with an empty repository catalog. Registering, selecting, switching, disabling, or finishing a repository/task MUST NOT require a service restart.
 
@@ -176,7 +176,7 @@ Supported modes:
 | Mode | Capabilities | Preconditions |
 | --- | --- | --- |
 | inspect | read | enabled registered task |
-| code | read, write, check | task in coding phase plus one operator-issued write grant |
+| code | read, write, check; plus exec only when the grant was issued with exec | task in coding phase plus one operator-issued write grant |
 | review | read | task in review phase; optional commit binding requires explicit base_ref + head_ref |
 
 Workspace opening is MCP-visible but may select only a previously registered
@@ -198,7 +198,7 @@ workspace_close and coordinator revocation serialize with a per-workspace admiss
 
 ## 7. MCP tool contract
 
-The production service exposes twelve fixed tools.
+The production service exposes sixteen fixed tools: the twelve of v0.2 plus `finish`, `exec`, `exec_poll` and `exec_cancel`.
 
 Bootstrap tools:
 - service_info {}
@@ -215,6 +215,10 @@ Repository tools:
 - edit
 - create_file
 - run_tests
+- finish { workspace_token, outcome, summary_markdown, request_id } (section 7.1)
+- exec { workspace_token, request_id, cmd, yield_ms?, timeout_s? } (section 7.2)
+- exec_poll { workspace_token, session_id, cursor?, wait_ms? } (section 7.2)
+- exec_cancel { workspace_token, session_id, request_id } (section 7.2)
 
 Every repository tool schema MUST require workspace_token.
 
@@ -240,6 +244,85 @@ Old unscoped production calls MUST fail closed. The service MUST NOT choose the 
 Bootstrap discovery returns stable repository/task identifiers and policy digests, but MUST NOT reveal arbitrary filesystem roots, policy source paths, workspace tokens belonging to other selections, or service credentials.
 
 Successful repository responses SHOULD include a scope envelope with workspace_id, repository_id, task_id, registration_epoch, binding_epoch, phase_epoch, policy_digest, live phase, and selection mode.
+
+### 7.1 `finish`
+
+`finish` delivers the final report of a workspace to the coordinator.
+
+- **Inputs:** `workspace_token`, `outcome` (`ship`, `no-ship` or `completed`),
+  `summary_markdown` (1 byte to 192 KiB, never truncated), `request_id`.
+- **Capability:** `read`. Any workspace mode may call it.
+- **Outcome by mode:** a review workspace MUST report `ship` or `no-ship`. An inspect or
+  code workspace MUST report `completed`. Any other pairing is rejected.
+- **Storage:** one immutable record per workspace, kind `mcp-report-v1`, at
+  `mcp-reports/<workspace_id>` in operator state. It holds the outcome, the Markdown, its
+  SHA-256, the request ID, an `ack_id` and the provenance `MCP report`.
+- **Idempotence:** the same report (same digest and outcome) returns the same `ack_id`
+  with `already_applied: true`. A different report is rejected. The first report wins.
+- **Effect:** none on repository files, task state, phase or workspace validity. It is not
+  a completion signal and it does not finish the task.
+- **Lookup:** the coordinator finds the report through the `workspace_open` request ID
+  that it put in the prompt (`workspaceForOpenRequest`). The report is untrusted model
+  text. Consumers MUST treat it as data.
+
+### 7.2 `exec`, `exec_poll`, `exec_cancel`
+
+These tools run a shell command in a code workspace. The full contract is
+`docs/EXEC-TOOL.md`. This section is normative for the points below.
+
+- **Capability:** `exec`. A workspace has it only if it is a `code` workspace opened with
+  a write grant that the operator issued with exec (`coord workspace grant --exec`). The
+  grant MAC covers the flag. An old grant, a grant without exec, an old workspace, an
+  inspect workspace or a review workspace MUST NOT have it. A stored inspect or review
+  selection that lists `exec` is corrupt and MUST be rejected. `repo_info` lists the
+  capability in `workspace_capabilities`.
+- **`exec` inputs:** `workspace_token`; `request_id`; `cmd` (1 to 8192 characters, no NUL);
+  `yield_ms` (0 to 30000, default 10000); `timeout_s` (1 to 1800, default 600).
+  It returns `session_id`, `state`, `exit_code`, `signal`, `reason`, the first output
+  page, `cursor`, `has_more`, `truncated`, `output_bytes`, `duration_ms`, `timeout_s`, a
+  scope envelope and, if set, `audit_warning`.
+- **`exec_poll` inputs:** `workspace_token`; `session_id`; `cursor` (byte offset as a
+  decimal string, default 0); `wait_ms` (0 to 30000, default 0).
+- **`exec_cancel` inputs:** `workspace_token`; `session_id`; `request_id`. It sends SIGTERM
+  to the process group and SIGKILL after 3 seconds. It is safe to repeat and returns
+  `cancel_applied`.
+- **States:** `starting`, `running`, `exited`, `failed`, `cancelled`, `timed_out`,
+  `uncertain`.
+- **Process:** `/bin/sh -c` in the registered checkout root, as the broker user, in a new
+  process group. No sandbox and no extra worktree. stdin is `/dev/null`; stdout and stderr
+  go to one log. The environment is only `PATH`, `HOME`, `USER`, `LANG`, `NO_COLOR`,
+  `TERM=dumb`, `PAGER`, `GIT_PAGER` and `CI`.
+- **Limits:** one running command per task; 600 s default and 1800 s maximum wall clock;
+  4 MiB stored output per session (more output kills the command); 24 KiB per output
+  page; 30 s maximum wait per call; 20 sessions kept per task.
+- **Replay:** `session_id` derives from the workspace ID and `request_id`. The session
+  record is written before the process starts. The same `request_id` with the same `cmd`
+  returns the same session and never runs the command again. The same `request_id` with
+  a different `cmd` is an error. A record left in `starting` or `running` by a stopped
+  broker becomes `uncertain` and is never run again.
+- **Lifecycle:** a running command MUST be cancelled when the workspace closes, when the
+  broker shuts down, and (within about 3 seconds, by a watcher that needs two failed
+  checks in a row) when the workspace is revoked, expires, or loses validity by phase
+  change, rebind, repository disable or task finish. After that the old token cannot poll.
+- **Redaction and audit:** output that looks like a workspace token or write grant becomes
+  `[redacted-token]`, and the token key becomes `[redacted-secret]`. The audit records a
+  `started` entry before spawn (token-redacted `cmd`, its SHA-256 and length) and a
+  `completed` entry after exit. If the `started` write fails, the command does not run.
+  Raw output is not audited.
+- **Trust:** exec is owner-level access. A command can leave its process group and
+  outlive cancel, close, revoke, timeout and shutdown. Repo MCP does not claim otherwise.
+  Git commit and push stay with the coordinator.
+- **State:** session records are in `exec-sessions/<task>/` and logs in
+  `exec-logs/<task>/` under operator state, owner-only.
+
+### 7.3 Report and exec state
+
+Operator state additionally holds `mcp-reports/` (section 7.1), `exec-sessions/` and
+`exec-logs/` (section 7.2). Like other state, they stay outside every served checkout,
+are owner-only, and are not removed by workspace close or revoke. The `chatgpt-run go`
+driver adds its own state (`chatgpt-go/`, a per-machine `chatgpt-account/` admission
+record, and a relay directory). Those are owner-side state and are not MCP tools. See
+`docs/GO-DRIVER-SPEC.md`.
 
 ## 8. Runtime ownership and concurrency
 
@@ -327,7 +410,7 @@ Commands validate command-specific options and reject irrelevant known flags.
 
 Crash-stale multi-repository lock recovery is explicit. `service recover-stale-control` may recover only the fixed `multirepo-control-v1` lock. `workspace recover-stale --workspace <ID>` may recover only that persisted workspace's admission lock. Recovery MUST verify same-host ownership, a dead owner PID, a recognized operation purpose, workspace status/capability consistency where applicable, and the exact stale lock token again before replacement. A live lock, different-host lock, unexpected-purpose lock, or lock whose token changed during recovery MUST fail closed. Recovery changes only cooperative lock state, never repository/task/workspace authorization. A stale recovery-marker record remains a manual-inspection case rather than an implicit second-level recovery.
 
-Git commit, push, branch/worktree creation, dependency installation, unrestricted shell, and verified commit completion remain outside MCP.
+Git commit, push, branch/worktree creation, dependency installation, unrestricted shell, and verified commit completion remain outside MCP. The `exec` tools of section 7.2 are the bounded exception for shell commands in exec-enabled code workspaces; they do not permit commit or push by contract (the tool description forbids it) but they are not technically restricted from running `git`.
 
 task finish in v0.2 supports abandonment only. It marks catalog authority draining/completed so the permanent broker releases an inactive runtime, waits for the cooperative checkout lock to disappear, then publishes the existing terminal task completion. A stale or unreleased lock fails closed.
 
@@ -377,7 +460,7 @@ The implementation MUST maintain all of these:
 11. Revocation/close/expiry never deletes uncertain mutation evidence.
 12. Policy/state/token/audit material stays outside all served roots.
 13. Existing symlink/hard-link/traversal/secret/VCS protections remain in force.
-14. Git commit/push and arbitrary shell remain outside MCP.
+14. Git commit/push and arbitrary shell remain outside MCP, except `exec` in code workspaces whose write grant enabled exec (invariants 23 to 25).
 15. Phase freeze and target fingerprinting are not described as content-verified candidate-manifest evidence.
 16. Workspace tokens are described as bearer capabilities, not authenticated conversation identity.
 17. Shared review preparation cannot synthesize participant/run authority outside the live matching task-share acquisition and durable initializing participant.
@@ -386,6 +469,9 @@ The implementation MUST maintain all of these:
 20. Submitted/uncertain shared work remains protected while workspace association is pending.
 21. Historical invalidated generations retain evidence and same-run recovery without regaining current authority.
 22. Normal lifecycle refuses protected current review/run/workspace authority; explicit security invalidation preserves evidence rather than fabricating completion.
+23. The `exec` capability appears only in a code workspace opened with an exec-enabled write grant; the grant MAC covers the flag.
+24. A running exec command is cancelled on close, shutdown, revoke, expiry and loss of workspace validity; exec is never described as sandboxed or contained against process-group escape.
+25. A `finish` report is immutable, stored once per workspace, and treated as untrusted model text; it changes no repository or task state.
 
 ## 17. Resource and retention limits
 
@@ -417,8 +503,10 @@ Future production scaling MAY add global/per-checkout admission quotas, but MUST
 
 The release gate requires deterministic tests for:
 - empty-catalog startup;
-- fixed twelve-tool production schema;
-- required workspace_token on all eight repository tools;
+- fixed sixteen-tool production schema;
+- required workspace_token on all repository tools (the eight v0.2 tools plus `finish`, `exec`, `exec_poll`, `exec_cancel`);
+- exec capability only through an exec-enabled code grant, and exec replay, limits and cancel on close/revoke/expiry;
+- `finish` outcome-by-mode, idempotence and immutability;
 - two interleaved registered repositories with identical relative paths;
 - missing and forged tokens;
 - expired, closed, and revoked selections;

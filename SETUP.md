@@ -1,6 +1,6 @@
 # Setup and operation
 
-Repo MCP v0.2.3 uses one permanent multi-repository broker for trusted single-user
+Repo MCP v0.3.0 (unreleased `main` after the v0.2.3 tag) uses one permanent multi-repository broker for trusted single-user
 macOS operation. Normal installation requires Python 3.9+, Node 26+, Git at /usr/bin/git,
 npm, and the official OpenAI tunnel client. Install a supported Python on PATH before
 onboarding; `python3 scripts/check-prerequisites.py` checks normal dependencies without
@@ -35,8 +35,10 @@ details internal. Asking `Use Repo MCP to review this repository` is a complete 
 
 The agent may still need the user for an account-bound action: creating the private
 OpenAI tunnel/runtime credential, or connecting/refreshing the developer-mode app in the
-signed-in ChatGPT UI when browser control is unavailable. Runtime credentials must be
-entered through the hidden local prompt, never in chat.
+signed-in ChatGPT UI. Runtime credentials must be entered through the hidden local
+prompt, never in chat. For review, architecture and coding runs, the agent starts
+`chatgpt-run go`, which drives your main Chrome. That path needs the one-time browser
+setup in [section 5](#5-let-an-agent-drive-chatgpt-with-go).
 
 ## 1. Install, migrate, and configure
 
@@ -196,11 +198,16 @@ A workspace token is a bearer capability, not cryptographic proof of one ChatGPT
 conversation. Do not put tokens into source, logs, prompts intended for another
 conversation, or release artifacts.
 
-The fixed production tool set is twelve tools:
+The fixed production tool set is sixteen tools:
 
 - bootstrap: `service_info`, `repository_list`, `workspace_open`, `workspace_close`;
 - repository: `repo_info`, `list_files`, `search`, `read`, `edit`,
-  `create_file`, `run_tests`, `git_diff`.
+  `create_file`, `run_tests`, `git_diff`;
+- report: `finish` delivers the final report once per workspace (review: ship or
+  no-ship; inspect and code: completed; immutable; 192 KiB at most). It is not a
+  completion signal;
+- shell: `exec`, `exec_poll`, `exec_cancel`. They work only in `code` workspaces whose
+  write grant was issued with `--exec`. See [docs/EXEC-TOOL.md](docs/EXEC-TOOL.md).
 
 Every repository tool requires `workspace_token`. Old unscoped production calls
 fail closed after the v0.2 schema refresh.
@@ -544,9 +551,9 @@ Create or retain the developer-mode MCP app using the private tunnel. Never expo
 the loopback HTTP port directly to a public network.
 
 After deploying the v0.2 schema, refresh tools in the plugin settings and start a
-compatible chat. Expect twelve tools: four bootstrap tools plus the eight repository
-tools documented above. All eight repository tool schemas require
-`workspace_token`.
+compatible chat. Expect sixteen tools: four bootstrap tools, the eight repository
+tools, `finish` and the three `exec` tools documented above. The repository tool
+schemas require `workspace_token`.
 
 End-to-end verification sequence:
 
@@ -563,8 +570,8 @@ capability.
 ### Review execution-surface contract
 
 Repo MCP supplies repository tools to ChatGPT web. Codex and Claude are supported local
-coordinators: they prepare repository authority and control the browser, while ChatGPT
-performs the semantic work. A Codex subagent or Claude process that reads and judges the
+coordinators: they prepare repository authority and start `chatgpt-run go`, which
+controls the browser, while ChatGPT performs the semantic work. A Codex subagent or Claude process that reads and judges the
 code itself is outside the Repo MCP review/architecture contract and must never be
 reported as a Repo MCP ChatGPT review.
 
@@ -597,8 +604,9 @@ review mode, request ID, and the requested base/head/scope plus expected resolve
 for commit-pinned work before it is hashed/prepared. Do not late-add a conversation ID or
 any handoff text after preparation.
 
-The executable sequence is documented in
-`docs/SHARED-REVIEW-WORKFLOW.md`: prepare-or-join -> persist exact nested
+`chatgpt-run go` (section 5) runs this sequence in code. The manual sequence below is
+the fallback when `go` cannot run. It is documented in
+`docs/SHARED-REVIEW-WORKFLOW.md` and `docs/REVIEW-MANUAL-RECIPE.md`: prepare-or-join -> persist exact nested
 `prepared.run` -> observe -> reserve -> one send only when authorized -> record
 submitted -> reconcile by task+participant from the authoritative `workspace_open`
 ledger -> trusted completion -> close that participant. Uncertain work recovers the same
@@ -947,6 +955,64 @@ authority, or other protected work exists, the skill reports that concrete block
 rather than freezing/rebinding it. Coding grants, task phase, service control, commits
 and pushes remain separate operator/coordinator actions.
 
+## 5. Let an agent drive ChatGPT with `go`
+
+`npm run chatgpt-run -- go` is the normal way to run a ChatGPT architecture, review
+(commit-pinned only) or coding pass. The coordinator agent starts one command. `go` opens
+its own tab in your main, signed-in Chrome, attaches Repo MCP, sends the prompt once, waits,
+saves the answer and cleans up. Nobody pastes anything. The full contract is in
+[docs/GO-DRIVER-SPEC.md](docs/GO-DRIVER-SPEC.md).
+
+One-time setup:
+
+1. Keep your main Chrome running and signed in to ChatGPT. `go` never starts Chrome and
+   never signs in.
+2. Open `chrome://inspect/#remote-debugging` in that Chrome and switch remote debugging on.
+3. Run a read-only check. The first run starts `chatgpt-run relay`. Chrome then asks you
+   to approve the connection. Approve it. Chrome asks again once per Chrome start. If you
+   do not approve within 5 minutes, `go` fails with `BROWSER_APPROVAL_TIMEOUT`.
+
+```sh
+npm run --silent chatgpt-run -- probe
+```
+
+`probe` only reads the ChatGPT page and changes nothing. Run it again after a ChatGPT UI
+change. When the selectors no longer match, `go` fails before it sends (`UI_*` codes).
+
+For coding runs you can allow ChatGPT to run builds and tests itself. Issue the write
+grant with exec, or let `go --exec` do it:
+
+```sh
+npm run --silent coord -- workspace grant --task TASK_ID --exec
+```
+
+`exec` runs `/bin/sh -c` in the checkout as you, with no sandbox. Grant it only for
+repositories and prompts you trust. Without `--exec`, ChatGPT has no shell.
+`go --kind code` issues its own single-use grant. Pass `--check CMD` (repeatable) to run
+your tests after the workspace is sealed.
+
+The skills build the command for you. A coordinator starts `go` in the background and
+reads the one-line JSON result. Exit 0 means cleaned. Exit 3 means the prompt may have been
+sent: run `go --resume` once and never start a new request. Exit 1 means failed.
+`go --status` shows the run state. `go --release-admission --reason TEXT` frees a stuck
+run slot. The account allows one unresolved run per machine and four sends per hour by
+default (`--max-per-hour`).
+
+**After any change to an MCP tool**, ChatGPT keeps its old tool list until you refresh it:
+
+1. `npm run build` (the broker runs `dist/`).
+2. `npm run coord -- service start`.
+3. In ChatGPT, open Settings > Plugins > Repo MCP and click "Refresh tools". Start a new
+   chat.
+
+Manual browser control (host-native browser tools, polling and clipboard capture) is a
+fallback only. See `docs/REVIEW-MANUAL-RECIPE.md`, `docs/ARCHITECT-MANUAL-RECIPE.md` and
+`docs/CODING-MANUAL-RECIPE.md`.
+
+Measured saving: in one review, coordinator tokens were 68,576 through `go` and 141,710
+directly. That is about 52% less. It is a floor from one task, and the two runs did
+not have equal review depth. A saving of 80 to 90% is not shown.
+
 ## Local state maintenance
 
 Preview garbage collection first; the default is read-only:
@@ -978,6 +1044,9 @@ runtime-record or retained job-log store to delete.
 | 403 / access_denied | Check organization membership and Tunnels Read + Use. |
 | Local ready but remote_unverified | Do not assume ChatGPT works; check tunnel freshness and call service_info from the actual client. |
 | Old eight-tool schema / workspace_token missing | Refresh plugin tools after deploying v0.2 and start a compatible chat. |
+| `exec` or `finish` missing in ChatGPT | Run `npm run build`, `npm run coord -- service start`, then "Refresh tools" in ChatGPT Settings > Plugins. |
+| `go` fails with `BROWSER_UNAVAILABLE`, `BROWSER_APPROVAL_TIMEOUT` or `CHATGPT_SIGNED_OUT` | Start the main Chrome, switch on remote debugging, approve the relay prompt, sign in to ChatGPT. Run `chatgpt-run probe`. |
+| `go` fails with `UI_MISSING` / `UI_AMBIGUOUS` | ChatGPT UI changed. Nothing was sent. Run `chatgpt-run probe` and report the selector. |
 | Wrong repository | Stop before edits, call repository_list, and open the intended registered repository/task; do not restart the service. |
 | Workspace stale | Open a new workspace; phase/rebind/registration changes intentionally invalidate old tokens. |
 | Unknown suite | Only operator-configured fixture suites are supported. No arbitrary shell fallback. |
@@ -994,7 +1063,7 @@ it does not replace a fresh dependency installation and full supported-platform 
 clean supported environment before publication; this document does not claim that a
 particular working tree has already passed that release gate.
 
-The v0.2.3 prerelease passed dependency installation, build, typecheck and the complete 578-test suite (577 passed, one optional skip) in the release checkout on an existing Mac. Earlier v0.2 validation also covered isolated installer tests, current-install no-op replay, and a deployed Claude-to-ChatGPT commit-pinned smoke. It has not passed first installation on a clean Mac, new tunnel/key setup, or first client registration. Those remain required evidence before claiming clean-machine certification. The existing service may continue reporting an older version until an intentional upgrade reload; release publication alone does not restart it.
+The v0.2.3 prerelease (history; `main` is now v0.3.0 and has not had a release gate) passed dependency installation, build, typecheck and the complete 578-test suite (577 passed, one optional skip) in the release checkout on an existing Mac. Earlier v0.2 validation also covered isolated installer tests, current-install no-op replay, and a deployed Claude-to-ChatGPT commit-pinned smoke. It has not passed first installation on a clean Mac, new tunnel/key setup, or first client registration. Those remain required evidence before claiming clean-machine certification. The existing service may continue reporting an older version until an intentional upgrade reload; release publication alone does not restart it.
 
 MIT licensing, allowlisted packaging and GitHub private vulnerability reporting
 remain enabled. This is not a claim of hostile-code isolation, Linux/Windows support,
@@ -1016,7 +1085,7 @@ After deploying any tool-schema change, refresh the existing Repo MCP app/plugin
 tool list, then start a compatible conversation. Refresh reloads tool schemas; a
 server version bump alone cannot update a client's cached descriptors.
 
-Before repository work, verify twelve production tools. The eight repository tools
+Before repository work, verify sixteen production tools. The eight repository tools
 must all require `workspace_token`; `edit` and `create_file` also require
 `request_id`. Begin with `service_info`, `repository_list`, `workspace_open`,
 then scoped `repo_info`. If the client exposes the old unscoped schema, stop and
