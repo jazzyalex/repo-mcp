@@ -360,6 +360,15 @@ log are always denied, whatever the policy says. Conventional examples such as
 must end in `.example`, `.sample`, `.template`, `.tmpl` or `.dist`); real secret names
 cannot be excepted.
 
+**Git-ignored files in glob policies.** Glob policies hide untracked files that Git
+ignores, so `research/**` exposes nothing when `.gitignore` ignores `research/`. To expose
+some of them, list each exact path in `ignored_exact` (off by default):
+`"ignored_exact": ["research/notes.md"]`. Entries are literal paths, never patterns, and
+each must also be readable under `read`, the dotfile rule and the secret rules (a policy
+that lists anything else fails to load). Only the listed files appear; every other ignored
+file stays hidden, and a listed file that does not exist is simply absent. Exact-list
+policies are not filtered and do not need it.
+
 **Dot paths in exact policies.** A v2 policy may list an exact dot path (for example
 `.github/workflows/ci.yml`) in `read.include`, `write.include`, `create.paths` or `checks`
 if `dotfiles` covers it; it keeps the exact fast path. `.git`, secret names and `.trial` stay

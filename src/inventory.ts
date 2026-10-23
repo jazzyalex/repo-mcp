@@ -193,6 +193,8 @@ const limitError = (what: string) => new SafeError(`Discovery limit: ${what}. Ad
  * nothing the walk exposed. Otherwise the walk is retried, and it fails closed after a few unstable attempts.
  */
 export async function walk(ctx: WalkContext): Promise<Inventory> {
+  // Listed ignored_exact files are ignored by design; only other entries must stay unignored.
+  const allowed = new Set(ctx.policy.ignoredExact.map(nfc));
   for (let attempt = 0; attempt < IGNORE_ATTEMPTS; attempt++) {
     const ignored = await gitIgnored(ctx);
     const { inventory, gitignores } = await walkOnce(ctx, ignored);
@@ -205,11 +207,45 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     // The second listing may differ only by ignored files appearing or vanishing (a build writing caches); it must
     // not hide anything the walk exposed. The set of config sources must also still be the same.
     const consistent = sameSources(before, after) &&
-      (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path))) &&
+      (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path) && !allowed.has(nfc(entry.path)))) &&
       (await ignoreConfigSources(ctx)).join('\0') === configSources.join('\0');
     if (consistent) return inventory.withIgnoreSources(after);
   }
   throw IGNORE_UNSTABLE();
+}
+
+/**
+ * Add the policy's `ignored_exact` paths that Git ignores. Each must be a regular,
+ * unlinked file within the size limit, reached only through real directories on the root's
+ * device and outside nested repositories, and readable under the policy. Its parent
+ * directories are fingerprinted so a change there triggers a re-walk. Anything else is
+ * left out, exactly like any other file the walk would skip.
+ */
+async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats) {
+  const listed = new Set(entries.map(e => nfc(e.path)));
+  const walked = new Set(dirs.map(d => d.path));
+  for (const rel of ctx.policy.ignoredExact) {
+    if (listed.has(nfc(rel)) || !ignoredBy(ignored, rel) || !ctx.policy.decide(rel, 'read').ok) continue;
+    const parts = rel.split('/');
+    if (parts.some(p => UNSAFE_NAME.test(p) || Buffer.byteLength(p) > 255) || Buffer.byteLength(rel) > 256 || parts.length > MAX_DEPTH) continue;
+    const parents: Dir[] = [];
+    let ok = true;
+    for (let i = 1; i < parts.length && ok; i++) {
+      const dir = parts.slice(0, i).join('/');
+      const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
+      ok = !!stat && stat.isDirectory() && !stat.isSymbolicLink() && stat.dev === rootStat.dev &&
+        !(await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false));
+      if (ok && !walked.has(dir)) parents.push({ path: dir, fp: dirFingerprint(stat!) });
+    }
+    if (!ok) continue;
+    // Parents are watched even when the file is missing, so creating it later re-walks.
+    for (const p of parents) { dirs.push(p); walked.add(p.path); }
+    const stat = await lstat(abs(ctx.root, rel), { bigint: true }).catch(() => undefined);
+    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1n || Number(stat.size) > ctx.maxFileBytes) continue;
+    entries.push({ path: rel, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
+    listed.add(nfc(rel));
+    if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
+  }
 }
 
 async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory: Inventory; gitignores: string[] }> {
@@ -269,5 +305,6 @@ async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory
       if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
     }
   }
+  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat);
   return { inventory: Inventory.of(entries, dirs, skipped, policy.digest), gitignores };
 }

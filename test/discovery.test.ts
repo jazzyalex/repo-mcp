@@ -384,3 +384,31 @@ test('NFD names stay hidden when Git also prints NFD (core.precomposeunicode=fal
   assert.ok(!paths.includes(nfdFile.normalize('NFC')));
   await assert.rejects(repo.read(nfdFile), /not exposed/);
 });
+
+test('ignored_exact lists only the named Git-ignored files; everything else stays hidden', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n*.tfout\n' }, {
+    'research/notes.md': 'needle notes\n', 'research/raw.md': 'needle raw\n', 'deep/run.tfout': 'needle\n', 'research/.env': 'TOKEN=x\n'
+  });
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], ignored_exact: ['research/notes.md', 'research/absent.md'] }), {}, m.track);
+  const { paths } = await listAll(repo);
+  assert.ok(paths.includes('research/notes.md'));
+  for (const hidden of ['research/raw.md', 'deep/run.tfout', 'research/.env', 'research/absent.md']) assert.ok(!paths.includes(hidden), hidden);
+  assert.equal((await repo.readRange('research/notes.md')).content, 'needle notes\n');
+  await assert.rejects(repo.read('research/raw.md'), /not exposed/);
+  const found = (await repo.search('needle')).matches.map(x => x.path);
+  assert.ok(found.includes('research/notes.md') && !found.includes('research/raw.md'));
+  // Creating a listed file later is noticed through its watched parent directory.
+  await writeFile(path.join(m.root, 'research', 'absent.md'), 'late\n');
+  assert.ok((await listAll(repo)).paths.includes('research/absent.md'));
+});
+
+test('ignored_exact rejects patterns, secrets and paths the read policy denies', async () => {
+  const { loadPolicy, compilePolicyFor } = await import('../src/policy.js');
+  const compile = async (over: Record<string, unknown>) => compilePolicyFor(loadPolicy(policyDoc(over)));
+  await assert.rejects(compile({ ignored_exact: ['research/*.md'] }), /exact path/);
+  await assert.rejects(compile({ ignored_exact: ['research/.env'] }), /not readable|denied/);
+  await assert.rejects(compile({ read: { include: ['src/**'], exclude: [] }, ignored_exact: ['research/notes.md'] }), /not readable/);
+  // Off by default and an empty list keep the policy digest unchanged.
+  const { policyDigest } = await import('../src/policy.js');
+  assert.equal(policyDigest(loadPolicy(policyDoc({ ignored_exact: [] }))), policyDigest(loadPolicy(policyDoc())));
+});

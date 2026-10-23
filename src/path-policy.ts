@@ -10,6 +10,8 @@ export type PathPolicySpec = {
   read: Rules; write?: Rules;
   create?: { paths?: string[]; directories?: string[]; extensions?: string[] };
   dotfiles?: string[]; checks?: string[]; secretExceptions?: string[];
+  /** Literal paths that Git ignores but that discovery may still list, when the read policy allows them. */
+  ignoredExact?: string[];
   /** Root-relative server-owned paths (policy file, audit log, ...): denied with everything beneath them. */
   protectedPaths?: string[];
 };
@@ -70,7 +72,7 @@ export class PathPolicy {
   private readonly writeLiterals: Set<string>;
   private readonly writePatterns: Glob[];
   private constructor(
-    private readonly spec: Required<Omit<PathPolicySpec, 'protectedPaths'>> & { read: Required<Rules>; write: Required<Rules>; create: Required<NonNullable<PathPolicySpec['create']>> },
+    private readonly spec: Required<Omit<PathPolicySpec, 'protectedPaths' | 'ignoredExact'>> & { ignoredExact?: string[] } & { read: Required<Rules>; write: Required<Rules>; create: Required<NonNullable<PathPolicySpec['create']>> },
     private readonly protectedFolded: string[],
     private readonly readInclude: Glob[], private readonly readExclude: Glob[],
     private readonly writeInclude: Glob[], private readonly writeExclude: Glob[],
@@ -91,7 +93,9 @@ export class PathPolicy {
       read: { include: [...input.read.include], exclude: [...(input.read.exclude ?? [])] },
       write: { include: [...(input.write?.include ?? [])], exclude: [...(input.write?.exclude ?? [])] },
       create: { paths: [...(input.create?.paths ?? [])], directories: [...(input.create?.directories ?? [])], extensions: [...(input.create?.extensions ?? [])] },
-      dotfiles: [...(input.dotfiles ?? [])], checks: [...(input.checks ?? [])], secretExceptions: [...(input.secretExceptions ?? [])]
+      dotfiles: [...(input.dotfiles ?? [])], checks: [...(input.checks ?? [])], secretExceptions: [...(input.secretExceptions ?? [])],
+      // Present only when used, so existing policy digests do not move.
+      ...(input.ignoredExact?.length ? { ignoredExact: [...input.ignoredExact] } : {})
     };
     const dotfiles = spec.dotfiles.map(p => compileGlob(p));
     const exceptions = new Set<string>();
@@ -133,6 +137,11 @@ export class PathPolicy {
     literals(this.spec.write.include, 'write.include');
     literals(this.spec.create.paths, 'create.paths');
     literals(this.spec.checks, 'checks');
+    for (const p of this.spec.ignoredExact ?? []) {
+      if (hasWildcard(p)) throw new PolicyError(`ignored_exact entry "${p}" must be an exact path, not a pattern.`);
+      const decision = this.decide(p, 'read');
+      if (!decision.ok) throw new PolicyError(`ignored_exact entry "${p}" is not readable under this policy (${decision.reason}). Remove it or allow it in read.include.`);
+    }
     if (this.spec.create.directories.length && !this.spec.create.extensions.length) throw new PolicyError('create.directories needs create.extensions: list the file extensions that may be created there.');
     for (const dir of this.spec.create.directories) {
       if (hasWildcard(dir)) throw new PolicyError(`create.directories entry "${dir}" must be an exact directory path, not a pattern.`);
@@ -150,11 +159,14 @@ export class PathPolicy {
     return { files: this.spec.read.include, writes: this.spec.write.include, creatable: this.spec.create.paths, tests: this.spec.checks };
   }
   get createDirectories() { return [...this.createDirs]; }
+  /** Literal Git-ignored paths discovery may list (empty when the feature is off). */
+  get ignoredExact() { return [...(this.spec.ignoredExact ?? [])]; }
   get creatablePaths() { return [...this.spec.create.paths]; }
   summary() {
     return {
       read: this.spec.read, write: this.spec.write, create: this.spec.create, dotfiles: this.spec.dotfiles,
-      ...(this.spec.secretExceptions.length ? { secret_exceptions: this.spec.secretExceptions } : {})
+      ...(this.spec.secretExceptions.length ? { secret_exceptions: this.spec.secretExceptions } : {}),
+      ...(this.spec.ignoredExact?.length ? { ignored_exact: this.spec.ignoredExact } : {})
     };
   }
 

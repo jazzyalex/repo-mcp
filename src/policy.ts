@@ -50,6 +50,8 @@ const v2Schema = z.strictObject({
   }).default({ paths: [], directories: [], extensions: [] }),
   dotfiles: z.array(relPath).default([]),
   secret_exceptions: z.array(relPath).optional(),
+  /** Literal paths that Git ignores but that may still be read (off when absent or empty). */
+  ignored_exact: z.array(relPath).optional(),
   checks: z.array(z.strictObject({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/), path: relPath })).default([]),
   runner: runner.optional(),
   limits: z.strictObject(Object.fromEntries(Object.keys(DEFAULT_LIMITS).map(k => [k, positive])) as Record<keyof typeof DEFAULT_LIMITS, typeof positive>).default(DEFAULT_LIMITS),
@@ -87,6 +89,7 @@ export function loadPolicy(raw: unknown): PolicyV2 {
   } else policy = parse(v2Schema, migrateV1(parse(v1Schema, raw) as PolicyV1));
   // An empty exception list is the same policy as none, so existing task policy digests do not move.
   if (policy.secret_exceptions && !policy.secret_exceptions.length) delete policy.secret_exceptions;
+  if (policy.ignored_exact && !policy.ignored_exact.length) delete policy.ignored_exact;
   return policy;
 }
 
@@ -106,7 +109,8 @@ function checkNames(policy: PolicyV2) {
 function specOf(policy: PolicyV2, protectedPaths: string[] = []) {
   return {
     read: policy.read, write: policy.write, create: policy.create, dotfiles: policy.dotfiles,
-    checks: policy.checks.map(c => c.path), secretExceptions: policy.secret_exceptions ?? [], protectedPaths
+    checks: policy.checks.map(c => c.path), secretExceptions: policy.secret_exceptions ?? [],
+    ...(policy.ignored_exact ? { ignoredExact: policy.ignored_exact } : {}), protectedPaths
   };
 }
 

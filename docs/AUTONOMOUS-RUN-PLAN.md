@@ -94,6 +94,10 @@ about 2,000 changed lines):
 
 ## E. Opt-in exact paths for Git-ignored files
 
+Status: implemented as policy key `ignored_exact` (SETUP.md, DESIGN-2B). Operator
+diagnostics for listed-but-missing paths are not built yet; the model still sees one
+"not exposed" error.
+
 Found 2026-10-22 in a CourtVision review. Its `.gitignore` ignores `research/`, so a
 glob policy `research/**` exposed nothing: glob-mode inventory hides untracked
 Git-ignored files by design (`docs/DESIGN-2B-PATH-POLICY.md` Inventory;
