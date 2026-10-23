@@ -36,7 +36,8 @@ export const CLICK_SETTLE_MS = 60_000;
 const LATCH_FALLBACK = 'latch-fallback.json';
 const WAIT_POLL_MS = 5_000;
 const LEASE_POLL_MS = 1_000;
-const LEASE_SETTLE_MS = 5_000;
+/** After a lease owner died, input it already sent may still run: wait as long as a click settles. */
+const LEASE_SETTLE_MS = 60_000;
 
 /** Error with a reported failure code; `chatgpt-go.ts` maps it onto GoError. */
 export class AccountError extends SafeError {
@@ -218,6 +219,16 @@ function processStart(pid: number): string | null {
 
 const self = (): Owner => ({ pid: process.pid, host: os.hostname(), started: processStart(process.pid) });
 
+/**
+ * True when the process now running as `pid` started after `since`: the PID was reused,
+ * so a lock taken at `since` does not belong to it. Unknown start times are not reuse.
+ */
+export function pidReusedSince(pid: number, since: string) {
+  const start = processStart(pid);
+  const started = start ? Date.parse(start) : NaN;
+  return Number.isFinite(started) && Number.isFinite(Date.parse(since)) && started > Date.parse(since) + 1_000;
+}
+
 /** A process with no recorded start time is trusted for at most this long. */
 const UNKNOWN_START_TRUST_MS = 6 * HOUR_MS;
 
@@ -244,6 +255,9 @@ function slotFor(req: SlotRequest, now: Date): Slot {
 export async function adoptSlot(store: StateStore, req: SlotRequest, now: Date) {
   await update(store, account => {
     if (account.slots.some(s => s.key === req.key)) return { value: undefined };
+    // Recovery of a coding run still mutates its checkout (checks, seal): never beside another.
+    const owner = req.kind === 'code' && account.slots.find(s => s.kind === 'code' && s.checkout === req.checkout);
+    if (owner) throw new AccountError('REPOSITORY_BUSY', `Coding request ${owner.key} owns this checkout; resume after it finishes.`);
     return { value: undefined, next: { ...account, waiting: account.waiting.filter(w => w.key !== req.key), slots: [...account.slots, slotFor(req, now)] } };
   });
 }
@@ -456,16 +470,15 @@ export type SetupLease = { release(): Promise<void> };
  */
 export async function acquireSetupLease(store: StateStore, sleep: (ms: number) => Promise<void>): Promise<SetupLease> {
   const record: LeaseRecord = { ...self(), token: randomUUID(), since: new Date().toISOString() };
+  const lease: SetupLease = {
+    release: () => withAccountLock(store, async () => {
+      // A read error is raised, so the driver keeps its lease and retries the release.
+      const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND);
+      if (current?.token === record.token) await store.remove(LEASE_PATH);
+    })
+  };
   while (true) {
-    if (await store.create(LEASE_PATH, LEASE_KIND, record)) {
-      return {
-        release: () => withAccountLock(store, async () => {
-          // A read error is raised, so the driver keeps its lease and retries the release.
-          const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND);
-          if (current?.token === record.token) await store.remove(LEASE_PATH);
-        })
-      };
-    }
+    if (await store.create(LEASE_PATH, LEASE_KIND, record)) return lease;
     const recovered = await withAccountLock(store, async () => {
       const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND);
       if (!current) return false;
@@ -475,10 +488,15 @@ export async function acquireSetupLease(store: StateStore, sleep: (ms: number) =
         throw new AccountError('ACCOUNT_STATE_CORRUPT', `Corrupt setup lease; inspect ${LEASE_PATH} before continuing.`);
       }
       if (ownerAlive(current, current.since)) return false;
-      await store.remove(LEASE_PATH);
+      // Take the dead owner's lease over in place, so no other process can start setup
+      // during the settle window.
+      await store.write(LEASE_PATH, LEASE_KIND, record);
       return true;
     });
-    if (recovered) await sleep(LEASE_SETTLE_MS);
-    else await sleep(LEASE_POLL_MS);
+    if (recovered) {
+      await sleep(LEASE_SETTLE_MS);
+      return lease;
+    }
+    await sleep(LEASE_POLL_MS);
   }
 }

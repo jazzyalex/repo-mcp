@@ -26,7 +26,7 @@ import { activeExecSessions } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
-  releaseSlot, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, extendSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
+  pidReusedSince, releaseSlot, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, extendSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
 } from './go-account.js';
 import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
@@ -236,7 +236,10 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     catch { lock = 'unreadable'; }
     if (lock === 'unreadable') live = true;
     else if (lock) {
-      try { const r = validateLockRecord(lock, 'chatgpt-go request'); live = r.hostname !== os.hostname() || lockOwnerAlive(r.pid); }
+      try {
+        const r = validateLockRecord(lock, 'chatgpt-go request');
+        live = r.hostname !== os.hostname() || (lockOwnerAlive(r.pid) && !pidReusedSince(r.pid, r.acquired_at));
+      }
       catch { live = true; }
     }
     if (live || m.run_id || m.pending_run_id) active.push(m.request_id);
@@ -400,8 +403,15 @@ class Driver {
   /** Latch the account on a verified page warning (docs/GO-CONCURRENCY-SPEC.md section 6). */
   private async checkSignal() {
     const signal = await this.page.accountSignal?.().catch(() => null);
-    if (signal) await setLatch(this.account, this.accountDir, { code: signal, key: this.key, by: 'driver' }, this.now());
+    if (signal) await this.latch(signal);
     return signal ?? null;
+  }
+
+  /** A latch that could not be persisted anywhere keeps this request's slot and is raised. */
+  private keepSlot = false;
+  private async latch(code: string) {
+    try { await setLatch(this.account, this.accountDir, { code, key: this.key, by: 'driver' }, this.now()); }
+    catch (error) { this.keepSlot = true; throw error; }
   }
 
   private async finish(phase: 'cleaned' | 'failed', patch: Partial<GoManifest> = {}) {
@@ -442,8 +452,12 @@ class Driver {
    * was sent, and a terminal run has nothing left to send: only then is the slot freed.
    */
   private async releaseIfProvablyUnsent() {
+    if (this.keepSlot) return;
     const runId = this.m.run_id ?? this.m.pending_run_id;
     const run = runId ? await chatGptRunStatus(runId, this.stateDir).catch(() => undefined) : undefined;
+    // A completed coding run may still be sealing or running checks in its checkout: keep
+    // the slot until a resume finishes cleanup.
+    if (run?.state === 'completed' && this.m.kind === 'code') return;
     // A terminal journal run has nothing left to send, whatever the manifest says.
     if (run && (run.state === 'completed' || run.state === 'failed-pre-submit')) { await this.releaseSlot().catch(() => {}); return; }
     if (this.m.send_intent_at) return;
@@ -454,8 +468,8 @@ class Driver {
   async drive(): Promise<GoResult> {
     // Ctrl-C or a kill while holding a slot: free it when nothing can have been sent.
     const onSignal = (signal: NodeJS.Signals) => {
+      // The lease is left to dead-owner recovery, which waits for in-flight input to settle.
       void (async () => {
-        await this.dropLease().catch(() => {});
         await this.releaseIfProvablyUnsent();
       })().finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
     };
@@ -464,6 +478,8 @@ class Driver {
     try {
       return await this.driveInner();
     } catch (error) {
+      // A click may still be in flight after a post-commit failure: let it settle first.
+      if (this.lease && this.m.phase === 'send-intent') await this.sleep(CLICK_SETTLE_MS).catch(() => {});
       await this.dropLease().catch(() => {});
       await this.releaseIfProvablyUnsent();
       throw asGo(error);
@@ -529,11 +545,9 @@ class Driver {
       await this.save({ phase: 'tab-ready', target_id: targetId, pending_run_id: this.m.pending_run_id ?? randomUUID() });
     } catch (error) {
       process.stderr.write(`browser setup failed: ${error instanceof Error ? error.message : String(error)}\n`);
-      if (error instanceof GoError && error.code === 'BROWSER_CHALLENGE') {
-        await setLatch(this.account, this.accountDir, { code: 'BROWSER_CHALLENGE', key: this.key, by: 'driver' }, this.now()).catch(() => {});
-      } else {
-        await this.checkSignal();
-      }
+      // A latch failure is raised and keeps the slot (never swallowed).
+      if (error instanceof GoError && error.code === 'BROWSER_CHALLENGE') await this.latch('BROWSER_CHALLENGE');
+      else await this.checkSignal();
       await this.page.closeTab().catch(() => {});
       return this.finish('failed', { failure_code: codeOf(error, 'BROWSER_SETUP_FAILED') });
     }

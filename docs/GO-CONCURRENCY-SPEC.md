@@ -95,9 +95,9 @@ While waiting, `go` prints one stderr line per minute: queue position and slots 
 Each run has its own window and its own CDP session, so the answer wait is safe in
 parallel. Steps that activate a tab or send input run under one **setup lease**: the
 record `setup-lease` in the account store, owned by PID plus process start time (so a
-reused PID never holds it), polled every 1 s, and removed under the account lock when its
-owner is dead. After recovering a dead owner's lease, wait 5 s so any command it already
-sent settles. The lease serializes command issuance; it never replays a dead owner's
+reused PID never holds it), polled every 1 s, and taken over in place under the account lock
+when its owner is dead, so nobody else can start setup while the new owner waits 60 s for
+any command the dead owner already sent to settle. The lease serializes command issuance; it never replays a dead owner's
 command. `chatgpt-run probe` takes the same lease. A malformed lease record fails closed
 (`ACCOUNT_STATE_CORRUPT`). A release that keeps failing before the answer wait raises
 `LEASE_RELEASE_FAILED`, so the lease is never silently left behind a live process.
@@ -164,7 +164,15 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
 - `chatgpt-run account release-slot --key KEY --reason TEXT` removes any slot,
   including a `legacy` one, and records the reason.
 - SIGINT or SIGTERM: the driver frees its slot only when no send intent exists and the
-  journal shows no run or a terminal run; otherwise the slot stays for `--resume`.
+  journal shows no run or a terminal run; otherwise the slot stays for `--resume`. It
+  never releases the setup lease: dead-owner recovery waits out in-flight input.
+- A completed coding run that fails or is interrupted before cleanup keeps its slot,
+  because seal and checks may still touch the checkout; `--resume` finishes cleanup.
+  Recovery of a coding run fails `REPOSITORY_BUSY` while another coding slot owns the
+  checkout.
+- An error after the send commit with the lease held waits 60 s before releasing it.
+- `task finish` ignores a request lock whose PID now belongs to a process started after
+  the lock was taken (PID reuse).
 - A waiter or lease owner without a recorded start time is trusted for at most 6 h.
 
 ## 8. Migration from v1

@@ -482,3 +482,59 @@ test('a setup-lease release that cannot read the lease is raised, not swallowed'
   await writeFile(path.join(f.accountDir, 'setup-lease'), 'garbage');
   await assert.rejects(lease.release());
 });
+
+// --- review round 4 fixes -------------------------------------------------------------------
+
+test('a dead lease owner (killed process) is taken over in place; nobody else sets up during the settle window', async t => {
+  const f = await fixture(t);
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['--import', 'tsx', path.join('test', 'fixtures-go', 'hold-lease.ts'), f.accountDir], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await new Promise<void>((resolve, reject) => {
+    child.stdout!.on('data', d => { if (String(d).includes('held')) resolve(); });
+    child.on('exit', c => reject(new Error(`child exited ${c}`)));
+  });
+  child.kill('SIGKILL');
+  await new Promise(r => child.once('exit', r));
+  const store = await StateStore.open(f.accountDir);
+  const events: string[] = [];
+  let settling!: () => void;
+  const settleGate = new Promise<void>(r => { settling = r; });
+  // B recovers the dead lease and waits out the settle window (held open by the test).
+  const b = acquireSetupLease(store, async ms => { if (ms >= 60_000) { events.push('b-settling'); await settleGate; } else await tick(); })
+    .then(lease => { events.push('b-acquired'); return lease; });
+  while (!events.includes('b-settling')) await tick();
+  const c = acquireSetupLease(store, async () => { await tick(); }).then(lease => { events.push('c-acquired'); return lease; });
+  for (let i = 0; i < 20; i++) await tick();
+  assert.ok(!events.includes('c-acquired'), 'C must not set up while B settles the dead owner\'s lease');
+  settling();
+  await (await b).release();
+  await (await c).release();
+  assert.deepEqual(events, ['b-settling', 'b-acquired', 'c-acquired']);
+});
+
+test('a challenge whose latch cannot be persisted anywhere fails the run and keeps its slot', async t => {
+  const f = await fixture(t);
+  const { chmod } = await import('node:fs/promises');
+  const page = new Page('a', newLog());
+  page.open = async () => { await chmod(f.accountDir, 0o500); throw new GoError('BROWSER_CHALLENGE'); };
+  t.after(() => chmod(f.accountDir, 0o700).catch(() => {}));
+  await assert.rejects(runGo(req(f, 'a'), { page, sleep }), e => code(e, 'LATCH_WRITE_FAILED'));
+  await chmod(f.accountDir, 0o700);
+  assert.deepEqual((await accountStatus(f.accountDir)).slots.map(s => s.request_id), ['a']);
+});
+
+test('a request lock whose PID was reused does not count as a live request', async t => {
+  const f = await fixture(t, { max_concurrent: 1 });
+  const store = await StateStore.open(f.accountDir);
+  await admitSlot(store, f.accountDir, { key: 'other', requestId: 'other', stateDir: f.stateDir, kind: 'architecture', checkout: null }, { sleep });
+  await assert.rejects(runGo({ ...req(f, 'a'), noWait: true }, { page: new Page('a', newLog()), sleep }), e => code(e, 'ACCOUNT_BUSY'));
+  const state = await StateStore.open(f.stateDir);
+  const { sha256 } = await import('../src/errors.js');
+  const lockRel = `locks/chatgpt-go-${sha256('chatgpt-go\0a').slice(0, 16)}.json`;
+  const lock = { pid: process.pid, hostname: os.hostname(), token: 't', purpose: 'chatgpt-go request', acquired_at: '1990-01-01T00:00:00.000Z' };
+  await state.write(lockRel, 'lock', lock);
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), [], 'this process started after 1990: the PID was reused');
+  await state.write(lockRel, 'lock', { ...lock, acquired_at: new Date().toISOString() });
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['a']);
+  await state.remove(lockRel);
+});
