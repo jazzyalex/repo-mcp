@@ -703,3 +703,32 @@ test('a project check whose process group still runs keeps the coding request in
   await new Promise(r => child.once('exit', r));
   assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), []);
 });
+
+// --- review round 10 fixes ------------------------------------------------------------------
+
+test('a project check runs only after its process group is recorded; a failed record means it never runs', async t => {
+  const f = await fixture(t);
+  const { runCheck } = await import('../src/go-checks.js');
+  const dir = path.dirname(f.stateDir);
+  const marker = path.join(dir, 'ran.txt');
+  const recorded: number[] = [];
+  const ok = await runCheck(dir, `echo ran > ${marker}`, path.join(dir, 'ok.log'), async pgid => { recorded.push(pgid); });
+  assert.equal(ok.exit_code, 0);
+  assert.equal(recorded.length, 1);
+  assert.equal(await readFile(marker, 'utf8'), 'ran\n');
+  await rm(marker);
+  await assert.rejects(runCheck(dir, `echo ran > ${marker}`, path.join(dir, 'bad.log'), async () => { throw new Error('disk full'); }), /disk full/);
+  await new Promise(r => setTimeout(r, 300));
+  await assert.rejects(readFile(marker), /ENOENT/, 'an unrecorded check never runs its command');
+});
+
+test('a go manifest with an unknown kind fails task finish closed', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.stateDir);
+  const now = new Date().toISOString();
+  await store.write(`chatgpt-go/${'8'.repeat(64)}`, 'chatgpt-go-v1', {
+    request_id: 'x', request_digest: 'd', repository_id: 'repo', task_id: 'task', coordinator: 'claude', kind: 'coed', profile: 'code',
+    prompt_sha256: 'p', prompt_file: '', session_id: 's', created_at: now, updated_at: now, phase: 'cleaned', grant_id: 'g', sealed: 'warning:X'
+  });
+  await assert.rejects(activeGoRequestsForTask(f.stateDir, 'task'), /TASK_IN_USE/);
+});

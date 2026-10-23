@@ -15,6 +15,16 @@ const TAIL_BYTES = 2_000;
 
 export type CheckResult = { cmd: string; exit_code: number | null; timed_out: boolean; log: string; tail: string };
 
+/** Wait up to `ms` for a process group to disappear; false if it is still there. */
+export async function processGroupGone(pgid: number, ms = 5_000) {
+  const deadline = Date.now() + ms;
+  while (processGroupAlive(pgid)) {
+    if (Date.now() > deadline) return false;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return true;
+}
+
 /** Digest of everything a commit would take from the checkout: HEAD, tracked changes and untracked files. */
 export async function candidateDigest(root: string) {
   const git = (...args: string[]) => run('git', ['-C', root, ...args], { maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' })
@@ -65,16 +75,35 @@ export function processGroupAlive(pgid: number) {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-/** `onSpawn` receives the check's process group as soon as it exists, so a crash can be fenced. */
+/** Exit code of a gated check that was never released: its command did not run. */
+const GATE_CLOSED = 97;
+
+/**
+ * Run one check in its own detached process group. The group starts gated: it waits on
+ * stdin and runs `cmd` only after `onSpawn` has durably recorded the group. If recording
+ * fails, or this process dies first, the gate closes (EOF) and the command never runs.
+ */
 export async function runCheck(root: string, cmd: string, log: string, onSpawn?: (pgid: number) => Promise<void>): Promise<CheckResult> {
   const file = await open(log, 'w+', 0o600);
   try {
     const { exit_code, timed_out } = await new Promise<{ exit_code: number | null; timed_out: boolean }>((resolve, reject) => {
-      const child = spawn('/bin/sh', ['-c', cmd], {
-        cwd: root, detached: true, stdio: ['ignore', file.fd, file.fd],
+      const child = spawn('/bin/sh', ['-c', `IFS= read -r _ || exit ${GATE_CLOSED}; exec /bin/sh -c "$1" check`, 'gate', cmd], {
+        cwd: root, detached: true, stdio: ['pipe', file.fd, file.fd],
         env: checkEnv()
       });
-      if (child.pid) void onSpawn?.(child.pid).catch(() => {});
+      const release = async () => {
+        try { if (child.pid && onSpawn) await onSpawn(child.pid); }
+        catch (error) {
+          // Not recorded: close the gate and stop the group; the command never ran.
+          child.stdin?.end();
+          try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ }
+          reject(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        child.stdin?.end('go\n');
+      };
+      child.stdin?.on('error', () => { /* the gate may already be closed */ });
+      void release();
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } }, CHECK_TIMEOUT_MS);
       child.on('error', error => { clearTimeout(timer); reject(error); });

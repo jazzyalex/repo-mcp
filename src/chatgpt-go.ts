@@ -23,7 +23,7 @@ import {
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
 import { execSessionsQuiet } from './exec-tool.js';
-import { candidateDigest, processGroupAlive, runCheck, type CheckResult } from './go-checks.js';
+import { candidateDigest, processGroupAlive, processGroupGone, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
   pidReusedSince, releaseSlot, CLICK_SEQUENCE_MAX_MS, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, boundSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
@@ -236,6 +236,9 @@ async function codeCheckoutQuiet(stateDir: string, m: GoManifest): Promise<{ qui
   return execSessionsQuiet(stateDir, m.task_id, m.created_at).catch(() => ({ quiet: false, reason: 'exec scan failed' }));
 }
 
+const GO_PHASES = new Set<string>(['admitted', 'tab-ready', 'prepared', 'reserved', 'send-intent', 'submitted', 'completed', 'cleaned', 'failed', 'uncertain']);
+const GO_KINDS = new Set<string>(['architecture', 'review', 'code']);
+
 export async function activeGoRequestsForTask(stateDir: string, taskId: string) {
   const store = await StateStore.inspect(stateDir);
   if (!store) return [];
@@ -247,7 +250,11 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     try { m = await store.read<GoManifest>(`chatgpt-go/${name}`, GO_KIND); }
     catch (error) { throw new SafeError(`TASK_IN_USE: go manifest ${name} is unreadable (${error instanceof Error ? error.message : 'error'}); inspect it before finishing a task.`); }
     if (!m) continue;
-    if (typeof m.task_id !== 'string' || typeof m.request_id !== 'string' || typeof m.phase !== 'string') {
+    const cr = m.check_running;
+    if (typeof m.task_id !== 'string' || typeof m.request_id !== 'string' || !GO_PHASES.has(m.phase) || !GO_KINDS.has(m.kind) ||
+        !Number.isFinite(Date.parse(m.created_at)) || (m.grant_id !== undefined && typeof m.grant_id !== 'string') ||
+        (m.sealed !== undefined && typeof m.sealed !== 'string') ||
+        (cr !== undefined && (!cr || !Number.isSafeInteger(cr.index) || !Number.isSafeInteger(cr.pgid) || cr.pgid <= 1))) {
       throw new SafeError(`TASK_IN_USE: go manifest ${name} is corrupt; inspect it before finishing a task.`);
     }
     if (m.task_id !== taskId) continue;
@@ -958,6 +965,12 @@ class Driver {
       for (let i = checks.length; i < this.m.code.checks.length; i++) {
         checks.push(await runCheck(root, this.m.code.checks[i], path.join(this.store.dir, `${manifestPath(this.m.request_id)}.check-${i}.log`),
           pgid => this.save({ check_running: { index: i, pgid } })));
+        // The marker stays until the whole group, background children included, is gone.
+        const pgid = this.m.check_running?.pgid;
+        if (pgid && !(await processGroupGone(pgid))) {
+          await this.save({ checks });
+          throw new GoError('CHECK_GROUP_ALIVE', `Check ${i} left process group ${pgid} running; remaining checks skipped.`);
+        }
         await this.save({ checks, check_running: undefined });
       }
       await this.save({ candidate_changed: (await candidateDigest(root)) !== before });

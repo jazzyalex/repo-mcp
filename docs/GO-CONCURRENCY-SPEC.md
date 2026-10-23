@@ -104,9 +104,14 @@ command. `chatgpt-run probe` takes the same lease. A malformed lease record fail
 terminal or held transition the state is saved first and the error is then raised.
 - Project checks run only on the journal path, where the request holds its coding slot.
   A recorded check error is final: the coordinator runs the checks locally instead. A
-  rerun of a finished (`cleaned`/`failed`) request never runs checks. The running check's
-  process group is recorded (`check_running`); a new check never starts while it lives,
-  and the coding slot and `task finish` treat it like a live exec command.
+  rerun of a finished (`cleaned`/`failed`) request never runs checks. Each check starts
+  gated in its own process group and runs its command only after the group is durably
+  recorded (`check_running`); if that record fails or the driver dies first, the gate
+  closes and the command never runs. A new check never starts while a recorded group
+  lives, and the marker is cleared only after the whole group is gone
+  (`CHECK_GROUP_ALIVE` otherwise). The coding slot and `task finish` treat a live group
+  like a live exec command. `task finish` refuses manifests with unknown kinds, phases or
+  malformed safety fields.
 
 Lease sections (each acquired and released explicitly, never held during the answer
 wait, checks, or a recursive recovery):
