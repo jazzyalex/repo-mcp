@@ -582,6 +582,36 @@ test('editable_test_files lists only configured tests that exist and edit would 
   assert.deepEqual(info.editable_test_files, ['test/kept.test.js'], 'the missing creatable test is not editable yet');
 });
 
+test('a commit landing between the HEAD and index listings is not reported under a mixed generation', async t => {
+  const { execFileSync } = await import('node:child_process');
+  const m = await makeRepo(t, { 'w/a.md': 'a\n' });
+  await writeFile(path.join(m.root, 'w', 'staged.md'), 's\n');
+  await git(m.root, 'add', 'w/staged.md');
+  let armed = false, fired = false;
+  const repo = await openGlob(t, m.root, policyDoc({ write: { include: ['w/**'], exclude: [] } }), {
+    gitHook: args => {
+      if (armed && !fired && args[0] === 'ls-files' && args.includes('--cached')) { fired = true; execFileSync('git', ['-C', m.root, 'commit', '-q', '-m', 'land staged']); }
+    }
+  }, m.track);
+  armed = true;
+  const flag = (await repo.listFiles('w/')).files.find(f => f.path === 'w/staged.md')?.editable;
+  assert.ok(fired);
+  assert.equal(flag, true, 'the retried collection sees the committed file in HEAD and the index');
+});
+
+test('editability membership honors the operation deadline', async t => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 2000; i++) files[`w/f-${i}.md`] = 'x\n';
+  const m = await makeRepo(t, files);
+  let now = 0, ticking = false;
+  const repo = await openGlob(t, m.root, policyDoc({ write: { include: ['w/**'], exclude: [] } }), {
+    operationBudgetMs: 60_000, monotonicClock: () => ticking ? (now += 100) : now,
+    gitHook: args => { if (args[0] === 'ls-files' && args.includes('--cached')) ticking = true; }
+  }, m.track);
+  ticking = false;
+  await assert.rejects(repo.info(), /Git tracking check timed out/);
+});
+
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
   const m = await makeRepo(t, { 'research/notes.md': 'old\n' });
   const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);

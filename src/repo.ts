@@ -122,6 +122,7 @@ type PathLists = Record<typeof LIST_KEYS[number], string[]>;
 /** Stand-in for a cursor inside a size estimate: as long as the encoded cursor can get. */
 const cursorReserve = (kind: string, fields: Record<string, unknown>) => '0'.repeat(encodeCursor({ k: kind, ...fields }).length);
 const SHA_PLACEHOLDER = '0'.repeat(64);
+const TRACKING_TIMEOUT = (deadline: Deadline) => () => new SafeError(`Git tracking check timed out (${deadline.budgetMs} ms operation budget); narrow the policy or retry.`);
 const MAX_INT = Number.MAX_SAFE_INTEGER;
 const isIndex = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const CURSOR_SKEW_MS = 5 * 60_000;
@@ -332,30 +333,43 @@ export class RepoWorkspace {
     const editable = new Set<string>();
     // edit's tracking check needs HEAD, so on an unborn branch nothing is editable yet.
     if (!snapshot.born) return { editable, generation: snapshot.generation };
-    for (const file of writable) if (await this.listed(file, snapshot.head) ? await this.listed(file, snapshot.index) : this.isCreatable(file)) editable.add(file);
+    for (const file of writable) {
+      deadline.check(TRACKING_TIMEOUT(deadline));
+      if (await this.listed(file, snapshot.head) ? await this.listed(file, snapshot.index) : this.isCreatable(file)) editable.add(file);
+    }
+    deadline.check(TRACKING_TIMEOUT(deadline));
     return { editable, generation: snapshot.generation };
   }
   /**
    * HEAD and index names for one Git generation: the HEAD commit plus the index file's identity. The
-   * whole-repository listing (two Git calls, no pathspec) is cached until the generation changes; it is
-   * kept only when the generation is the same before and after listing. If the listing is too large or
-   * fails, only `paths` are asked, in bounded batches, and nothing is cached.
+   * whole-repository listing (two Git calls, no pathspec) is cached until the generation changes. If that
+   * listing is too large or fails, only `paths` are asked, in bounded batches, and nothing is cached. Either
+   * way the generation must be the same before and after collecting, or the collection is repeated; a
+   * generation that keeps changing fails explicitly instead of mixing two generations.
    */
   private async trackingSnapshot(paths: string[], deadline: Deadline) {
-    const { generation, born } = await this.trackingGeneration(deadline);
-    if (this.tracking?.generation === generation) return this.tracking;
-    // An unborn branch has nothing in HEAD.
     const headArgs = ['ls-tree', '-r', '--name-only', '-z', 'HEAD'], indexArgs = ['ls-files', '--cached', '-z'];
-    try {
-      const all = async (args: string[]) => new Set((await this.git(args, deadline.timeout())).stdout.split('\0').filter(Boolean));
-      deadline.check(() => new SafeError(`Git tracking check timed out (${deadline.budgetMs} ms operation budget); narrow the policy or retry.`));
-      const snapshot = { generation, born, head: born ? await all(headArgs) : new Set<string>(), index: await all(indexArgs) };
-      if ((await this.trackingGeneration(deadline)).generation === generation) this.tracking = snapshot;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { generation, born } = await this.trackingGeneration(deadline);
+      if (this.tracking?.generation === generation) return this.tracking;
+      // An unborn branch has nothing in HEAD.
+      let full = true, head = new Set<string>(), index: Set<string>;
+      try {
+        const all = async (args: string[]) => new Set((await this.git(args, deadline.timeout())).stdout.split('\0').filter(Boolean));
+        deadline.check(TRACKING_TIMEOUT(deadline));
+        if (born) head = await all(headArgs);
+        index = await all(indexArgs);
+      } catch {
+        full = false;
+        if (born && paths.length) head = await this.gitNames(headArgs, paths, deadline);
+        index = paths.length ? await this.gitNames(indexArgs, paths, deadline) : new Set<string>();
+      }
+      if ((await this.trackingGeneration(deadline)).generation !== generation) continue;
+      const snapshot = { generation, born, head, index };
+      if (full) this.tracking = snapshot;
       return snapshot;
-    } catch {
-      if (!paths.length) return { generation, born, head: new Set<string>(), index: new Set<string>() };
-      return { generation, born, head: born ? await this.gitNames(headArgs, paths, deadline) : new Set<string>(), index: await this.gitNames(indexArgs, paths, deadline) };
     }
+    throw new SafeError('Git HEAD or index kept changing while tracking was checked; retry when no other process is committing or staging.');
   }
   private async trackingGeneration(deadline: Deadline) {
     const indexPath = (await this.git(['rev-parse', '--git-path', 'index'], deadline.timeout())).stdout.trim();
@@ -1265,7 +1279,8 @@ export class RepoWorkspace {
       files: all, editable_files: all.filter(f => editable.has(f)),
       creatable_files: this.paths.creatablePaths, test_suites: tests.filter(f => inv.index.has(f)), configured_test_suites: tests,
       // A configured test counts only through the inventory entry edit would resolve it to; a missing one is not editable.
-      editable_test_files: tests.filter(f => { const entry = inv.resolve(f); return !!entry && editable.has(entry.path); }),
+      // Exact spelling, like test_suites and run_tests; a missing configured test is not editable.
+      editable_test_files: tests.filter(f => inv.index.has(f) && editable.has(f)),
       generation
     };
   }
