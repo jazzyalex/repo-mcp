@@ -421,3 +421,18 @@ test('ignored_exact watches existing parents when a deeper parent is missing, so
   await writeFile(path.join(m.root, 'research', 'new', 'notes.md'), 'fresh\n');
   assert.ok((await listAll(repo)).paths.includes('research/new/notes.md'));
 });
+
+test('a parent of an ignored_exact file that becomes a nested repository during discovery is not used', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'needle\n' });
+  let made = false;
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], ignored_exact: ['research/notes.md'] }), {
+    pathHook: async stage => {
+      if (stage === 'walk:sources-listed' && !made) { made = true; await mkdir(path.join(m.root, 'research', '.git')); }
+    }
+  }, m.track);
+  const { paths, last } = await listAll(repo);
+  assert.ok(made);
+  assert.ok(!paths.includes('research/notes.md'), 'the retried walk sees the nested repository');
+  assert.ok(last.inventory.skipped.nested_repo >= 1);
+  await assert.rejects(repo.read('research/notes.md'), /not exposed/);
+});

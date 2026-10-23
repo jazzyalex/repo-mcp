@@ -125,7 +125,10 @@ the size limit on the root's device, and every parent is a real directory on the
 repository. Every existing real parent is fingerprinted, even when a deeper parent or the file is missing, so a later
 create re-walks. The probing honors the discovery deadline and counts toward a 4 x inventory_paths cap. The
 consistency check after the second listing exempts only the entries this step admitted, never another file whose
-name happens to normalize to a listed path. Ordinary walk entries and verified reads also require the root's device. An empty list is omitted from the policy, so existing digests do not move.
+name happens to normalize to a listed path. Before a walk is accepted, each admitted file's parents are checked
+again (same fingerprint, still a real directory on the root's device, still no `.git`); otherwise the walk retries.
+Skipped listed paths count in the usual `skipped` counters. Ordinary walk entries, refreshed entries and directories,
+and verified reads also require the root's device; a device change on refresh re-walks. An empty list is omitted from the policy, so existing digests do not move.
 - Each directory is lstat-ed before and after listing; if its identity moved, that directory is re-listed once, then the build fails with an explicit "changed during discovery" error.
 
 `mayDescend(D)` is true only if **all** hold; otherwise the directory is pruned:

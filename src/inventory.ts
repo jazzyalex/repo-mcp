@@ -158,10 +158,12 @@ export class Inventory {
   async refresh(ctx: WalkContext): Promise<Inventory> {
     if (!await sourcesUnchanged(ctx, this.ignoreSources)) return walk(ctx);
     await ctx.hook?.('refresh:sources-checked', { path: '' });
+    // Anything now on another device (a mount over a file or directory) re-walks.
+    const rootDev = (await lstat(ctx.root, { bigint: true })).dev;
     for (const dir of this.dirs) {
       ctx.deadline.check(ctx.expired);
       const stat = await lstat(abs(ctx.root, dir.path), { bigint: true }).catch(() => undefined);
-      if (!stat || !stat.isDirectory() || dirFingerprint(stat) !== dir.fp) return walk(ctx);
+      if (!stat || !stat.isDirectory() || stat.dev !== rootDev || dirFingerprint(stat) !== dir.fp) return walk(ctx);
     }
     let changed = false;
     for (let i = 0; i < this.entries.length; i += 64) {
@@ -170,7 +172,7 @@ export class Inventory {
       const stats = await Promise.all(batch.map(e => lstat(abs(ctx.root, e.path), { bigint: true }).catch(() => undefined)));
       for (let j = 0; j < batch.length; j++) {
         const stat = stats[j], entry = batch[j];
-        if (!stat || !stat.isFile() || stat.nlink > 1n || Number(stat.size) > ctx.maxFileBytes) return walk(ctx);
+        if (!stat || !stat.isFile() || stat.nlink > 1n || stat.dev !== rootDev || Number(stat.size) > ctx.maxFileBytes) return walk(ctx);
         const fp = fingerprint(stat);
         if (fp !== entry.fp) { entry.fp = fp; entry.size = Number(stat.size); entry.mode = Number(stat.mode); changed = true; }
       }
@@ -207,7 +209,9 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     const consistent = sameSources(before, after) &&
       (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path) && !admitted.has(entry.path))) &&
       (await ignoreConfigSources(ctx)).join('\0') === configSources.join('\0');
-    if (consistent) return inventory.withIgnoreSources(after);
+    // An admitted ignored_exact file's parents must still be the same real directories
+    // outside any nested repository; otherwise this answer is not used.
+    if (consistent && await admittedParentsUnchanged(ctx, inventory, admitted)) return inventory.withIgnoreSources(after);
   }
   throw IGNORE_UNSTABLE();
 }
@@ -219,7 +223,23 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
  * directories are fingerprinted so a change there triggers a re-walk. Anything else is
  * left out, exactly like any other file the walk would skip.
  */
-async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>) {
+async function admittedParentsUnchanged(ctx: WalkContext, inventory: Inventory, admitted: Set<string>) {
+  if (!admitted.size) return true;
+  const rootDev = (await lstat(ctx.root, { bigint: true })).dev;
+  const fps = new Map(inventory.dirs.map(d => [d.path, d.fp]));
+  for (const rel of admitted) {
+    const parts = rel.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join('/');
+      const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
+      if (!stat || !stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== rootDev || dirFingerprint(stat) !== fps.get(dir)) return false;
+      if (await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) return false;
+    }
+  }
+  return true;
+}
+
+async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>, skipped: Skipped) {
   const listed = new Set(entries.map(e => nfc(e.path)));
   const walked = new Set(dirs.map(d => d.path));
   let visited = 0;
@@ -237,15 +257,21 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
       ctx.deadline.check(ctx.expired);
       const dir = parts.slice(0, i).join('/');
       const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
-      ok = !!stat && stat.isDirectory() && !stat.isSymbolicLink() && stat.dev === rootStat.dev &&
-        !(await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false));
+      ok = !!stat && stat.isDirectory() && !stat.isSymbolicLink();
+      if (ok && stat!.dev !== rootStat.dev) { skipped.other_device++; ok = false; }
+      if (ok && await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) { skipped.nested_repo++; ok = false; }
       if (ok && !walked.has(dir)) { dirs.push({ path: dir, fp: dirFingerprint(stat!) }); walked.add(dir); }
     }
     // Only a path Git actually ignores needs the exception; any other is the walk's business.
     if (!ok || !ignoredBy(ignored, rel)) continue;
     if (++visited > cap) throw limitError(`visited more than ${cap} ignored_exact components (4 x inventory_paths)`);
     const stat = await lstat(abs(ctx.root, rel), { bigint: true }).catch(() => undefined);
-    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1n || stat.dev !== rootStat.dev || Number(stat.size) > ctx.maxFileBytes) continue;
+    if (!stat) continue;
+    if (stat.isSymbolicLink()) { skipped.symlinks++; continue; }
+    if (!stat.isFile()) { skipped.special++; continue; }
+    if (stat.nlink > 1n) { skipped.linked++; continue; }
+    if (stat.dev !== rootStat.dev) { skipped.other_device++; continue; }
+    if (Number(stat.size) > ctx.maxFileBytes) { skipped.too_large++; continue; }
     entries.push({ path: rel, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
     listed.add(nfc(rel));
     admitted.add(rel);
@@ -312,6 +338,6 @@ async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory
     }
   }
   const admitted = new Set<string>();
-  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat, admitted);
+  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat, admitted, skipped);
   return { inventory: Inventory.of(entries, dirs, skipped, policy.digest), gitignores, admitted };
 }
