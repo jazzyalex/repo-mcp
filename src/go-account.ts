@@ -27,6 +27,8 @@ const HOUR_MS = 3_600_000;
  */
 export const SEND_BOUND_MS = 120_000;
 export const SEND_CLICK_DEADLINE_MS = 45_000;
+/** Longest a whole click sequence can take: five CDP commands of at most 30 s each. */
+export const CLICK_SEQUENCE_MAX_MS = 150_000;
 /**
  * A click command that failed or timed out may still run in Chrome: the driver keeps the
  * setup lease and moves the attempt bound this far past the failure while it settles.
@@ -386,11 +388,15 @@ export async function commitSend(store: StateStore, dir: string, key: string, op
   });
 }
 
-/** Move an unconfirmed attempt's latest possible send time later; never earlier. */
-export async function extendSend(store: StateStore, attemptId: string, bound: Date) {
+/**
+ * Set an unconfirmed attempt's latest possible send time. The driver raises it before the
+ * click and sets it to the observed return time after a clean click.
+ */
+export async function boundSend(store: StateStore, attemptId: string, bound: Date) {
   await update(store, account => {
     const a = account.attempts.find(x => x.id === attemptId);
-    if (!a || a.confirmed_at || Date.parse(a.bound) >= bound.getTime()) return { value: undefined };
+    if (!a) throw new AccountError('ACCOUNT_STATE_CORRUPT', `Send attempt ${attemptId} is missing.`);
+    if (a.confirmed_at) return { value: undefined };
     return { value: undefined, next: { ...account, attempts: account.attempts.map(x => x.id === attemptId ? { ...x, bound: bound.toISOString() } : x) } };
   });
 }

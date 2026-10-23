@@ -26,7 +26,7 @@ import { execSessionsQuiet } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
-  pidReusedSince, releaseSlot, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, extendSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
+  pidReusedSince, releaseSlot, CLICK_SEQUENCE_MAX_MS, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, boundSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
 } from './go-account.js';
 import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
@@ -44,6 +44,8 @@ export const GO_KIND = 'chatgpt-go-v1';
 const WS_CLAIM_KIND = 'chatgpt-go-ws-claim-v1';
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** Check errors that a later run retries: the seal or an exec command was not finished yet. */
+const RETRYABLE_CHECK_ERROR = /^(NOT_SEALED|EXEC_STILL_RUNNING): /;
 /** A stop latch that cannot be persisted is retried this often, holding the setup lease. */
 const LATCH_RETRY_MS = 5_000;
 const LATCH_RETRIES = 360;
@@ -69,7 +71,11 @@ export interface ChatGptPage {
   pastePrompt(prompt: string): Promise<void>;
   /** Click the effort control named `label`, then reread the live control. */
   selectEffort(label: string): Promise<{ selectedAt: Date; observedLabel: string }>;
-  clickSend(): Promise<void>;
+  /**
+   * Click Send once. `budgetMs` is how long, from the call, the page may still start the
+   * press; past it the page throws SEND_NOT_CLICKED before any press is dispatched.
+   */
+  clickSend(budgetMs?: number): Promise<void>;
   conversationUrl(): Promise<string | undefined>;
   hasExpectedUserMessage(prompt: string): Promise<boolean>;
   turnState(prompt: string): Promise<TurnState>;
@@ -466,8 +472,8 @@ class Driver {
   private holdLease = false;
 
   private async finish(phase: 'cleaned' | 'failed', patch: Partial<GoManifest> = {}) {
-    // The process ends right after; a lease it could not release is recovered from a dead owner.
-    await this.dropLease().catch(() => {});
+    // A lease that cannot be released is raised after the run is finished, never forgotten.
+    const leaseError = await this.dropLease().then(() => undefined, (error: unknown) => error);
     // The run is terminal: release the account even if a manifest or cleanup write fails.
     try {
       await this.save({ ...patch, phase });
@@ -476,14 +482,16 @@ class Driver {
     } finally {
       await this.releaseSlot();
     }
+    if (leaseError) throw leaseError;
     return result(this.m, this.m.run_id ? await this.run() : undefined);
   }
 
   private async hold(code: string) {
-    await this.dropLease().catch(() => {});
+    const leaseError = await this.dropLease().then(() => undefined, (error: unknown) => error);
     const run = await this.run();
     if (run.state === 'submission-reserved' || run.state === 'submitted') await markChatGptRunUncertain(run.run_id, code, this.stateDir, this.now());
     await this.save({ phase: 'uncertain', failure_code: code });
+    if (leaseError) throw leaseError;
     return result(this.m, await this.run());
   }
 
@@ -703,18 +711,27 @@ class Driver {
       if (error instanceof AccountError && error.code === 'LATCH_WRITE_FAILED') this.keepSlot = true;
       return this.denySend(codeOf(asGo(error), 'SEND_DENIED'));
     }
-    if (this.now().getTime() - committedAt > SEND_CLICK_DEADLINE_MS) {
+    const left = SEND_CLICK_DEADLINE_MS - (this.now().getTime() - committedAt);
+    if (left <= 0) {
       // This process has not clicked: the attempt stays charged, the run is not submitted.
       return this.denySend('SEND_LATE');
     }
+    // Before any input, persist a bound that covers the whole click sequence and its
+    // settle window, so a crash mid-click can never leave too early a bound. If that write
+    // fails, nothing is clicked.
+    try { await boundSend(this.account, this.m.send_attempt_id!, new Date(this.now().getTime() + CLICK_SEQUENCE_MAX_MS + CLICK_SETTLE_MS)); }
+    catch { return this.denySend('SEND_BOUND_UNWRITABLE'); }
     let clickFailed = false;
-    try { await this.page.clickSend(); }
-    catch { clickFailed = true; }
-    // Every click command has returned. One that failed or timed out may still run in
-    // Chrome, so move the attempt bound past a settle window and keep the lease while
-    // confirming for that long; a clean return bounds the send by now.
+    try { await this.page.clickSend(left); }
+    catch (error) {
+      if (error instanceof GoError && error.code === 'SEND_NOT_CLICKED') return this.denySend('SEND_LATE');
+      clickFailed = true;
+    }
+    // Every click command has returned. A clean return bounds the send by now; one that
+    // failed or timed out may still run in Chrome, so keep the bound past a settle window
+    // and keep the lease while confirming for that long.
     const settle = clickFailed ? CLICK_SETTLE_MS : 0;
-    await extendSend(this.account, this.m.send_attempt_id!, new Date(this.now().getTime() + settle));
+    await boundSend(this.account, this.m.send_attempt_id!, new Date(this.now().getTime() + settle)).catch(() => {});
     if (clickFailed) await this.checkSignal();
     return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED', Math.max(SEND_CONFIRM_MS, settle));
   }
@@ -905,7 +922,9 @@ class Driver {
    */
   private async runChecks() {
     if (this.m.kind !== 'code' || !this.m.code?.checks.length) return;
-    if (this.m.checks?.length === this.m.code.checks.length || this.m.checks_error) return;
+    if (this.m.checks?.length === this.m.code.checks.length) return;
+    // A seal or exec that was not finished yet is retried; other check errors are final.
+    if (this.m.checks_error && !RETRYABLE_CHECK_ERROR.test(this.m.checks_error)) return;
     try {
       // Checks against a workspace that may still accept edits would prove nothing.
       if (this.m.sealed !== 'revoked') throw new GoError('NOT_SEALED', `Workspace is not sealed (${this.m.sealed ?? 'unknown'}); checks skipped.`);
@@ -929,7 +948,8 @@ class Driver {
       }
       await this.save({ candidate_changed: (await candidateDigest(root)) !== before });
     } catch (error) {
-      await this.save({ checks_error: error instanceof Error ? error.message.slice(0, 500) : 'Checks failed.' });
+      const code = error instanceof GoError ? `${error.code}: ` : '';
+      await this.save({ checks_error: `${code}${error instanceof Error ? error.message : 'Checks failed.'}`.slice(0, 500) });
     }
   }
 

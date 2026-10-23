@@ -299,10 +299,16 @@ export class CdpChatGptPage implements ChatGptPage {
     return { selectedAt, observedLabel: observed.text };
   }
 
-  async clickSend() {
+  async clickSend(budgetMs = Infinity) {
+    const deadline = Date.now() + budgetMs;
     const send = await this.one('send');
     if (send.disabled) throw new GoError('UI_DISABLED:send', 'Send is disabled.');
-    await this.click(send);
+    const base = { x: send.x, y: send.y, button: 'left', clickCount: 1 };
+    await this.send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved' });
+    // The press is the first input that can send: never start it past the budget.
+    if (Date.now() > deadline) throw new GoError('SEND_NOT_CLICKED', 'The click budget ran out before the press; nothing was pressed.');
+    await this.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed' });
+    await this.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' });
   }
 
   async conversationUrl() {

@@ -651,3 +651,34 @@ test('a fresh request re-entering its slot still stops at the owner latch', asyn
   await setLatch(store, f.accountDir, { code: 'OWNER_STOP', by: 'owner', reason: 'stop' }, new Date());
   await assert.rejects(admitSlot(store, f.accountDir, slot, { sleep }), e => code(e, 'ACCOUNT_LATCHED'));
 });
+
+// --- review round 8 fixes -------------------------------------------------------------------
+
+test('before any click input the attempt bound covers the whole click sequence and its settle window', async t => {
+  const f = await fixture(t);
+  const page = new Page('a', newLog());
+  let seen: { bound: number; at: number; budget: number } | undefined;
+  const click = page.clickSend.bind(page);
+  page.clickSend = async (budget?: number) => {
+    const record = await (await StateStore.open(f.accountDir)).read<any>('account-v2', 'chatgpt-go-account-v2');
+    const a = record.attempts.at(-1);
+    seen = { bound: Date.parse(a.bound), at: Date.parse(a.at), budget: budget ?? Infinity };
+    await click();
+  };
+  assert.equal((await runGo(req(f, 'a'), { page, sleep })).phase, 'cleaned');
+  assert.ok(seen!.bound - seen!.at >= 150_000 + 60_000, 'a crash mid-click leaves a bound past every possible press');
+  assert.ok(seen!.budget > 0 && seen!.budget <= 45_000, 'the page gets the remaining press budget');
+  const after = await (await StateStore.open(f.accountDir)).read<any>('account-v2', 'chatgpt-go-account-v2');
+  assert.ok(after.attempts.at(-1).confirmed_at, 'a clean click is confirmed at the observed time');
+});
+
+test('a press budget that runs out inside the page clicks nothing and fails pre-submit', async t => {
+  const f = await fixture(t);
+  const page = new Page('a', newLog());
+  page.clickSend = async () => { throw new GoError('SEND_NOT_CLICKED'); };
+  const r = await runGo(req(f, 'a'), { page, sleep });
+  assert.equal(r.phase, 'failed');
+  assert.equal(r.failure_code, 'SEND_LATE');
+  assert.equal(r.run_state, 'failed-pre-submit');
+  assert.equal((await accountStatus(f.accountDir)).slots_in_use, 0);
+});

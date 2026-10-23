@@ -100,7 +100,10 @@ when its owner is dead, so nobody else can start setup while the new owner waits
 any command the dead owner already sent to settle. The lease serializes command issuance; it never replays a dead owner's
 command. `chatgpt-run probe` takes the same lease. A malformed lease record fails closed
 (`ACCOUNT_STATE_CORRUPT`). A release that keeps failing before the answer wait raises
-`LEASE_RELEASE_FAILED`, so the lease is never silently left behind a live process.
+`LEASE_RELEASE_FAILED`, so the lease is never silently left behind a live process; at a
+terminal or held transition the state is saved first and the error is then raised.
+- Project checks blocked by `NOT_SEALED` or `EXEC_STILL_RUNNING` are retried by a later
+  run of the request; completed check results are kept.
 
 Lease sections (each acquired and released explicitly, never held during the answer
 wait, checks, or a recursive recovery):
@@ -125,7 +128,11 @@ least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 120 s}`, t
 The gap and the hourly count use `confirmed_at` (the observed time, never earlier) when
 present, else `bound`. The click is made only within 45 s of the commit; a later click is
 not made, the run is resolved `not-submitted` (`SEND_LATE`) and the attempt stays charged.
-When the click returns, the bound moves to at least that time. A click command that
+Before any click input, the bound is raised to cover the whole click sequence (five CDP
+commands of at most 30 s each) plus the 60 s settle window; if that write fails, nothing
+is clicked (`SEND_BOUND_UNWRITABLE`). The page gets the remaining 45 s press budget and
+never starts the mouse press past it (`SEND_NOT_CLICKED`, resolved `SEND_LATE`). When the
+click returns cleanly, the bound is set to the return time. A click command that
 failed or timed out may still run in Chrome: the bound moves to 60 s past the failure,
 and the driver keeps the setup lease while it confirms for those 60 s. A CDP command
 still unexecuted 60 s after its client timeout is assumed never to run (a hung tab);
