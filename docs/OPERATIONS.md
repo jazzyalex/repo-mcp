@@ -491,6 +491,12 @@ npm run --silent chatgpt-run -- go --release-admission --request-id ID --reason 
 - `--status` prints the stored request state without touching the browser.
 - `--resume` never sends again. If a send is unconfirmed, the run stays `uncertain`
   (exit 3) and holds the account.
+- Do not edit files, switch branches or commit in a checkout while a `go` run uses it,
+  including from another session. The task binding or the candidate goes stale: the run
+  fails with `PREPARE_FAILED` ("binding is stale") before the send, or exits 3 with
+  `candidate changed` after it. Make parallel edits in a separate worktree. To recover a
+  run that exited 3 this way, put the checkout back to the run's branch and commit
+  (stash your edits) and run `--resume`; it does not send again.
 - `--release-admission --reason` is the operator escape for a held account. It refuses
   while the run is `submitted`. Use it only after you have checked the chat by hand.
 - Review passes use `--kind review` with `--base-ref` and `--head-ref` (full commits) and
@@ -572,7 +578,7 @@ does not delete the chat.
 | `BROWSER_APPROVAL_TIMEOUT` | Chrome did not get approval in 5 minutes. Run `relay` again and approve the prompt. |
 | `CHATGPT_SIGNED_OUT` | The page is signed out. Sign in by hand, then run again. |
 | `BROWSER_CHALLENGE` | ChatGPT shows a bot check. Solve it by hand. Do not automate it. |
-| `UI_MISSING:<name>` / `UI_AMBIGUOUS:<name>` / `UI_DISABLED:<name>` | A control was not found, matched more than once, or was disabled. ChatGPT may have changed its UI. Run `probe`. The run failed before sending, so a new request can start. For the Repo MCP menu item and the Archive item, `relay/shots/` holds a failure screenshot. |
+| `UI_MISSING:<name>` / `UI_AMBIGUOUS:<name>` / `UI_DISABLED:<name>` | A control was not found, matched more than once, or was disabled. ChatGPT may have changed its UI. Run `probe`. The run failed before sending, so a new request can start. For the Repo MCP menu item and the Archive item, `relay/shots/` holds a failure screenshot. Example: in October 2026 the model button began to show two label lines ("Thinking effort" / "Extra High"); `go` now reads the effort from the last line. |
 | `ACCOUNT_BUSY` | Only with `--no-wait`: every slot is in use. Run again later, or without `--no-wait`. |
 | `RATE_LIMITED` | The hourly send cap is reached. Nothing was sent. Run again later. |
 | `SEND_GAP` / `SELECTION_STALE` | The send commit was refused (gap not passed, or the effort reading is too old). Nothing was sent; the run failed pre-submit. Start a new request. |

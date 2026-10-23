@@ -287,6 +287,9 @@ yourself.
    ChatGPT should run builds and tests itself through the `exec` tool. Repeat `--check`
    for each project check (tests, typecheck, lint). In Claude Code, run it with `run_in_background` and wait for the completion notification. A coding run usually takes
    5–20 minutes.
+   Never edit, switch branches or commit in this checkout while the run is active (also
+   from parallel sessions): the binding or candidate goes stale (`PREPARE_FAILED` "binding
+   is stale", or exit 3 "candidate changed"). Edit in a separate worktree instead.
 4. **Read the result** (first line of `$R/go.json`, one JSON object):
    - `exit=0`, `phase: cleaned`: read the answer from `output_file`. `sealed: revoked`
      means no further edit can land. Each `checks[]` entry has `exit_code`, `timed_out`,
