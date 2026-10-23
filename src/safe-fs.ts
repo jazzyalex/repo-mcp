@@ -37,6 +37,8 @@ export async function openVerified(root: string, rel: string, hook?: PathHook): 
     await hook?.('read:after-open', { path: rel });
     const stat = await handle.stat();
     if (!stat.isFile() || stat.nlink !== 1) throw new SafeError('Expected a regular text file with one hard link.');
+    // A file mounted from another device is outside the repository, whatever its path.
+    if (stat.dev !== (await lstat(root)).dev) throw new SafeError('Path outside repository.');
     const canonical = await realpath(target);
     const inside = path.relative(root, canonical);
     if (inside.startsWith('..') || path.isAbsolute(inside)) throw new SafeError('Path outside repository.');

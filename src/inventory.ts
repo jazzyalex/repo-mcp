@@ -193,11 +193,9 @@ const limitError = (what: string) => new SafeError(`Discovery limit: ${what}. Ad
  * nothing the walk exposed. Otherwise the walk is retried, and it fails closed after a few unstable attempts.
  */
 export async function walk(ctx: WalkContext): Promise<Inventory> {
-  // Listed ignored_exact files are ignored by design; only other entries must stay unignored.
-  const allowed = new Set(ctx.policy.ignoredExact.map(nfc));
   for (let attempt = 0; attempt < IGNORE_ATTEMPTS; attempt++) {
     const ignored = await gitIgnored(ctx);
-    const { inventory, gitignores } = await walkOnce(ctx, ignored);
+    const { inventory, gitignores, admitted } = await walkOnce(ctx, ignored);
     const configSources = await ignoreConfigSources(ctx);
     await ctx.hook?.('walk:sources-listed', { path: '' });
     const files = [...configSources, ...gitignores];
@@ -207,7 +205,7 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     // The second listing may differ only by ignored files appearing or vanishing (a build writing caches); it must
     // not hide anything the walk exposed. The set of config sources must also still be the same.
     const consistent = sameSources(before, after) &&
-      (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path) && !allowed.has(nfc(entry.path)))) &&
+      (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path) && !admitted.has(entry.path))) &&
       (await ignoreConfigSources(ctx)).join('\0') === configSources.join('\0');
     if (consistent) return inventory.withIgnoreSources(after);
   }
@@ -221,34 +219,41 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
  * directories are fingerprinted so a change there triggers a re-walk. Anything else is
  * left out, exactly like any other file the walk would skip.
  */
-async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats) {
+async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>) {
   const listed = new Set(entries.map(e => nfc(e.path)));
   const walked = new Set(dirs.map(d => d.path));
+  let visited = 0;
+  const cap = 4 * ctx.inventoryPaths;
   for (const rel of ctx.policy.ignoredExact) {
-    if (listed.has(nfc(rel)) || !ignoredBy(ignored, rel) || !ctx.policy.decide(rel, 'read').ok) continue;
+    ctx.deadline.check(ctx.expired);
+    if (listed.has(nfc(rel)) || !ctx.policy.decide(rel, 'read').ok) continue;
     const parts = rel.split('/');
     if (parts.some(p => UNSAFE_NAME.test(p) || Buffer.byteLength(p) > 255) || Buffer.byteLength(rel) > 256 || parts.length > MAX_DEPTH) continue;
-    const parents: Dir[] = [];
+    // Watch every existing real parent, even when a deeper one or the file is missing, so a
+    // later create anywhere on the path re-walks.
     let ok = true;
     for (let i = 1; i < parts.length && ok; i++) {
+      if (++visited > cap) throw limitError(`visited more than ${cap} ignored_exact components (4 x inventory_paths)`);
+      ctx.deadline.check(ctx.expired);
       const dir = parts.slice(0, i).join('/');
       const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
       ok = !!stat && stat.isDirectory() && !stat.isSymbolicLink() && stat.dev === rootStat.dev &&
         !(await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false));
-      if (ok && !walked.has(dir)) parents.push({ path: dir, fp: dirFingerprint(stat!) });
+      if (ok && !walked.has(dir)) { dirs.push({ path: dir, fp: dirFingerprint(stat!) }); walked.add(dir); }
     }
-    if (!ok) continue;
-    // Parents are watched even when the file is missing, so creating it later re-walks.
-    for (const p of parents) { dirs.push(p); walked.add(p.path); }
+    // Only a path Git actually ignores needs the exception; any other is the walk's business.
+    if (!ok || !ignoredBy(ignored, rel)) continue;
+    if (++visited > cap) throw limitError(`visited more than ${cap} ignored_exact components (4 x inventory_paths)`);
     const stat = await lstat(abs(ctx.root, rel), { bigint: true }).catch(() => undefined);
-    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1n || Number(stat.size) > ctx.maxFileBytes) continue;
+    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1n || stat.dev !== rootStat.dev || Number(stat.size) > ctx.maxFileBytes) continue;
     entries.push({ path: rel, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
     listed.add(nfc(rel));
+    admitted.add(rel);
     if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
   }
 }
 
-async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory: Inventory; gitignores: string[] }> {
+async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory: Inventory; gitignores: string[]; admitted: Set<string> }> {
   const { root, policy } = ctx;
   const gitignores: string[] = [];
   const entries: Entry[] = [], dirs: Dir[] = [], skipped = emptySkipped();
@@ -300,11 +305,13 @@ async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory
       if (stat.isSymbolicLink()) { skipped.symlinks++; continue; }
       if (!stat.isFile()) { skipped.special++; continue; }
       if (stat.nlink > 1n) { skipped.linked++; continue; }
+      if (stat.dev !== rootStat.dev) { skipped.other_device++; continue; }
       if (Number(stat.size) > ctx.maxFileBytes) { skipped.too_large++; continue; }
       entries.push({ path: child, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
       if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
     }
   }
-  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat);
-  return { inventory: Inventory.of(entries, dirs, skipped, policy.digest), gitignores };
+  const admitted = new Set<string>();
+  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat, admitted);
+  return { inventory: Inventory.of(entries, dirs, skipped, policy.digest), gitignores, admitted };
 }

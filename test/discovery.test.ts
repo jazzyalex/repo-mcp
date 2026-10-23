@@ -412,3 +412,12 @@ test('ignored_exact rejects patterns, secrets and paths the read policy denies',
   const { policyDigest } = await import('../src/policy.js');
   assert.equal(policyDigest(loadPolicy(policyDoc({ ignored_exact: [] }))), policyDigest(loadPolicy(policyDoc())));
 });
+
+test('ignored_exact watches existing parents when a deeper parent is missing, so a later create is seen', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/old.md': 'old\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], ignored_exact: ['research/new/notes.md'] }), {}, m.track);
+  assert.ok(!(await listAll(repo)).paths.includes('research/new/notes.md'));
+  await mkdir(path.join(m.root, 'research', 'new'));
+  await writeFile(path.join(m.root, 'research', 'new', 'notes.md'), 'fresh\n');
+  assert.ok((await listAll(repo)).paths.includes('research/new/notes.md'));
+});
