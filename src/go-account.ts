@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SafeError } from './errors.js';
@@ -26,6 +27,13 @@ const HOUR_MS = 3_600_000;
  */
 export const SEND_BOUND_MS = 120_000;
 export const SEND_CLICK_DEADLINE_MS = 45_000;
+/**
+ * A click command that failed or timed out may still run in Chrome: the driver keeps the
+ * setup lease and moves the attempt bound this far past the failure while it settles.
+ */
+export const CLICK_SETTLE_MS = 60_000;
+/** Durable stop written next to the record when the latch itself cannot be written. */
+const LATCH_FALLBACK = 'latch-fallback.json';
 const WAIT_POLL_MS = 5_000;
 const LEASE_POLL_MS = 1_000;
 const LEASE_SETTLE_MS = 5_000;
@@ -261,6 +269,7 @@ export async function admitSlot(store: StateStore, dir: string, req: SlotRequest
         // Read the limits under the account lock, the same lock config-set holds.
         const { config } = await accountConfig(dir);
         if (account.slots.some(s => s.key === req.key)) return { value: { admitted: true } };
+        if (existsSync(path.join(dir, LATCH_FALLBACK))) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT work is stopped by ${LATCH_FALLBACK}; the owner clears it with chatgpt-run account unlatch --reason TEXT.`);
         if (account.latch) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT work is stopped: ${account.latch.code} at ${account.latch.at}. The owner clears it with chatgpt-run account unlatch --reason TEXT.`);
         if (req.kind === 'code') {
           const owner = account.slots.find(s => (s.kind === 'code' && s.checkout === req.checkout) || s.kind === 'legacy');
@@ -345,7 +354,7 @@ export async function commitSend(store: StateStore, dir: string, key: string, op
     const { config } = await accountConfig(dir);
     const cap = effectiveCap(config, options.maxPerHour);
     if (!account.slots.some(s => s.key === key)) throw new AccountError('ADMISSION_LOST', 'Account admission is not held by this request; refusing to send.');
-    if (account.latch) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT sends are stopped: ${account.latch.code}.`);
+    if (account.latch || existsSync(path.join(dir, LATCH_FALLBACK))) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT sends are stopped: ${account.latch?.code ?? LATCH_FALLBACK}.`);
     const t = options.now.getTime();
     const next = nextSend(account, config, cap, t);
     if (next.capped) throw new AccountError('RATE_LIMITED', `${next.recent} ChatGPT sends in the last hour (limit ${cap}).`);
@@ -353,6 +362,15 @@ export async function commitSend(store: StateStore, dir: string, key: string, op
     const attempt: Attempt = { id: randomUUID(), key, at: options.now.toISOString(), bound: new Date(t + SEND_BOUND_MS).toISOString() };
     const attempts = [...account.attempts.filter(a => attemptTime(a) > t - 24 * HOUR_MS), attempt];
     return { value: attempt.id, next: { ...account, attempts } };
+  });
+}
+
+/** Move an unconfirmed attempt's latest possible send time later; never earlier. */
+export async function extendSend(store: StateStore, attemptId: string, bound: Date) {
+  await update(store, account => {
+    const a = account.attempts.find(x => x.id === attemptId);
+    if (!a || a.confirmed_at || Date.parse(a.bound) >= bound.getTime()) return { value: undefined };
+    return { value: undefined, next: { ...account, attempts: account.attempts.map(x => x.id === attemptId ? { ...x, bound: bound.toISOString() } : x) } };
   });
 }
 
@@ -370,9 +388,30 @@ export async function confirmSend(store: StateStore, attemptId: string, now: Dat
 
 /** The driver latches only when the owner enabled it; the owner always can. */
 export async function setLatch(store: StateStore, dir: string, latch: Omit<Latch, 'at'>, now: Date) {
-  if (latch.by === 'driver' && !(await accountConfig(dir)).config.latch_enabled) return false;
   if (latch.by === 'owner' && !latch.reason?.trim()) throw new AccountError('REASON_REQUIRED', 'Setting the latch needs a reason.');
-  return update(store, account => {
+  // A detected challenge must stop every run: retry, then fall back to a plain marker file
+  // that admission and the send commit also honor. Only if both fail is it raised.
+  let last: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await writeLatch(store, dir, latch, now); }
+    catch (error) {
+      if (error instanceof AccountError && error.code === 'ACCOUNT_CONFIG_INVALID') throw error;
+      last = error;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+  try {
+    await writeFile(path.join(dir, LATCH_FALLBACK), JSON.stringify({ ...latch, at: now.toISOString() }) + '\n', { mode: 0o600 });
+    return true;
+  } catch {
+    throw new AccountError('LATCH_WRITE_FAILED', `Could not persist the stop latch: ${last instanceof Error ? last.message : String(last)}`);
+  }
+}
+
+async function writeLatch(store: StateStore, dir: string, latch: Omit<Latch, 'at'>, now: Date) {
+  return update(store, async account => {
+    // Read latch_enabled under the lock that config-set holds.
+    if (latch.by === 'driver' && !(await accountConfig(dir)).config.latch_enabled) return { value: false };
     if (account.latch) return { value: false };
     const audit = [...account.audit, { at: now.toISOString(), action: `latch:${latch.code}`, key: latch.key ?? null, reason: latch.reason ?? latch.by }].slice(-100);
     return { value: true, next: { ...account, latch: { ...latch, at: now.toISOString() }, audit } };
@@ -381,6 +420,7 @@ export async function setLatch(store: StateStore, dir: string, latch: Omit<Latch
 
 export async function clearLatch(store: StateStore, reason: string, now: Date) {
   if (!reason.trim()) throw new AccountError('REASON_REQUIRED', 'Clearing the latch needs a reason.');
+  await rm(path.join(store.dir, LATCH_FALLBACK), { force: true });
   return update(store, account => ({
     value: account.latch,
     next: { ...account, latch: null, audit: [...account.audit, { at: now.toISOString(), action: 'unlatch', key: null, reason }].slice(-100) }
@@ -397,7 +437,7 @@ export async function accountStatus(dir = DEFAULT_ACCOUNT_DIR, now = new Date())
     slots_in_use: account.slots.length, max_concurrent: config.max_concurrent,
     slots: account.slots, waiting: account.waiting,
     sends_last_hour: account.attempts.filter(a => attemptTime(a) > t - HOUR_MS).length, max_per_hour: config.max_per_hour,
-    latch: account.latch, audit: account.audit.slice(-10)
+    latch: account.latch, latch_fallback: existsSync(path.join(dir, LATCH_FALLBACK)), audit: account.audit.slice(-10)
   };
 }
 
@@ -420,7 +460,8 @@ export async function acquireSetupLease(store: StateStore, sleep: (ms: number) =
     if (await store.create(LEASE_PATH, LEASE_KIND, record)) {
       return {
         release: () => withAccountLock(store, async () => {
-          const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND).catch(() => undefined);
+          // A read error is raised, so the driver keeps its lease and retries the release.
+          const current = await store.read<LeaseRecord>(LEASE_PATH, LEASE_KIND);
           if (current?.token === record.token) await store.remove(LEASE_PATH);
         })
       };

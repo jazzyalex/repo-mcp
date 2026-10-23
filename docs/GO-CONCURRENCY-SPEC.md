@@ -56,7 +56,7 @@ audit:    [{ at, action, key, reason }]               // last 100 owner releases
 
 - `key` stays `request_id@sha256(stateDir)[0:12]`.
 - `checkout` is the realpath of the registered repository root for `kind: code`, else
-  null. Coding exclusion compares `checkout`, not the catalog-local repository ID.
+  null. If the realpath cannot be resolved, admission fails `REPOSITORY_UNAVAILABLE`. Coding exclusion compares `checkout`, not the catalog-local repository ID.
 - `started` is the process start time (`ps -o lstart=`), so a reused PID is not mistaken
   for a live owner.
 - Validation on every read: unique keys, slot and waiter keys disjoint, known slot kinds,
@@ -125,7 +125,11 @@ least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 120 s}`, t
 The gap and the hourly count use `confirmed_at` (the observed time, never earlier) when
 present, else `bound`. The click is made only within 45 s of the commit; a later click is
 not made, the run is resolved `not-submitted` (`SEND_LATE`) and the attempt stays charged.
-One CDP command times out after 30 s, so no click lands after `bound`. A verified
+When the click returns, the bound moves to at least that time. A click command that
+failed or timed out may still run in Chrome: the bound moves to 60 s past the failure,
+and the driver keeps the setup lease while it confirms for those 60 s. A CDP command
+still unexecuted 60 s after its client timeout is assumed never to run (a hung tab);
+this is the one transport assumption. A verified
 challenge right before the commit, on every send-confirmation poll and after a click
 error latches the account; before the commit it also stops this send. If the
 commit is denied (latch, cap, gap), nothing was clicked: mark the run uncertain, recover
@@ -142,6 +146,10 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
   of the verified Cloudflare check; never a scan of page text).
 - Set or cleared by the owner: `chatgpt-run account latch --reason TEXT`,
   `chatgpt-run account unlatch --reason TEXT`.
+- The latch write is retried. If the record cannot be written, `latch-fallback.json` in
+  the account store stops admission and the send commit the same way; if neither can be
+  written, the run fails with `LATCH_WRITE_FAILED` and keeps its slot. `latch_enabled`
+  is read under the account lock. `account unlatch` clears both.
 - Effect: no fresh admission, no uncommitted send. Waiting for answers, recovery,
   output capture and cleanup continue.
 - Usage-limit and "too many requests" detection is deferred until captured page fixtures

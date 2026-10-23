@@ -549,7 +549,9 @@ by default) unless noted. Everything is owner-only and outside every served chec
 |---|---|
 | Driver manifests, outputs, check logs | `chatgpt-go/` (`<hash>`, `<hash>.output.md`, `<hash>.check-<n>.log`) |
 | Workspace request claims | `chatgpt-go-ws/` |
-| Account admission and send history | `chatgpt-account/account` |
+| Account slots, queue, send history, latch | `chatgpt-account/account-v2` (`latch-fallback.json` if the latch could not be written) |
+| Owner limits | `chatgpt-account/config.json` |
+| Legacy 0.3 fence (always `migrated-to-v2`) | `chatgpt-account/account` |
 | Relay socket, `relay.log`, failure screenshots | `relay/` (`cdp.sock`, `relay.log`, `shots/`) |
 | Exec session records and logs | `exec-sessions/<task>/`, `exec-logs/<task>/` |
 | `finish` reports | `mcp-reports/<workspace_id>` |

@@ -443,3 +443,42 @@ test('an unreadable request lock counts as a live request for task finish', asyn
   await releaseSlot(store, 'other');
   assert.equal((await run).phase, 'cleaned');
 });
+
+// --- review round 3 fixes -------------------------------------------------------------------
+
+test('a failed click moves the attempt bound past the settle window and confirms for that long', async t => {
+  const f = await fixture(t);
+  const ft = fakeTime();
+  const page = new Page('a', newLog(), { now: ft.now, showMessage: false });
+  page.clickSend = async () => { page.clicks++; throw new GoError('CDP_TIMEOUT'); };
+  const start = ft.now().getTime();
+  const r = await runGo(req(f, 'a'), { page, ...ft });
+  assert.equal(r.phase, 'uncertain');
+  assert.ok(ft.now().getTime() - start >= 60_000, 'confirmation kept polling for the settle window');
+  const record = await (await StateStore.open(f.accountDir)).read<any>('account-v2', 'chatgpt-go-account-v2');
+  const attempt = record.attempts.at(-1);
+  assert.ok(Date.parse(attempt.bound) - Date.parse(attempt.at) >= 60_000);
+});
+
+test('a latch that cannot be written falls back to a marker that stops admission', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  await accountStatus(f.accountDir);
+  const good = await store.read<any>('account-v2', 'chatgpt-go-account-v2');
+  await store.write('account-v2', 'chatgpt-go-account-v2', { ...good, slots: 'broken' });
+  assert.equal(await setLatch(store, f.accountDir, { code: 'BROWSER_CHALLENGE', by: 'driver' }, new Date()), true);
+  await store.write('account-v2', 'chatgpt-go-account-v2', good);
+  const slot = { key: 'k', requestId: 'k', stateDir: f.stateDir, kind: 'architecture' as const, checkout: null };
+  await assert.rejects(admitSlot(store, f.accountDir, slot, { sleep }), e => code(e, 'ACCOUNT_LATCHED'));
+  assert.equal((await accountStatus(f.accountDir)).latch_fallback, true);
+  await clearLatch(store, 'checked', new Date());
+  await admitSlot(store, f.accountDir, slot, { sleep });
+});
+
+test('a setup-lease release that cannot read the lease is raised, not swallowed', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  const lease = await acquireSetupLease(store, sleep);
+  await writeFile(path.join(f.accountDir, 'setup-lease'), 'garbage');
+  await assert.rejects(lease.release());
+});

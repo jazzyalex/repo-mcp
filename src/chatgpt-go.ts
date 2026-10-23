@@ -26,7 +26,7 @@ import { activeExecSessions } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
-  releaseSlot, SEND_CLICK_DEADLINE_MS, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
+  releaseSlot, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, extendSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
 } from './go-account.js';
 import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
 import { closeReviewParticipant, prepareOrJoinReview, reconcileReviewParticipant, recoverReviewParticipant } from './review-share.js';
@@ -400,7 +400,7 @@ class Driver {
   /** Latch the account on a verified page warning (docs/GO-CONCURRENCY-SPEC.md section 6). */
   private async checkSignal() {
     const signal = await this.page.accountSignal?.().catch(() => null);
-    if (signal) await setLatch(this.account, this.accountDir, { code: signal, key: this.key, by: 'driver' }, this.now()).catch(() => {});
+    if (signal) await setLatch(this.account, this.accountDir, { code: signal, key: this.key, by: 'driver' }, this.now());
     return signal ?? null;
   }
 
@@ -430,7 +430,9 @@ class Driver {
     let checkout: string | null = null;
     if (this.m.kind === 'code') {
       const root = (await readMultiRepoCatalog(this.stateDir)).repositories[this.m.repository_id]?.root;
-      checkout = root ? await realpath(root).catch(() => path.resolve(root)) : `unknown:${this.m.repository_id}`;
+      // Fail closed: a lexical fallback could give one checkout two identities.
+      if (!root) throw new GoError('REPOSITORY_UNAVAILABLE', `Registered repository ${this.m.repository_id} is missing.`);
+      checkout = await realpath(root).catch(() => { throw new GoError('REPOSITORY_UNAVAILABLE', `Cannot resolve checkout ${root}.`); });
     }
     return { key: this.key, requestId: this.m.request_id, stateDir: this.store.dir, kind: this.m.kind, checkout };
   }
@@ -636,9 +638,16 @@ class Driver {
       // This process has not clicked: the attempt stays charged, the run is not submitted.
       return this.denySend('SEND_LATE');
     }
+    let clickFailed = false;
     try { await this.page.clickSend(); }
-    catch { await this.checkSignal(); return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED'); }
-    return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED');
+    catch { clickFailed = true; }
+    // Every click command has returned. One that failed or timed out may still run in
+    // Chrome, so move the attempt bound past a settle window and keep the lease while
+    // confirming for that long; a clean return bounds the send by now.
+    const settle = clickFailed ? CLICK_SETTLE_MS : 0;
+    await extendSend(this.account, this.m.send_attempt_id!, new Date(this.now().getTime() + settle));
+    if (clickFailed) await this.checkSignal();
+    return this.confirmOrHold(prompt, 'SEND_UNCONFIRMED', Math.max(SEND_CONFIRM_MS, settle));
   }
 
   /** Nothing was clicked by this process: resolve the reserved run as not submitted. */
@@ -652,8 +661,8 @@ class Driver {
   }
 
   /** Mark submitted only after the expected user message is seen in the conversation. */
-  private async confirmOrHold(prompt: string, code: string): Promise<GoResult> {
-    const deadline = this.now().getTime() + SEND_CONFIRM_MS;
+  private async confirmOrHold(prompt: string, code: string, timeoutMs = SEND_CONFIRM_MS): Promise<GoResult> {
+    const deadline = this.now().getTime() + timeoutMs;
     while (true) {
       // A challenge while confirming stops other runs' sends; this run keeps its own state.
       await this.checkSignal();
