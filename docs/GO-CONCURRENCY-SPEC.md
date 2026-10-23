@@ -109,9 +109,12 @@ terminal or held transition the state is saved first and the error is then raise
   recorded (`check_running`); if that record fails or the driver dies first, the gate
   closes and the command never runs. A new check never starts while a recorded group
   lives, and the marker is cleared only after the whole group is gone
-  (`CHECK_GROUP_ALIVE` otherwise). The coding slot and `task finish` treat a live group
-  like a live exec command. `task finish` refuses manifests with unknown kinds, phases or
-  malformed safety fields.
+  (`CHECK_GROUP_ALIVE` otherwise). A recorded check without a saved result may have run:
+  it is never run again (`CHECK_RESULT_UNKNOWN`, final). The coding slot and `task finish` treat a live group
+  like a live exec command, checked before anything else in the manifest. `task finish`
+  refuses manifests with unknown kinds or phases, a `created_at` that is not a strict ISO
+  time or lies in the future, or coding state without a grant. Exec sessions are matched
+  from one hour before the request, so a clock step back cannot hide one.
 
 Lease sections (each acquired and released explicitly, never held during the answer
 wait, checks, or a recursive recovery):

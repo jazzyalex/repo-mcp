@@ -703,3 +703,21 @@ test('rerunning a code request with the same base ref resumes instead of conflic
   await assert.rejects(runGo({ ...codeBase(stateDir), baseRef: 'HEAD^' }, { page: new FakePage(), sleep }),
     (e: unknown) => e instanceof GoError && e.code === 'REQUEST_CONFLICT');
 });
+
+test('a check recorded as started without a saved result is never run again', async t => {
+  const { stateDir } = await fixture(t);
+  const { page } = codePage(stateDir);
+  const res = await runGo({ ...codeBase(stateDir), checks: ['echo one >> ran-one.txt', 'echo two >> ran-two.txt'] }, { page, sleep });
+  assert.equal(res.checks?.length, 2);
+  // Model a crash after check 1 ran but before its result was saved: its marker remains.
+  const store = await StateStore.open(stateDir);
+  const rel = `chatgpt-go/${sha256('chatgpt-go\0code-1')}`;
+  const m = await store.read<any>(rel, 'chatgpt-go-v1');
+  const { candidate_changed: _c, cleanup: _k, ...rest } = m;
+  await store.write(rel, 'chatgpt-go-v1', { ...rest, phase: 'completed', checks: m.checks.slice(0, 1), check_running: { index: 1, pgid: 999998 } });
+  const again = await runGo(codeBase(stateDir), { page: new FakePage(), sleep });
+  assert.equal(again.phase, 'cleaned');
+  assert.equal(again.checks?.length, 1);
+  assert.match(again.checks_error ?? '', /^CHECK_RESULT_UNKNOWN/);
+  assert.equal(await readFile(path.join(repoRoot(stateDir), 'ran-two.txt'), 'utf8'), 'two\n');
+});

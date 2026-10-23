@@ -732,3 +732,23 @@ test('a go manifest with an unknown kind fails task finish closed', async t => {
   });
   await assert.rejects(activeGoRequestsForTask(f.stateDir, 'task'), /TASK_IN_USE/);
 });
+
+// --- review round 11 fixes ------------------------------------------------------------------
+
+test('task finish fails closed on a future created_at and counts a live check without a grant', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.stateDir);
+  const now = new Date().toISOString();
+  const base = { request_digest: 'd', repository_id: 'repo', task_id: 'task', coordinator: 'claude', kind: 'code', profile: 'code',
+    prompt_sha256: 'p', prompt_file: '', session_id: 's', updated_at: now, phase: 'cleaned' };
+  await store.write(`chatgpt-go/${'7'.repeat(64)}`, 'chatgpt-go-v1', { ...base, request_id: 'future', created_at: '9999-01-01T00:00:00.000Z', grant_id: 'g', sealed: 'revoked' });
+  await assert.rejects(activeGoRequestsForTask(f.stateDir, 'task'), /TASK_IN_USE/);
+  await store.remove(`chatgpt-go/${'7'.repeat(64)}`);
+  const { spawn } = await import('node:child_process');
+  const child = spawn('/bin/sh', ['-c', 'sleep 30'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } });
+  await store.write(`chatgpt-go/${'6'.repeat(64)}`, 'chatgpt-go-v1', { ...base, kind: 'architecture', request_id: 'arch', created_at: now, check_running: { index: 0, pgid: child.pid } });
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), []);
+  await store.write(`chatgpt-go/${'6'.repeat(64)}`, 'chatgpt-go-v1', { ...base, kind: 'code', request_id: 'code-ng', created_at: now, grant_id: 'g', sealed: 'revoked', check_running: { index: 0, pgid: child.pid } });
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['code-ng']);
+});

@@ -230,11 +230,16 @@ export async function goStatus(stateDir: string, requestId: string) {
  * no project check it started can still run, and no exec command of its task can.
  */
 async function codeCheckoutQuiet(stateDir: string, m: GoManifest): Promise<{ quiet: boolean; reason?: string }> {
+  // A live check counts whatever else the manifest says.
+  if (m.check_running && processGroupAlive(m.check_running.pgid)) return { quiet: false, reason: `check ${m.check_running.index} process group ${m.check_running.pgid} is alive` };
   if (!m.grant_id) return { quiet: true };
   if (m.sealed !== 'revoked') return { quiet: false, reason: `workspace ${m.sealed ?? 'not sealed'}` };
-  if (m.check_running && processGroupAlive(m.check_running.pgid)) return { quiet: false, reason: `check ${m.check_running.index} process group ${m.check_running.pgid} is alive` };
-  return execSessionsQuiet(stateDir, m.task_id, m.created_at).catch(() => ({ quiet: false, reason: 'exec scan failed' }));
+  // Sessions are matched by time with an hour of slack, so a clock step back cannot hide one.
+  const since = new Date(Date.parse(m.created_at) - EXEC_SCAN_SLACK_MS).toISOString();
+  return execSessionsQuiet(stateDir, m.task_id, since).catch(() => ({ quiet: false, reason: 'exec scan failed' }));
 }
+const EXEC_SCAN_SLACK_MS = 3_600_000;
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 const GO_PHASES = new Set<string>(['admitted', 'tab-ready', 'prepared', 'reserved', 'send-intent', 'submitted', 'completed', 'cleaned', 'failed', 'uncertain']);
 const GO_KINDS = new Set<string>(['architecture', 'review', 'code']);
@@ -251,8 +256,11 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     catch (error) { throw new SafeError(`TASK_IN_USE: go manifest ${name} is unreadable (${error instanceof Error ? error.message : 'error'}); inspect it before finishing a task.`); }
     if (!m) continue;
     const cr = m.check_running;
+    const created = typeof m.created_at === 'string' && ISO_TIME.test(m.created_at) ? Date.parse(m.created_at) : NaN;
     if (typeof m.task_id !== 'string' || typeof m.request_id !== 'string' || !GO_PHASES.has(m.phase) || !GO_KINDS.has(m.kind) ||
-        !Number.isFinite(Date.parse(m.created_at)) || (m.grant_id !== undefined && typeof m.grant_id !== 'string') ||
+        !Number.isFinite(created) || created > Date.now() + 5 * 60_000 ||
+        (m.grant_id !== undefined && (typeof m.grant_id !== 'string' || !m.grant_id)) ||
+        (m.kind === 'code' && (m.sealed !== undefined || cr !== undefined) && !m.grant_id) ||
         (m.sealed !== undefined && typeof m.sealed !== 'string') ||
         (cr !== undefined && (!cr || !Number.isSafeInteger(cr.index) || !Number.isSafeInteger(cr.pgid) || cr.pgid <= 1))) {
       throw new SafeError(`TASK_IN_USE: go manifest ${name} is corrupt; inspect it before finishing a task.`);
@@ -261,7 +269,7 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     const terminal = m.phase === 'cleaned' || m.phase === 'failed';
     // A terminal coding request may still own the checkout: its workspace is not verified
     // revoked, or an exec command it started may still run (the same proof its slot needs).
-    if (terminal && m.kind === 'code' && m.grant_id && !(await codeCheckoutQuiet(stateDir, m)).quiet) { active.push(m.request_id); continue; }
+    if (terminal && m.kind === 'code' && !(await codeCheckoutQuiet(stateDir, m)).quiet) { active.push(m.request_id); continue; }
     let live = false;
     // An unreadable lock may belong to a live waiter: count it as live.
     let lock: unknown;
@@ -942,9 +950,11 @@ class Driver {
     // recorded error is final (the coordinator runs the checks locally instead).
     if (this.m.checks?.length === this.m.code.checks.length || this.m.checks_error) return;
     try {
-      // A check from an interrupted process may still run: never start another beside it.
-      if (this.m.check_running && processGroupAlive(this.m.check_running.pgid)) {
-        throw new GoError('CHECK_STILL_RUNNING', `Check ${this.m.check_running.index} from an interrupted run still runs (process group ${this.m.check_running.pgid}); checks skipped.`);
+      // A recorded check without a saved result may have run already: never run it again.
+      if (this.m.check_running) {
+        const { index, pgid } = this.m.check_running;
+        if (processGroupAlive(pgid)) throw new GoError('CHECK_STILL_RUNNING', `Check ${index} from an interrupted run still runs (process group ${pgid}); checks skipped.`);
+        if ((this.m.checks?.length ?? 0) <= index) throw new GoError('CHECK_RESULT_UNKNOWN', `Check ${index} was started by an interrupted run and its result is unknown; it is not run again.`);
       }
       // Checks against a workspace that may still accept edits would prove nothing.
       if (this.m.sealed !== 'revoked') throw new GoError('NOT_SEALED', `Workspace is not sealed (${this.m.sealed ?? 'unknown'}); checks skipped.`);
@@ -954,7 +964,8 @@ class Driver {
         // A revoked workspace's exec command is cancelled within seconds; never take the
         // baseline while one still runs.
         const deadline = Date.now() + 20_000;
-        while (!(await execSessionsQuiet(this.stateDir, this.m.task_id, this.m.created_at).catch(() => ({ quiet: false }))).quiet) {
+        const since = new Date(Date.parse(this.m.created_at) - EXEC_SCAN_SLACK_MS).toISOString();
+        while (!(await execSessionsQuiet(this.stateDir, this.m.task_id, since).catch(() => ({ quiet: false }))).quiet) {
           if (Date.now() > deadline) throw new GoError('EXEC_STILL_RUNNING', 'An exec command still runs after the seal; checks skipped.');
           await this.sleep(1_000);
         }
