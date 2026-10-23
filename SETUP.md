@@ -360,6 +360,11 @@ log are always denied, whatever the policy says. Conventional examples such as
 must end in `.example`, `.sample`, `.template`, `.tmpl` or `.dist`); real secret names
 cannot be excepted.
 
+**Editable means edit accepts it.** In `list_files` and `repo_info`, a file is editable when
+`write` permits it and it is either tracked (in HEAD and the index) or untracked with a create
+rule (`create.paths`, or `create.directories` with a matching extension). An untracked file
+that only matches `write.include` is readable but not editable until it is committed.
+
 **Git-ignored files in glob policies.** Glob policies hide untracked files that Git
 ignores, so `research/**` exposes nothing when `.gitignore` ignores `research/`. To expose
 some of them, list each exact path in `ignored_exact` (off by default):

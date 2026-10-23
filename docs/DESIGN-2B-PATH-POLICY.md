@@ -223,7 +223,7 @@ Filesystem discovery cannot see a deleted tracked file, so the diff scope is **n
 
 ### repo_info and list_files
 - `repo_info` keeps its six file lists, now drawn from the inventory and paged by `files_cursor` as in 2a, plus `inventory` counts. For glob policies it also reports a compact `policy_summary` (patterns, dotfiles, create scopes) so the model can reason about scope without listing everything.
-- New `list_files {prefix?, cursor?}`: paged `{path, bytes, editable}` entries in byte order within the page budget, with `complete`, `next_cursor` and the `inventory` block. Read-only; annotations as `search`.
+- New `list_files {prefix?, cursor?}`: paged `{path, bytes, editable}` entries in byte order within the page budget, with `complete`, `next_cursor` and the `inventory` block. Read-only; annotations as `search`. `editable` (and `repo_info.editable_files`, `editable_test_files`, `run_tests` `test_files[].editable`) says what `edit` would accept at the time of the call: write-permitted, and either in HEAD and the index, or not in HEAD and covered by a create rule. It is checked against Git on each call (for `list_files`, only the entries that can fit on the page), because a commit or an index change can change it without moving the inventory digest. A `repo_info` files cursor also goes stale when these answers change.
 - `capabilities` gains `path_policy: "exact" | "glob"` and `discovery: {inventory_paths, tools: ["list_files"]}`.
 
 ### Test snapshot

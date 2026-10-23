@@ -116,6 +116,8 @@ const NOT_EXPOSED = 'Path is not exposed by this repository policy.';
 type Applied<T> = T & { already_applied?: true; outcome_warning?: string };
 const OUTCOME_WARNING = 'Change applied, but its outcome record failed. Retrying with this request_id reconciles by file hash.';
 const LIST_KEYS = ['files', 'editable_files', 'creatable_files', 'test_suites', 'configured_test_suites', 'editable_test_files'] as const;
+/** Files-cursor identity: the inventory and the editability answers, which Git state can change on its own. */
+const listsKey = (inv: Inventory, lists: PathLists) => sha256([inv.digest, ...lists.editable_files, '--', ...lists.editable_test_files].join('\0'));
 type PathLists = Record<typeof LIST_KEYS[number], string[]>;
 /** Stand-in for a cursor inside a size estimate: as long as the encoded cursor can get. */
 const cursorReserve = (kind: string, fields: Record<string, unknown>) => '0'.repeat(encodeCursor({ k: kind, ...fields }).length);
@@ -318,8 +320,20 @@ export class RepoWorkspace {
     }
   }
   private isCreatable(file: string) { return this.paths.createRule(file).ok; }
-  /** Write-permitted and accepted by edit: an untracked ignored_exact file also needs a create rule. */
-  private presentlyEditable(entry: Entry) { return this.paths.decide(entry.path, 'write').ok && (!entry.ignored || this.isCreatable(entry.path)); }
+  /**
+   * The paths `edit` would accept now: write-permitted, and either in HEAD and the index, or not in HEAD
+   * and covered by a create rule (the same test as requireEditableTracked). Checked against Git on every
+   * call, because a commit or an index change can change it without moving the inventory digest.
+   */
+  private async editableNow(paths: string[], deadline: Deadline = this.newDeadline()) {
+    const writable = paths.filter(f => this.paths.decide(f, 'write').ok);
+    const editable = new Set<string>();
+    if (!writable.length) return editable;
+    const head = await this.gitNames(['ls-tree', '-r', '--name-only', '-z', 'HEAD'], writable, deadline);
+    const index = await this.gitNames(['ls-files', '--cached', '-z'], writable, deadline);
+    for (const file of writable) if (await this.listed(file, head) ? await this.listed(file, index) : this.isCreatable(file)) editable.add(file);
+    return editable;
+  }
   private newDeadline() { return new Deadline(this.operationBudgetMs, this.monotonicClock); }
   private walkContext(deadline: Deadline): WalkContext {
     return {
@@ -725,8 +739,11 @@ export class RepoWorkspace {
     const tooSmall = (needs: number) => new SafeError(`page_bytes (${budget}) is too small for a list_files response (it needs at least ${needs} bytes with metadata and one entry); raise page_bytes.`);
     let used = 0, i = offset;
     const files: { path: string; bytes: number; editable: boolean }[] = [];
+    // Only entries that can fit on this page are checked against Git.
+    const window = entries.slice(offset, offset + Math.ceil(budget / jsonBytes({ path: '', bytes: 0, editable: true })) + 1).map(e => e.path);
+    const editable = this.legacy ? new Set(this.legacy.editable) : await this.editableNow(window);
     for (; i < entries.length; i++) {
-      const item = { path: entries[i].path, bytes: entries[i].size, editable: this.legacy ? this.legacy.editable.includes(entries[i].path) : this.presentlyEditable(entries[i]) };
+      const item = { path: entries[i].path, bytes: entries[i].size, editable: editable.has(entries[i].path) };
       const cost = jsonBytes(item) + (files.length ? 1 : 0);
       const total = (i === entries.length - 1 ? done : more) + used + cost;
       if (total > budget) { if (!files.length) throw tooSmall(total); break; }
@@ -1195,7 +1212,7 @@ export class RepoWorkspace {
     return { status: page.content, status_next_cursor: page.next === null ? null : this.captureCursor('status', meta, page.next), status_complete: page.next === null, status_captured_at: shell.status_captured_at };
   }
   /** Every exposed-path list repo_info reports. */
-  private pathLists(inv: Inventory): PathLists {
+  private async pathLists(inv: Inventory): Promise<PathLists> {
     if (this.legacy) {
       const legacy = this.legacy;
       const files = legacy.files.filter(f => inv.index.has(f));
@@ -1207,10 +1224,11 @@ export class RepoWorkspace {
     }
     const tests = this.paths.literalPaths.tests;
     const all = inv.entries.map(e => e.path);
+    const editable = await this.editableNow([...new Set([...all, ...tests])]);
     return {
-      files: all, editable_files: inv.entries.filter(e => this.presentlyEditable(e)).map(e => e.path),
+      files: all, editable_files: all.filter(f => editable.has(f)),
       creatable_files: this.paths.creatablePaths, test_suites: tests.filter(f => inv.index.has(f)), configured_test_suites: tests,
-      editable_test_files: tests.filter(f => { const entry = inv.index.get(f); return entry ? this.presentlyEditable(entry) : this.paths.decide(f, 'write').ok; })
+      editable_test_files: tests.filter(f => editable.has(f))
     };
   }
   /**
@@ -1232,22 +1250,22 @@ export class RepoWorkspace {
   async filesPage(cursor: string) {
     await this.guard();
     const inv = await this.current();
-    const lists = this.pathLists(inv);
+    const lists = await this.pathLists(inv);
     const c = this.readCursor('files', cursor, { a: 'files' });
-    if (c.i !== inv.digest) throw staleCursor('the file inventory');
+    if (c.i !== listsKey(inv, lists)) throw staleCursor('the file inventory');
     const total = LIST_KEYS.reduce((n, key) => n + lists[key].length, 0);
     if (!isIndex(c.o) || c.o > total) throw new SafeError('Invalid cursor for files. Start again without a cursor.');
     const empty = Object.fromEntries(LIST_KEYS.map(key => [key, []]));
     const shell = { ...empty, files_next_cursor: this.cursorShell('files', { o: MAX_INT }), files_complete: false };
     const page = this.listsPage(lists, c.o, this.room(shell), true);
-    return { ...page.lists, files_next_cursor: page.next === null ? null : this.makeCursor('files', { i: inv.digest, a: 'files', o: page.next }), files_complete: page.next === null };
+    return { ...page.lists, files_next_cursor: page.next === null ? null : this.makeCursor('files', { i: listsKey(inv, lists), a: 'files', o: page.next }), files_complete: page.next === null };
   }
   /** `extra` is added to the response by the caller; it is counted against the page. */
   async info(extra: Record<string, unknown> = {}) {
     await this.guard();
     const identity = await resolveIdentity(this.root);
     const inv = await this.current();
-    const lists = this.pathLists(inv);
+    const lists = await this.pathLists(inv);
     const task = this.task ? await this.task.summary() : null;
     const capture = await this.statusCapture();
     // Select only an exposed root instruction file, using its actual disk spelling.
@@ -1276,7 +1294,7 @@ export class RepoWorkspace {
     if (page.next === null) await this.captures.discard(capture.id);
     return {
       ...fixed, ...paths.lists,
-      files_next_cursor: paths.next === null ? null : this.makeCursor('files', { i: inv.digest, a: 'files', o: paths.next }), files_complete: paths.next === null,
+      files_next_cursor: paths.next === null ? null : this.makeCursor('files', { i: listsKey(inv, lists), a: 'files', o: paths.next }), files_complete: paths.next === null,
       status: page.content, status_next_cursor: page.next === null ? null : this.captureCursor('status', capture, page.next), status_complete: page.next === null, status_captured_at: shell.status_captured_at,
       instructions: instructions.content, instructions_next_cursor: instructions.next === null ? null : window.cursor(instructions.next)
     };
@@ -1531,6 +1549,8 @@ export class RepoWorkspace {
       if (suite && !available.includes(suite)) throw new SafeError('Test suite has not been created yet.');
       const selected = suite ? [suite] : tests.filter(f => available.includes(f));
       if (!selected.length) throw new SafeError('No configured test suites exist yet.');
+      // Checked before the run, so a completed run never waits on Git or a new discovery.
+      const editable = this.legacy ? new Set(this.legacy.editable) : await this.editableNow(selected);
       const snapshot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-tests-')));
       try {
         for (const file of available) {
@@ -1545,9 +1565,7 @@ export class RepoWorkspace {
           ? await pythonCommand(snapshot, selected, this.runner)
           : {executable: process.execPath, args: ['--permission', `--allow-fs-read=${snapshot}`, '--test-isolation=none', '--test', ...selected], env: {}, label: 'node --permission --allow-fs-read=<approved-file-snapshot> --test-isolation=none --test ' + selected.join(' ')};
         const result = await execute(command.executable, command.args, snapshot, 10_000, command.env);
-        // The inventory the snapshot came from; a completed run never waits on a new discovery.
-        const writable = (file: string) => { if (this.legacy) return this.legacy.editable.includes(file); const entry = inv.index.get(file); return entry ? this.presentlyEditable(entry) : this.paths.decide(file, 'write').ok; };
-        return { test_files: selected.map(file => ({ path: file, editable: writable(file) })), command: command.label, ...result };
+        return { test_files: selected.map(file => ({ path: file, editable: editable.has(file) })), command: command.label, ...result };
       } finally { await rm(snapshot, { recursive: true, force: true }); }
     }, preflight);
   }

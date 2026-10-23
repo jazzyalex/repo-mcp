@@ -510,9 +510,28 @@ test('an ignore rule changed in place during discovery never leaves a stale igno
       if (stage === 'walk:sources-listed' && !changed) { changed = true; await writeFile(path.join(m.root, '.gitignore'), 'other/\n'); }
     }
   }, m.track);
-  const file = (await repo.listFiles()).files.find(f => f.path === 'research/notes.md');
+  const digest = (await listAll(repo)).last.inventory.digest;
   assert.ok(changed);
-  assert.equal(file?.editable, true, 'the retried walk sees an ordinary (not ignored) file');
+  // A fresh walk of the final tree has no ignored mark; the retried walk must match it.
+  const fresh = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], write: { include: ['research/**'], exclude: [] }, ignored_exact: ['research/notes.md'] }), {}, m.track);
+  assert.equal(digest, (await listAll(fresh)).last.inventory.digest, 'the retried walk sees an ordinary (not ignored) file');
+});
+
+test('editable flags say what edit accepts: tracked, or untracked with a create rule, and follow a commit', async t => {
+  const m = await makeRepo(t, { 'notes/tracked.md': 't\n' });
+  await writeFile(path.join(m.root, 'notes', 'loose.md'), 'l\n');
+  await writeFile(path.join(m.root, 'notes', 'new.md'), 'n\n');
+  const policy = policyDoc({ write: { include: ['notes/**'], exclude: [] }, create: { paths: ['notes/new.md'], directories: [], extensions: [] } });
+  const repo = await openGlob(t, m.root, policy, {}, m.track);
+  const flags = async () => Object.fromEntries((await repo.listFiles('notes/')).files.map(f => [f.path, f.editable]));
+  assert.deepEqual(await flags(), { 'notes/loose.md': false, 'notes/new.md': true, 'notes/tracked.md': true });
+  const info = await repo.info();
+  assert.deepEqual([...(info as { editable_files: string[] }).editable_files].sort(), ['notes/new.md', 'notes/tracked.md']);
+  await assert.rejects(repo.edit('notes/loose.md', 'l', 'x', (await repo.read('notes/loose.md')).sha256), /HEAD|tracked/);
+  // Committing the loose file makes it editable without any tree change the inventory would see.
+  await git(m.root, 'add', 'notes/loose.md');
+  await git(m.root, 'commit', '-q', '-m', 'add loose');
+  assert.equal((await flags())['notes/loose.md'], true);
 });
 
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
