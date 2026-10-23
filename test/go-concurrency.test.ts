@@ -538,3 +538,39 @@ test('a request lock whose PID was reused does not count as a live request', asy
   assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['a']);
   await state.remove(lockRel);
 });
+
+// --- review round 5 fixes -------------------------------------------------------------------
+
+test('a challenge before the commit whose latch cannot be persisted keeps the slot; a rerun persists it', async t => {
+  const f = await fixture(t);
+  const { chmod } = await import('node:fs/promises');
+  t.after(() => chmod(f.accountDir, 0o700).catch(() => {}));
+  const page = new Page('a', newLog());
+  let selected = false;
+  page.accountSignal = async () => selected ? 'BROWSER_CHALLENGE' : null;
+  page.selectEffort = async (label: string) => { selected = true; await chmod(f.accountDir, 0o500); return { selectedAt: new Date(), observedLabel: label }; };
+  const r = await runGo(req(f, 'a'), { page, sleep });
+  assert.equal(r.phase, 'failed');
+  assert.equal(page.clicks, 0);
+  await chmod(f.accountDir, 0o700);
+  assert.deepEqual((await accountStatus(f.accountDir)).slots.map(s => s.request_id), ['a'], 'an unpersisted stop keeps the slot');
+  await runGo(req(f, 'a'), { page: new Page('a', newLog()), sleep });
+  const status = await accountStatus(f.accountDir);
+  assert.equal(status.latch?.code, 'BROWSER_CHALLENGE', 'the rerun persisted the pending latch');
+  assert.equal(status.slots_in_use, 0);
+});
+
+test('coding recovery never adopts a slot beside a migrated legacy slot', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  const at = new Date().toISOString();
+  await store.write('account', 'chatgpt-go-account-v1', { active_request_id: 'old@abc', since: at, sends: [] });
+  await accountStatus(f.accountDir);
+  const { adoptSlot } = await import('../src/go-account.js');
+  await assert.rejects(adoptSlot(store, { key: 'k', requestId: 'k', stateDir: f.stateDir, kind: 'code', checkout: '/r' }, new Date()), e => code(e, 'REPOSITORY_BUSY'));
+  // The legacy request itself re-adopts with its real kind and checkout.
+  await adoptSlot(store, { key: 'old@abc', requestId: 'old', stateDir: f.stateDir, kind: 'code', checkout: '/r' }, new Date());
+  const slot = (await accountStatus(f.accountDir)).slots[0];
+  assert.equal(slot.kind, 'code');
+  assert.equal(slot.checkout, '/r');
+});

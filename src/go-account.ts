@@ -254,10 +254,15 @@ function slotFor(req: SlotRequest, now: Date): Slot {
 /** Recovery never sends, so it takes its slot back at once: above capacity, past the latch and the queue. */
 export async function adoptSlot(store: StateStore, req: SlotRequest, now: Date) {
   await update(store, account => {
-    if (account.slots.some(s => s.key === req.key)) return { value: undefined };
-    // Recovery of a coding run still mutates its checkout (checks, seal): never beside another.
-    const owner = req.kind === 'code' && account.slots.find(s => s.kind === 'code' && s.checkout === req.checkout);
-    if (owner) throw new AccountError('REPOSITORY_BUSY', `Coding request ${owner.key} owns this checkout; resume after it finishes.`);
+    // Recovery of a coding run still mutates its checkout (checks, seal): never beside
+    // another coding run or a legacy slot whose checkout is unknown.
+    const owner = req.kind === 'code' && account.slots.find(s => s.key !== req.key &&
+      ((s.kind === 'code' && s.checkout === req.checkout) || s.kind === 'legacy'));
+    if (owner) throw new AccountError('REPOSITORY_BUSY', `Request ${owner.key} may own this checkout; resume after it finishes or release it.`);
+    const own = account.slots.find(s => s.key === req.key);
+    // A migrated legacy slot of this request gets its real kind and checkout.
+    if (own?.kind === 'legacy') return { value: undefined, next: { ...account, slots: account.slots.map(s => s.key === req.key ? slotFor(req, now) : s) } };
+    if (own) return { value: undefined };
     return { value: undefined, next: { ...account, waiting: account.waiting.filter(w => w.key !== req.key), slots: [...account.slots, slotFor(req, now)] } };
   });
 }
@@ -434,11 +439,11 @@ async function writeLatch(store: StateStore, dir: string, latch: Omit<Latch, 'at
 
 export async function clearLatch(store: StateStore, reason: string, now: Date) {
   if (!reason.trim()) throw new AccountError('REASON_REQUIRED', 'Clearing the latch needs a reason.');
-  await rm(path.join(store.dir, LATCH_FALLBACK), { force: true });
-  return update(store, account => ({
-    value: account.latch,
-    next: { ...account, latch: null, audit: [...account.audit, { at: now.toISOString(), action: 'unlatch', key: null, reason }].slice(-100) }
-  }));
+  // Marker and record are cleared under the lock that latch setters hold.
+  return update(store, async account => {
+    await rm(path.join(store.dir, LATCH_FALLBACK), { force: true });
+    return { value: account.latch, next: { ...account, latch: null, audit: [...account.audit, { at: now.toISOString(), action: 'unlatch', key: null, reason }].slice(-100) } };
+  });
 }
 
 export async function accountStatus(dir = DEFAULT_ACCOUNT_DIR, now = new Date()) {

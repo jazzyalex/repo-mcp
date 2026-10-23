@@ -166,8 +166,17 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
 - SIGINT or SIGTERM: the driver frees its slot only when no send intent exists and the
   journal shows no run or a terminal run; otherwise the slot stays for `--resume`. It
   never releases the setup lease: dead-owner recovery waits out in-flight input.
-- A completed coding run that fails or is interrupted before cleanup keeps its slot,
-  because seal and checks may still touch the checkout; `--resume` finishes cleanup.
+- A coding run frees its slot only when its workspace (or unused grant) is verified
+  revoked and no exec command of its task still runs. Otherwise every release path
+  (finish, cleanup error, signal) keeps the slot, and `--resume` retries the seal and the
+  remaining checks.
+- A challenge whose latch could not be persisted keeps the slot on every path, including
+  a denied send and a cleanup warning, and is stored in the manifest (`latch_pending`);
+  every later run of that request retries the latch first.
+- Coding recovery refuses `REPOSITORY_BUSY` beside any other coding slot on the checkout
+  or any legacy slot; a request's own legacy slot is upgraded to its real kind and
+  checkout.
+- `account unlatch` removes the fallback marker and the record latch under one lock.
   Recovery of a coding run fails `REPOSITORY_BUSY` while another coding slot owns the
   checkout.
 - An error after the send commit with the lease held waits 60 s before releasing it.

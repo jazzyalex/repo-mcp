@@ -115,6 +115,8 @@ export type GoManifest = {
   participant?: string;
   prompt_file: string; session_id: string; created_at: string; updated_at: string;
   phase: GoPhase; target_id?: string; pending_run_id?: string; run_id?: string; selection_id?: string; send_intent_at?: string;
+  /** A detected challenge whose latch could not be persisted yet; retried on every run. */
+  latch_pending?: string;
   /** The account send attempt committed before the click (docs/GO-CONCURRENCY-SPEC.md section 5). */
   send_attempt_id?: string;
   conversation_url?: string; submission_event_id?: string; output_file?: string; output_sha256?: string;
@@ -377,7 +379,25 @@ class Driver {
   private get key() { return accountKey(this.store.dir, this.m.request_id); }
   private get accountDir() { return this.options.accountDir ?? DEFAULT_ACCOUNT_DIR; }
 
-  private async releaseSlot() { await releaseSlot(this.account, this.key); }
+  /**
+   * Release this request's slot unless something may still need it: a latch that could not
+   * be persisted, or a coding run whose workspace is not revoked or whose exec still runs.
+   */
+  private async releaseSlot() {
+    if (this.keepSlot) return;
+    if (this.m.kind === 'code' && !(await this.checkoutQuiet())) {
+      process.stderr.write(`keeping the coding slot: workspace ${this.m.sealed ?? 'not sealed'}; resume to finish cleanup\n`);
+      return;
+    }
+    await releaseSlot(this.account, this.key);
+  }
+
+  /** A coding run may give up its checkout only once its workspace is revoked and no exec runs. */
+  private async checkoutQuiet() {
+    if (!this.m.grant_id) return true;
+    if (this.m.sealed !== 'revoked') return false;
+    return (await activeExecSessions(this.stateDir, this.m.task_id).catch(() => [1])).length === 0;
+  }
 
   /** The setup lease covers every step that activates a tab or sends input; it is never held while waiting for an answer. */
   private lease?: SetupLease;
@@ -410,8 +430,15 @@ class Driver {
   /** A latch that could not be persisted anywhere keeps this request's slot and is raised. */
   private keepSlot = false;
   private async latch(code: string) {
-    try { await setLatch(this.account, this.accountDir, { code, key: this.key, by: 'driver' }, this.now()); }
-    catch (error) { this.keepSlot = true; throw error; }
+    try {
+      await setLatch(this.account, this.accountDir, { code, key: this.key, by: 'driver' }, this.now());
+      if (this.m.latch_pending) await this.save({ latch_pending: undefined });
+    } catch (error) {
+      // Remember the stop in the manifest so every later run of this request retries it.
+      this.keepSlot = true;
+      await this.save({ latch_pending: code }).catch(() => {});
+      throw error;
+    }
   }
 
   private async finish(phase: 'cleaned' | 'failed', patch: Partial<GoManifest> = {}) {
@@ -490,6 +517,7 @@ class Driver {
   }
 
   private async driveInner(): Promise<GoResult> {
+    if (this.m.latch_pending) await this.latch(this.m.latch_pending);
     if (this.m.phase === 'cleaned' || this.m.phase === 'failed') {
       // A finished request must never keep the account; output repair is reported separately.
       let repair: unknown;
@@ -497,6 +525,7 @@ class Driver {
         if (this.m.output_file) await this.ensureOutputFile().catch(error => { repair = error; });
         await this.closeReview();
         await this.seal();
+        if (this.m.phase === 'cleaned') await this.runChecks();
       } finally {
         await this.releaseSlot();
       }
@@ -646,6 +675,8 @@ class Driver {
     } catch (error) {
       // An intent that became durable means the click may follow; never treat it as denied.
       if (this.m.send_intent_at) throw error;
+      // An unpersisted stop keeps the slot; nothing was sent, so the run still fails pre-submit.
+      if (error instanceof AccountError && error.code === 'LATCH_WRITE_FAILED') this.keepSlot = true;
       return this.denySend(codeOf(asGo(error), 'SEND_DENIED'));
     }
     if (this.now().getTime() - committedAt > SEND_CLICK_DEADLINE_MS) {
@@ -802,7 +833,8 @@ class Driver {
         await this.dropLease();
       }
     } catch (error) {
-      // The journal run is terminal: a failed cleanup write must not keep the slot.
+      // The journal run is terminal: a failed cleanup write frees the slot unless the
+      // checkout may still be in use (releaseSlot keeps coding slots until verified).
       await this.releaseSlot().catch(() => {});
       throw error;
     }
