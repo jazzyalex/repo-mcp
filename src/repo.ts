@@ -1545,8 +1545,8 @@ export class RepoWorkspace {
           ? await pythonCommand(snapshot, selected, this.runner)
           : {executable: process.execPath, args: ['--permission', `--allow-fs-read=${snapshot}`, '--test-isolation=none', '--test', ...selected], env: {}, label: 'node --permission --allow-fs-read=<approved-file-snapshot> --test-isolation=none --test ' + selected.join(' ')};
         const result = await execute(command.executable, command.args, snapshot, 10_000, command.env);
-        const inv = this.legacy ? undefined : await this.current();
-        const writable = (file: string) => { if (this.legacy) return this.legacy.editable.includes(file); const entry = inv?.index.get(file); return entry ? this.presentlyEditable(entry) : this.paths.decide(file, 'write').ok; };
+        // The inventory the snapshot came from; a completed run never waits on a new discovery.
+        const writable = (file: string) => { if (this.legacy) return this.legacy.editable.includes(file); const entry = inv.index.get(file); return entry ? this.presentlyEditable(entry) : this.paths.decide(file, 'write').ok; };
         return { test_files: selected.map(file => ({ path: file, editable: writable(file) })), command: command.label, ...result };
       } finally { await rm(snapshot, { recursive: true, force: true }); }
     }, preflight);
