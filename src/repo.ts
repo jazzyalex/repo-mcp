@@ -1210,7 +1210,7 @@ export class RepoWorkspace {
     return {
       files: all, editable_files: inv.entries.filter(e => this.presentlyEditable(e)).map(e => e.path),
       creatable_files: this.paths.creatablePaths, test_suites: tests.filter(f => inv.index.has(f)), configured_test_suites: tests,
-      editable_test_files: tests.filter(f => this.paths.decide(f, 'write').ok)
+      editable_test_files: tests.filter(f => { const entry = inv.index.get(f); return entry ? this.presentlyEditable(entry) : this.paths.decide(f, 'write').ok; })
     };
   }
   /**
@@ -1545,7 +1545,8 @@ export class RepoWorkspace {
           ? await pythonCommand(snapshot, selected, this.runner)
           : {executable: process.execPath, args: ['--permission', `--allow-fs-read=${snapshot}`, '--test-isolation=none', '--test', ...selected], env: {}, label: 'node --permission --allow-fs-read=<approved-file-snapshot> --test-isolation=none --test ' + selected.join(' ')};
         const result = await execute(command.executable, command.args, snapshot, 10_000, command.env);
-        const writable = (file: string) => this.legacy ? this.legacy.editable.includes(file) : this.paths.decide(file, 'write').ok;
+        const inv = this.legacy ? undefined : await this.current();
+        const writable = (file: string) => { if (this.legacy) return this.legacy.editable.includes(file); const entry = inv?.index.get(file); return entry ? this.presentlyEditable(entry) : this.paths.decide(file, 'write').ok; };
         return { test_files: selected.map(file => ({ path: file, editable: writable(file) })), command: command.label, ...result };
       } finally { await rm(snapshot, { recursive: true, force: true }); }
     }, preflight);

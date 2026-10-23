@@ -491,6 +491,30 @@ test('a nested-repository marker probe that fails with anything but ENOENT refus
   if (process.getuid?.() !== 0) assert.equal(await hasGitMarker(path.join(base, 'locked')), true, 'EACCES counts as a marker');
 });
 
+test('the ignored_exact mark is part of the inventory digest, so a de-ignore moves it', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'n\n' });
+  // .gitignore is not exposed, so only the mark can move the digest.
+  const repo = await openGlob(t, m.root, policyDoc({ ignored_exact: ['research/notes.md'] }), {}, m.track);
+  const before = (await listAll(repo)).last.inventory.digest;
+  await writeFile(path.join(m.root, '.gitignore'), 'other/\n');
+  const after = await listAll(repo);
+  assert.ok(after.paths.includes('research/notes.md'));
+  assert.notEqual(after.last.inventory.digest, before);
+});
+
+test('an ignore rule changed in place during discovery never leaves a stale ignored_exact mark', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'n\n' });
+  let changed = false;
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], write: { include: ['research/**'], exclude: [] }, ignored_exact: ['research/notes.md'] }), {
+    pathHook: async stage => {
+      if (stage === 'walk:sources-listed' && !changed) { changed = true; await writeFile(path.join(m.root, '.gitignore'), 'other/\n'); }
+    }
+  }, m.track);
+  const file = (await repo.listFiles()).files.find(f => f.path === 'research/notes.md');
+  assert.ok(changed);
+  assert.equal(file?.editable, true, 'the retried walk sees an ordinary (not ignored) file');
+});
+
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
   const m = await makeRepo(t, { 'research/notes.md': 'old\n' });
   const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);

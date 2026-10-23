@@ -117,6 +117,9 @@ async function sourcesUnchanged(ctx: WalkContext, sources: IgnoreSource[]) {
 }
 const sameSources = (a: IgnoreSource[], b: IgnoreSource[]) => a.length === b.length && a.every((x, i) => x.path === b[i].path && x.fp === b[i].fp);
 
+/** Digest input for one entry; the ignored_exact mark is added only when set, so other digests do not move. */
+const entryKey = (e: Entry) => `${e.path}\0${e.fp}${e.ignored ? '\0ignored' : ''}`;
+
 export class Inventory {
   readonly index = new Map<string, Entry>();
   private nfcIndex = new Map<string, Entry[]>();
@@ -130,7 +133,7 @@ export class Inventory {
   }
   withIgnoreSources(sources: IgnoreSource[]) { return new Inventory(this.entries, this.dirs, this.skipped, this.salt, sources); }
   private rehash() {
-    this.digest = sha256([this.salt, ...this.entries.map(e => `${e.path}\0${e.fp}`), '--', ...this.dirs.map(d => `${d.path}\0${d.fp}`)].join('\n'));
+    this.digest = sha256([this.salt, ...this.entries.map(entryKey), '--', ...this.dirs.map(d => `${d.path}\0${d.fp}`)].join('\n'));
   }
   get paths() { return this.entries.length; }
 
@@ -146,7 +149,7 @@ export class Inventory {
   /** Digest of what a prefix-scoped capture depends on: its entries and the directories that can contain them. */
   scopeDigest(prefix: string) {
     const relevant = (dir: string) => dir === '' ? !prefix.includes('/') : `${dir}/`.startsWith(prefix) || prefix.startsWith(`${dir}/`);
-    return sha256([this.salt, prefix, ...this.under(prefix).map(e => `${e.path}\0${e.fp}`), '--', ...this.dirs.filter(d => relevant(d.path)).map(d => `${d.path}\0${d.fp}`)].join('\n'));
+    return sha256([this.salt, prefix, ...this.under(prefix).map(entryKey), '--', ...this.dirs.filter(d => relevant(d.path)).map(d => `${d.path}\0${d.fp}`)].join('\n'));
   }
 
   /**
@@ -209,6 +212,8 @@ export async function walk(ctx: WalkContext): Promise<Inventory> {
     // not hide anything the walk exposed. The set of config sources must also still be the same.
     const consistent = sameSources(before, after) &&
       (again.listing === ignored.listing || !inventory.entries.some(entry => ignoredBy(again, entry.path) && !admitted.has(entry.path))) &&
+      // An admitted ignored_exact file must still be ignored in the second listing, or its mark is stale.
+      [...admitted].every(rel => ignoredBy(again, rel)) &&
       (await ignoreConfigSources(ctx)).join('\0') === configSources.join('\0');
     // An admitted ignored_exact file's parents must still be the same real directories
     // outside any nested repository; otherwise this answer is not used.

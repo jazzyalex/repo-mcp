@@ -138,7 +138,10 @@ byte-length expansion can arise. Membership is an exact-spelling set lookup. Liv
 untracked `ignored_exact` file as a creatable addition, even when `create.paths` also lists it. Such a file is
 reported as editable (`list_files`, `repo_info.editable_files`) only when `edit` would accept it, which for an
 untracked file means it also has a create rule. Every nested-repository marker probe (discovery, the
-`ignored_exact` checks, read time and live diff) treats only ENOENT as "no `.git`"; any other lookup error refuses. The final parent recheck honors the discovery deadline. Live `git_diff` refuses any working-tree
+`ignored_exact` checks, read time and live diff) treats only ENOENT as "no `.git`"; any other lookup error refuses. An admitted file is marked in the inventory, and the mark is part of the
+inventory and scope digests (added only when set, so other digests do not move): a de-ignore re-classifies the file
+and moves the digest. A walk is accepted only if every admitted file is still ignored in the second listing. The
+editable flags of `repo_info.editable_test_files` and `run_tests` follow the same rule as `list_files`. The final parent recheck honors the discovery deadline. Live `git_diff` refuses any working-tree
 input beneath a directory holding `.git`. Ordinary walk entries, refreshed entries and directories,
 and verified reads also require the root's device; a device change on refresh re-walks. An empty list is omitted from the policy, so existing digests do not move.
 - Each directory is lstat-ed before and after listing; if its identity moved, that directory is re-listed once, then the build fails with an explicit "changed during discovery" error.
