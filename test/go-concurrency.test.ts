@@ -574,3 +574,39 @@ test('coding recovery never adopts a slot beside a migrated legacy slot', async 
   assert.equal(slot.kind, 'code');
   assert.equal(slot.checkout, '/r');
 });
+
+// --- review round 6 fixes -------------------------------------------------------------------
+
+test('the checkout quiet scan fails closed on unreadable, unknown or live exec sessions', async t => {
+  const f = await fixture(t);
+  const { execSessionsQuiet } = await import('../src/exec-tool.js');
+  const store = await StateStore.open(f.stateDir);
+  const since = '2026-10-22T10:00:00.000Z';
+  const rec = (over: Record<string, unknown>) => ({ session_id: 's', workspace_id: 'w', repository_id: 'repo', task_id: 'task', request_id: 'r',
+    request_digest: 'd', cmd: 'x', cmd_sha256: 'h', cmd_length: 1, timeout_s: 1, state: 'running', reason: null, exit_code: null, signal: null,
+    output_bytes: 0, truncated: false, broker_instance: 'b', broker_pid: 999999, created_at: '2026-10-22T11:00:00.000Z', started_at: null,
+    ended_at: null, duration_ms: null, ...over });
+  const at = (n: string) => `exec-sessions/task/${n.repeat(32)}.json`;
+  assert.deepEqual(await execSessionsQuiet(f.stateDir, 'task', since), { quiet: true });
+  await store.write(at('a'), 'exec-session-v1', rec({}));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', since)).quiet, false, 'dead broker with unknown process group');
+  await store.write(at('a'), 'exec-session-v1', rec({ pgid: 999998 }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', since)).quiet, true, 'dead broker and dead process group');
+  await store.write(at('a'), 'exec-session-v1', rec({ broker_pid: process.pid }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', since)).quiet, false, 'live broker');
+  await store.write(at('a'), 'exec-session-v1', rec({ broker_pid: process.pid, created_at: '2026-10-22T09:00:00.000Z' }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', since)).quiet, true, 'a session from before this request is not its concern');
+  await writeFile(path.join(f.stateDir, at('b')), 'garbage');
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', since)).quiet, false, 'unreadable record');
+});
+
+test('a terminal coding request with an unsealed workspace keeps the task in use', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.stateDir);
+  const now = new Date().toISOString();
+  await store.write(`chatgpt-go/${'c'.repeat(64)}`, 'chatgpt-go-v1', {
+    request_id: 'code-x', request_digest: 'd', repository_id: 'repo', task_id: 'task', coordinator: 'claude', kind: 'code', profile: 'code',
+    prompt_sha256: 'p', prompt_file: '', session_id: 's', created_at: now, updated_at: now, phase: 'failed', grant_id: 'g', sealed: 'warning:SEAL_FAILED'
+  });
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['code-x']);
+});

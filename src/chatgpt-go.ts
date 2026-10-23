@@ -22,7 +22,7 @@ import {
 } from './chatgpt-run.js';
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
-import { activeExecSessions } from './exec-tool.js';
+import { activeExecSessions, execSessionsQuiet } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
@@ -44,6 +44,9 @@ export const GO_KIND = 'chatgpt-go-v1';
 const WS_CLAIM_KIND = 'chatgpt-go-ws-claim-v1';
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** A stop latch that cannot be persisted is retried this often, holding the setup lease. */
+const LATCH_RETRY_MS = 5_000;
+const LATCH_RETRIES = 360;
 /** Longest gap between the effort observation and the send commit. */
 const OBSERVATION_MAX_AGE_MS = 10_000;
 const POLL_MS = 15_000;
@@ -230,7 +233,10 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     if (typeof m.task_id !== 'string' || typeof m.request_id !== 'string' || typeof m.phase !== 'string') {
       throw new SafeError(`TASK_IN_USE: go manifest ${name} is corrupt; inspect it before finishing a task.`);
     }
-    if (m.task_id !== taskId || m.phase === 'cleaned' || m.phase === 'failed') continue;
+    if (m.task_id !== taskId) continue;
+    const terminal = m.phase === 'cleaned' || m.phase === 'failed';
+    // A terminal coding request whose workspace is not verified revoked may still own it.
+    if (terminal && m.kind === 'code' && m.grant_id && m.sealed !== 'revoked') { active.push(m.request_id); continue; }
     let live = false;
     // An unreadable lock may belong to a live waiter: count it as live.
     let lock: unknown;
@@ -244,7 +250,7 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
       }
       catch { live = true; }
     }
-    if (live || m.run_id || m.pending_run_id) active.push(m.request_id);
+    if (live || (!terminal && (m.run_id || m.pending_run_id))) active.push(m.request_id);
   }
   return active;
 }
@@ -396,7 +402,9 @@ class Driver {
   private async checkoutQuiet() {
     if (!this.m.grant_id) return true;
     if (this.m.sealed !== 'revoked') return false;
-    return (await activeExecSessions(this.stateDir, this.m.task_id).catch(() => [1])).length === 0;
+    const scan = await execSessionsQuiet(this.stateDir, this.m.task_id, this.m.created_at).catch(() => ({ quiet: false, reason: 'scan failed' }));
+    if (!scan.quiet) process.stderr.write(`checkout not quiet: ${scan.reason}\n`);
+    return scan.quiet;
   }
 
   /** The setup lease covers every step that activates a tab or sends input; it is never held while waiting for an answer. */
@@ -405,7 +413,7 @@ class Driver {
   /** Release the lease; a release that keeps failing is raised, never forgotten. */
   private async dropLease() {
     const lease = this.lease;
-    if (!lease) return;
+    if (!lease || this.holdLease) return;
     let last: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try { await lease.release(); this.lease = undefined; return; }
@@ -430,16 +438,28 @@ class Driver {
   /** A latch that could not be persisted anywhere keeps this request's slot and is raised. */
   private keepSlot = false;
   private async latch(code: string) {
-    try {
-      await setLatch(this.account, this.accountDir, { code, key: this.key, by: 'driver' }, this.now());
-      if (this.m.latch_pending) await this.save({ latch_pending: undefined });
-    } catch (error) {
-      // Remember the stop in the manifest so every later run of this request retries it.
-      this.keepSlot = true;
-      await this.save({ latch_pending: code }).catch(() => {});
-      throw error;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await setLatch(this.account, this.accountDir, { code, key: this.key, by: 'driver' }, this.now());
+        if (this.m.latch_pending) await this.save({ latch_pending: undefined });
+        return;
+      } catch (error) {
+        // Remember the stop in the manifest so every later run of this request retries it,
+        // and hold the setup lease meanwhile: every send commit of every run happens under it.
+        this.keepSlot = true;
+        if (attempt === 0) await this.save({ latch_pending: code }).catch(() => {});
+        if (!this.lease) await this.takeLease().catch(() => {});
+        if (attempt >= LATCH_RETRIES) {
+          // Leave the lease to dead-owner recovery when this process exits.
+          this.holdLease = true;
+          throw error;
+        }
+        await this.sleep(LATCH_RETRY_MS);
+      }
     }
   }
+  /** Set when a stop could not be persisted: the lease is never released by this process. */
+  private holdLease = false;
 
   private async finish(phase: 'cleaned' | 'failed', patch: Partial<GoManifest> = {}) {
     // The process ends right after; a lease it could not release is recovered from a dead owner.

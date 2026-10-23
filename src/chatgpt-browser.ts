@@ -155,9 +155,18 @@ export class CdpChatGptPage implements ChatGptPage {
   private async assertSignedIn() {
     const deadline = Date.now() + 20_000;
     while (true) {
-      await this.helpers();
-      const state = { ...await this.eval<{ composer: number; login: boolean }>('window.__go.signedIn()'),
-        challenge: await this.eval<string>('document.title') === 'Just a moment...' };
+      // The page may still be navigating: a reload between installing the helpers and
+      // using them is retried until the deadline, never reported as a script error.
+      let state: { composer: number; login: boolean; challenge: boolean };
+      try {
+        await this.helpers();
+        state = { ...await this.eval<{ composer: number; login: boolean }>('window.__go.signedIn()'),
+          challenge: await this.eval<string>('document.title') === 'Just a moment...' };
+      } catch (error) {
+        if (!(error instanceof GoError && error.code === 'PAGE_SCRIPT_ERROR') || Date.now() > deadline) throw error;
+        await this.sleep(500);
+        continue;
+      }
       if (state.composer === 1 && !state.login) return;
       if (Date.now() > deadline) {
         if (state.challenge) throw new GoError('BROWSER_CHALLENGE', 'ChatGPT shows a browser check; stop and let the owner resolve it.');

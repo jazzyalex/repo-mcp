@@ -167,12 +167,19 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
   journal shows no run or a terminal run; otherwise the slot stays for `--resume`. It
   never releases the setup lease: dead-owner recovery waits out in-flight input.
 - A coding run frees its slot only when its workspace (or unused grant) is verified
-  revoked and no exec command of its task still runs. Otherwise every release path
+  revoked and a fail-closed scan proves no exec command of its task (created since the
+  request) can still run: every record readable and finished, or both its broker and its
+  detached process group (`pgid`, now recorded) gone. Otherwise every release path
   (finish, cleanup error, signal) keeps the slot, and `--resume` retries the seal and the
   remaining checks.
 - A challenge whose latch could not be persisted keeps the slot on every path, including
   a denied send and a cleanup warning, and is stored in the manifest (`latch_pending`);
-  every later run of that request retries the latch first.
+  every later run of that request retries the latch first. While the latch cannot be
+  written, the detecting run holds the setup lease (every send commit of every run needs
+  it) and retries every 5 s for 30 min; if it still fails, the process exits without
+  releasing the lease, which dead-owner recovery frees only after the settle window.
+- `task finish` also counts a terminal coding request whose workspace is not verified
+  revoked, and any request whose lock a live process holds.
 - Coding recovery refuses `REPOSITORY_BUSY` beside any other coding slot on the checkout
   or any legacy slot; a request's own legacy slot is upgraded to its real kind and
   checkout.

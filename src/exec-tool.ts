@@ -54,6 +54,8 @@ export type ExecSessionRecord = {
   truncated: boolean;
   broker_instance: string;
   broker_pid: number;
+  /** Process group of the detached shell (its PID), once spawned. */
+  pgid?: number;
   created_at: string;
   started_at: string | null;
   ended_at: string | null;
@@ -325,7 +327,7 @@ export class ExecManager {
     }
     entry.child = child;
     entry.startedMs = performance.now();
-    entry.record = { ...entry.record, state: 'running', started_at: nowIso() };
+    entry.record = { ...entry.record, state: 'running', started_at: nowIso(), ...(child.pid ? { pgid: child.pid } : {}) };
     void this.persist(entry);
     entry.timeoutTimer = setTimeout(() => { entry.timedOut = true; this.terminate(entry); }, record.timeout_s * 1000);
     entry.timeoutTimer.unref();
@@ -610,6 +612,33 @@ export async function activeExecSessions(stateDir: string, taskId: string) {
     active.push({ session_id: record.session_id, workspace_id: record.workspace_id, state: record.state, broker_pid: record.broker_pid, created_at: record.created_at });
   }
   return active;
+}
+
+/**
+ * Fail-closed proof that no exec command of `taskId` created at or after `since` can still
+ * touch the checkout: every such record is readable and finished, or its broker and its
+ * detached process group are both gone. Anything unprovable counts as busy.
+ */
+export async function execSessionsQuiet(stateDir: string, taskId: string, since: string): Promise<{ quiet: boolean; reason?: string }> {
+  const store = await StateStore.inspect(stateDir);
+  if (!store) return { quiet: true };
+  const from = Date.parse(since);
+  for (const name of await store.list(`exec-sessions/${taskId}`)) {
+    if (!/^[a-f0-9]{32}\.json$/.test(name)) continue;
+    let record: ExecSessionRecord | undefined;
+    try { record = await store.read<ExecSessionRecord>(`exec-sessions/${taskId}/${name}`, RECORD_KIND); }
+    catch { return { quiet: false, reason: `unreadable exec session ${name}` }; }
+    if (!record || typeof record.state !== 'string' || !Number.isFinite(Date.parse(record.created_at))) return { quiet: false, reason: `malformed exec session ${name}` };
+    if (Date.parse(record.created_at) < from) continue;
+    if (record.state !== 'starting' && record.state !== 'running' && record.state !== 'uncertain') continue;
+    let brokerAlive = true;
+    try { brokerAlive = lockOwnerAlive(record.broker_pid); } catch { brokerAlive = true; }
+    if (brokerAlive) return { quiet: false, reason: `exec session ${record.session_id} is ${record.state}` };
+    if (!record.pgid) return { quiet: false, reason: `exec session ${record.session_id} lost its broker; its process group is unknown` };
+    try { process.kill(-record.pgid, 0); return { quiet: false, reason: `exec session ${record.session_id} process group ${record.pgid} is still alive` }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return { quiet: false, reason: `cannot check process group ${record.pgid}` }; }
+  }
+  return { quiet: true };
 }
 
 /** Largest end <= `end` that does not cut a UTF-8 sequence. */
