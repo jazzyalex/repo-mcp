@@ -1,4 +1,4 @@
-import { lstat, readdir, stat } from 'node:fs/promises';
+import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import type { BigIntStats } from 'node:fs';
 import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
@@ -241,21 +241,6 @@ async function admittedParentsUnchanged(ctx: WalkContext, inventory: Inventory, 
   return true;
 }
 
-/**
- * The on-disk spelling of `rel`: each component must match exactly one directory entry in
- * NFC (so an NFD name on disk is found, and a case-only alias is not). Undefined if missing
- * or ambiguous.
- */
-async function diskSpelling(root: string, rel: string) {
-  const out: string[] = [];
-  for (const part of rel.split('/')) {
-    const names = await readdir(abs(root, out.join('/'))).catch(() => undefined);
-    const hits = names?.filter(n => nfc(n) === nfc(part)) ?? [];
-    if (hits.length !== 1) return undefined;
-    out.push(hits[0]);
-  }
-  return out.join('/');
-}
 
 async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>, skipped: Skipped, budget: { visited: number; cap: number }) {
   const listed = new Set(entries.map(e => nfc(e.path)));
@@ -266,9 +251,7 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
   for (const listedRel of ctx.policy.ignoredExact) {
     ctx.deadline.check(ctx.expired);
     if (listed.has(nfc(listedRel)) || !ctx.policy.decide(listedRel, 'read').ok) continue;
-    // Entries carry the disk spelling (an NFD name stays NFD); a missing path keeps the
-    // policy spelling so its existing parents are still watched.
-    const rel = await diskSpelling(ctx.root, listedRel) ?? listedRel;
+    const rel = listedRel;
     const parts = rel.split('/');
     if (parts.some(p => UNSAFE_NAME.test(p) || Buffer.byteLength(p) > 255) || Buffer.byteLength(rel) > 256 || parts.length > MAX_DEPTH) continue;
     // Watch every existing real parent, even when a deeper one or the file is missing, so a
@@ -297,9 +280,23 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
     if (stat.nlink > 1n) { skipped.linked++; continue; }
     if (stat.dev !== rootStat.dev) { skipped.other_device++; continue; }
     if (Number(stat.size) > ctx.maxFileBytes) { skipped.too_large++; continue; }
-    entries.push({ path: rel, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
-    listed.add(nfc(rel));
-    admitted.add(rel);
+    // The entry carries the disk spelling, found without listing any directory: the parents
+    // are verified real directories, so realpath stays inside the root. It must equal the
+    // listed path in NFC (a case-only alias is not admitted), and no second file may answer
+    // to the other normalization form (NFC/NFD twins are both hidden).
+    const real = await realpath(abs(ctx.root, rel)).catch(() => undefined);
+    const rootReal = await realpath(ctx.root).catch(() => ctx.root);
+    const disk = real && path.relative(rootReal, real);
+    if (!disk || disk.startsWith('..') || path.isAbsolute(disk) || nfc(disk) !== nfc(rel)) { skipped.unsafe_name++; continue; }
+    let twin = false;
+    for (const form of [rel.normalize('NFC'), rel.normalize('NFD')]) {
+      const other = await lstat(abs(ctx.root, form), { bigint: true }).catch(() => undefined);
+      if (other && (other.dev !== stat.dev || other.ino !== stat.ino)) twin = true;
+    }
+    if (twin) { skipped.unsafe_name++; continue; }
+    entries.push({ path: disk, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
+    listed.add(nfc(disk));
+    admitted.add(disk);
     if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
   }
 }

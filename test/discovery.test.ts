@@ -465,3 +465,19 @@ test('live git_diff never returns a tracked file beneath a newly nested reposito
   const page = await repo.diff().then(p => JSON.stringify(p), (e: Error) => e.message);
   assert.ok(!page.includes('SECRET-NEEDLE'), page.slice(0, 300));
 });
+
+test('ignored_exact never lists an ignored directory, admits no case-only alias, and does not follow a symlinked parent', async t => {
+  const siblings: Record<string, string> = { 'cache/keep.md': 'keep\n' };
+  for (let i = 0; i < 60; i++) siblings[`cache/junk-${i}.bin`] = 'x';
+  const m = await makeRepo(t, { '.gitignore': 'cache/\nlinked\n' }, siblings);
+  const outside = path.join(m.base, 'outside');
+  await mkdir(outside);
+  await writeFile(path.join(outside, 'notes.md'), 'outside\n');
+  await symlink(outside, path.join(m.root, 'linked'));
+  const doc = policyDoc({ dotfiles: ['.gitignore'], ignored_exact: ['cache/keep.md', 'cache/Keep.md', 'linked/notes.md'], limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, inventory_paths: 10 } });
+  const repo = await openGlob(t, m.root, doc, {}, m.track);
+  const { paths } = await listAll(repo);
+  assert.ok(paths.includes('cache/keep.md'), 'one listed file in a 60-entry ignored directory under a 10-path limit');
+  assert.ok(!paths.includes('cache/Keep.md'), 'a case-only alias is not admitted');
+  assert.ok(!paths.includes('linked/notes.md'), 'a symlinked parent is never followed');
+});

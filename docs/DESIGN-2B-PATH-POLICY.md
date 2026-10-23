@@ -131,8 +131,9 @@ Skipped listed paths count in the usual `skipped` counters (a rejected parent on
 their `.git` check, so removing a nested-repository marker re-walks. The walk and these probes share one 4 x
 inventory_paths visit budget. A read of an `ignored_exact` file checks again, before opening and after reading,
 that no parent holds `.git`; a change after that final check is the residual local race. Admitted entries carry the
-disk spelling: each component must match exactly one directory entry in NFC (an NFD name is found; a case-only
-alias is not). The final parent recheck honors the discovery deadline. Live `git_diff` refuses any working-tree
+disk spelling, found without listing any directory: parents are lstat-verified first, then the realpath of the
+file must equal the listed path in NFC (a case-only alias is not admitted) and no second file may answer to the
+other normalization form (NFC/NFD twins are hidden). The final parent recheck honors the discovery deadline. Live `git_diff` refuses any working-tree
 input beneath a directory holding `.git`. Ordinary walk entries, refreshed entries and directories,
 and verified reads also require the root's device; a device change on refresh re-walks. An empty list is omitted from the policy, so existing digests do not move.
 - Each directory is lstat-ed before and after listing; if its identity moved, that directory is re-listed once, then the build fails with an explicit "changed during discovery" error.

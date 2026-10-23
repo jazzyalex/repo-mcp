@@ -367,7 +367,9 @@ some of them, list each exact path in `ignored_exact` (off by default):
 each must also be readable under `read`, the dotfile rule and the secret rules (a policy
 that lists anything else fails to load). Only the listed files appear; every other ignored
 file stays hidden, and a listed file that does not exist is simply absent. Exact-list
-policies are not filtered and do not need it.
+policies are not filtered and do not need it. These files can be listed, read and
+searched, but they stay untracked: they never appear in `git_diff` unless they are
+tracked or committed.
 
 **Dot paths in exact policies.** A v2 policy may list an exact dot path (for example
 `.github/workflows/ci.yml`) in `read.include`, `write.include`, `create.paths` or `checks`
