@@ -37,14 +37,17 @@ const PAGE_HELPERS = String.raw`
   // items), so fall back to textContent before the accessible label.
   const text = e => (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
   const norm = t => t.replace(/\s+/g, ' ').trim();
+  // The model button may carry a caption line above the effort ("Thinking effort" then
+  // "Extra High"): the effort is its last non-empty line.
+  const effort = e => text(e).split('\n').map(l => l.trim()).filter(Boolean).at(-1) ?? '';
   window.__go = {
     find(name) {
       const spec = S[name];
       return [...document.querySelectorAll(spec.css)].filter(visible).filter(e =>
-        spec.text === '__EFFORT__' ? EFFORTS.includes(text(e)) :
+        spec.text === '__EFFORT__' ? EFFORTS.includes(effort(e)) :
         spec.text !== undefined ? text(e) === spec.text :
         spec.prefix !== undefined ? text(e).startsWith(spec.prefix) && (!spec.contains || text(e).includes(spec.contains)) : true)
-        .map(e => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: text(e), disabled: !!e.disabled || e.getAttribute('aria-disabled') === 'true' }; });
+        .map(e => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: spec.text === '__EFFORT__' ? effort(e) : text(e), disabled: !!e.disabled || e.getAttribute('aria-disabled') === 'true' }; });
     },
     chip() { return [...document.querySelectorAll('button,span,div')].filter(e => e.childElementCount === 0 && visible(e) && e.innerText?.trim() === 'Repo MCP').length; },
     composerText() { const c = [...document.querySelectorAll(S.composer.css)].filter(visible); return c.length === 1 ? norm(c[0].innerText || '') : null; },
