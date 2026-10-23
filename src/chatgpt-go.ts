@@ -151,6 +151,8 @@ export type GoDeps = {
   page: ChatGptPage;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
+  /** Test seam: how often an unpersisted stop latch is retried (default 360, every 5 s). */
+  latchRetries?: number;
   /** Test seam: called after each durable manifest write; throwing simulates a crash there. */
   afterPhase?: (phase: GoPhase) => void | Promise<void>;
 };
@@ -473,6 +475,8 @@ class Driver {
       try {
         await setLatch(this.account, this.accountDir, { code, key: this.key, by: 'driver' }, this.now());
         if (this.m.latch_pending) await this.save({ latch_pending: undefined });
+        // The stop is durable now: this request no longer needs to hold its slot for it.
+        this.keepSlot = false;
         return;
       } catch (error) {
         // Remember the stop in the manifest so every later run of this request retries it,
@@ -480,7 +484,7 @@ class Driver {
         this.keepSlot = true;
         if (attempt === 0) await this.save({ latch_pending: code }).catch(() => {});
         if (!this.lease) await this.takeLease().catch(() => {});
-        if (attempt >= LATCH_RETRIES) {
+        if (attempt >= (this.deps.latchRetries ?? LATCH_RETRIES)) {
           // Leave the lease to dead-owner recovery when this process exits.
           this.holdLease = true;
           throw error;

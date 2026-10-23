@@ -187,8 +187,10 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
   never releases the setup lease: dead-owner recovery waits out in-flight input.
 - A coding run frees its slot only when its workspace (or unused grant) is verified
   revoked and a fail-closed scan proves no exec command of its task (created since the
-  request) can still run: every record readable and finished, or both its broker and its
-  detached process group (`pgid`, now recorded) gone. A record with an unknown state or
+  request) can still run: every record readable, and every spawned session's detached
+  process group (`pgid`, now recorded) gone, whatever its recorded state; a running
+  session also needs a dead broker. A finished session that ran with no recorded group is
+  busy; one that never spawned is quiet. A record with an unknown state or
   missing identity fields is busy; a broker PID now owned by a process started after the
   session counts as a dead broker (PID reuse). Project checks wait on the same proof. Otherwise every release path
   (finish, cleanup error, signal) keeps the slot, and `--resume` retries the seal and the

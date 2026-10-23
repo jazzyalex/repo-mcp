@@ -637,7 +637,17 @@ export async function execSessionsQuiet(stateDir: string, taskId: string, since:
       return { quiet: false, reason: `malformed exec session ${name}` };
     }
     if (Date.parse(record.created_at) < from) continue;
-    if (record.state !== 'starting' && record.state !== 'running' && record.state !== 'uncertain') continue;
+    if (record.state !== 'starting' && record.state !== 'running' && record.state !== 'uncertain') {
+      // A finished record is not proof the group is gone (a background child may survive
+      // the kill): a spawned session is quiet only once its process group is gone.
+      if (record.pgid) {
+        try { process.kill(-record.pgid, 0); return { quiet: false, reason: `exec session ${record.session_id} is ${record.state} but process group ${record.pgid} is alive` }; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return { quiet: false, reason: `cannot check process group ${record.pgid}` }; }
+        continue;
+      }
+      if (record.started_at) return { quiet: false, reason: `exec session ${record.session_id} ran but its process group is unknown` };
+      continue;
+    }
     // A broker PID now owned by a process started after the session is a reused PID.
     let brokerAlive = true;
     try { brokerAlive = lockOwnerAlive(record.broker_pid) && !pidReusedSince(record.broker_pid, record.created_at); } catch { brokerAlive = true; }

@@ -518,7 +518,7 @@ test('a challenge whose latch cannot be persisted anywhere fails the run and kee
   const page = new Page('a', newLog());
   page.open = async () => { await chmod(f.accountDir, 0o500); throw new GoError('BROWSER_CHALLENGE'); };
   t.after(() => chmod(f.accountDir, 0o700).catch(() => {}));
-  await assert.rejects(runGo(req(f, 'a'), { page, sleep }), e => code(e, 'LATCH_WRITE_FAILED'));
+  await assert.rejects(runGo(req(f, 'a'), { page, sleep, latchRetries: 2 }), e => code(e, 'LATCH_WRITE_FAILED'));
   await chmod(f.accountDir, 0o700);
   assert.deepEqual((await accountStatus(f.accountDir)).slots.map(s => s.request_id), ['a']);
 });
@@ -549,7 +549,7 @@ test('a challenge before the commit whose latch cannot be persisted keeps the sl
   let selected = false;
   page.accountSignal = async () => selected ? 'BROWSER_CHALLENGE' : null;
   page.selectEffort = async (label: string) => { selected = true; await chmod(f.accountDir, 0o500); return { selectedAt: new Date(), observedLabel: label }; };
-  const r = await runGo(req(f, 'a'), { page, sleep });
+  const r = await runGo(req(f, 'a'), { page, sleep, latchRetries: 2 }).catch(e => e);
   assert.equal(r.phase, 'failed');
   assert.equal(page.clicks, 0);
   await chmod(f.accountDir, 0o700);
@@ -751,4 +751,43 @@ test('task finish fails closed on a future created_at and counts a live check wi
   assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), []);
   await store.write(`chatgpt-go/${'6'.repeat(64)}`, 'chatgpt-go-v1', { ...base, kind: 'code', request_id: 'code-ng', created_at: now, grant_id: 'g', sealed: 'revoked', check_running: { index: 0, pgid: child.pid } });
   assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['code-ng']);
+});
+
+// --- review round 12 fixes ------------------------------------------------------------------
+
+test('a finished exec record whose process group is still alive is not quiet', async t => {
+  const f = await fixture(t);
+  const { execSessionsQuiet } = await import('../src/exec-tool.js');
+  const { spawn } = await import('node:child_process');
+  const child = spawn('/bin/sh', ['-c', 'sleep 30'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } });
+  const store = await StateStore.open(f.stateDir);
+  const rel = `exec-sessions/task/${'f'.repeat(32)}.json`;
+  await store.write(rel, 'exec-session-v1', execRecord({ state: 'exited', pgid: child.pid, started_at: new Date().toISOString() }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', '1989-01-01T00:00:00Z')).quiet, false);
+  process.kill(-child.pid!, 'SIGKILL');
+  await new Promise(r => child.once('exit', r));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', '1989-01-01T00:00:00Z')).quiet, true);
+  await store.write(rel, 'exec-session-v1', execRecord({ state: 'exited', started_at: new Date().toISOString() }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', '1989-01-01T00:00:00Z')).quiet, false, 'ran with no recorded group');
+  await store.write(rel, 'exec-session-v1', execRecord({ state: 'failed', started_at: null }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', '1989-01-01T00:00:00Z')).quiet, true, 'never spawned');
+});
+
+test('a latch write that fails once then succeeds frees the slot at the end of the run', async t => {
+  const f = await fixture(t);
+  const { chmod } = await import('node:fs/promises');
+  t.after(() => chmod(f.accountDir, 0o700).catch(() => {}));
+  const page = new Page('a', newLog());
+  let selected = false;
+  page.accountSignal = async () => selected ? 'BROWSER_CHALLENGE' : null;
+  page.selectEffort = async (label: string) => { selected = true; await chmod(f.accountDir, 0o500); return { selectedAt: new Date(), observedLabel: label }; };
+  // The first latch retry wait restores the store, so the next attempt persists the latch.
+  const heal = async (ms: number) => { if (ms === 5_000) await chmod(f.accountDir, 0o700); await tick(); };
+  const r = await runGo(req(f, 'a'), { page, sleep: heal });
+  assert.equal(r.phase, 'failed');
+  assert.equal(page.clicks, 0);
+  const status = await accountStatus(f.accountDir);
+  assert.equal(status.latch?.code, 'BROWSER_CHALLENGE');
+  assert.equal(status.slots_in_use, 0);
 });
