@@ -612,6 +612,16 @@ test('editability membership honors the operation deadline', async t => {
   await assert.rejects(repo.info(), /Git tracking check timed out/);
 });
 
+test('a read-only policy never lists tracking names for editability', async t => {
+  const m = await makeRepo(t, manyFiles(500, 'ro'));
+  let tracking = 0;
+  const repo = await openGlob(t, m.root, policyDoc(), { gitHook: args => { if (args[0] === 'ls-tree' || (args[0] === 'ls-files' && args.includes('--cached'))) tracking++; } }, m.track);
+  tracking = 0;
+  await listAll(repo);
+  await repo.info();
+  assert.equal(tracking, 0);
+});
+
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
   const m = await makeRepo(t, { 'research/notes.md': 'old\n' });
   const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);

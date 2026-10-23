@@ -329,8 +329,11 @@ export class RepoWorkspace {
    */
   private async editableNow(paths: string[], deadline: Deadline = this.newDeadline()) {
     const writable = paths.filter(f => this.paths.decide(f, 'write').ok);
-    const snapshot = await this.trackingSnapshot(writable, deadline);
     const editable = new Set<string>();
+    // Nothing writable: only the generation is needed (for cursors), never the name listings.
+    if (!writable.length) { const { generation } = await this.trackingGeneration(deadline); deadline.check(TRACKING_TIMEOUT(deadline)); return { editable, generation }; }
+    const snapshot = await this.trackingSnapshot(writable, deadline);
+    deadline.check(TRACKING_TIMEOUT(deadline));
     // edit's tracking check needs HEAD, so on an unborn branch nothing is editable yet.
     if (!snapshot.born) return { editable, generation: snapshot.generation };
     for (const file of writable) {
