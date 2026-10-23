@@ -408,6 +408,8 @@ test('ignored_exact rejects patterns, secrets and paths the read policy denies',
   await assert.rejects(compile({ ignored_exact: ['research/*.md'] }), /exact path/);
   await assert.rejects(compile({ ignored_exact: ['research/.env'] }), /not readable|denied/);
   await assert.rejects(compile({ read: { include: ['src/**'], exclude: [] }, ignored_exact: ['research/notes.md'] }), /not readable/);
+  // One normalization form only: a non-ASCII entry is refused at load.
+  await assert.rejects(compile({ ignored_exact: ['research/caf\u00e9.md'] }), /printable ASCII/);
   // Off by default and an empty list keep the policy digest unchanged.
   const { policyDigest } = await import('../src/policy.js');
   assert.equal(policyDigest(loadPolicy(policyDoc({ ignored_exact: [] }))), policyDigest(loadPolicy(policyDoc())));
@@ -455,6 +457,14 @@ test('removing a nested-repository marker makes a listed ignored file visible on
   assert.ok(!(await listAll(repo)).paths.includes('research/notes.md'));
   await rm(path.join(m.root, 'research', '.git'), { recursive: true });
   assert.ok((await listAll(repo)).paths.includes('research/notes.md'));
+});
+
+test('an untracked ignored_exact file that is also creatable never appears in live git_diff', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'IGNORED-NEEDLE\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], write: { include: ['research/**'], exclude: [] }, create: { paths: ['research/notes.md'], directories: [], extensions: [] }, ignored_exact: ['research/notes.md'] }), {}, m.track);
+  assert.ok((await listAll(repo)).paths.includes('research/notes.md'));
+  const page = await repo.diff().then(p => JSON.stringify(p), (e: Error) => e.message);
+  assert.ok(!page.includes('IGNORED-NEEDLE'), page.slice(0, 300));
 });
 
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {

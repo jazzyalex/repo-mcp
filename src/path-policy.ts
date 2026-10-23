@@ -139,6 +139,8 @@ export class PathPolicy {
     literals(this.spec.checks, 'checks');
     for (const p of this.spec.ignoredExact ?? []) {
       if (hasWildcard(p)) throw new PolicyError(`ignored_exact entry "${p}" must be an exact path, not a pattern.`);
+      // ASCII only: one normalization form, so the listed spelling is the only one that can match.
+      if (!/^[\x20-\x7e]+$/.test(p)) throw new PolicyError(`ignored_exact entry "${p}" must use printable ASCII characters only.`);
       const decision = this.decide(p, 'read');
       if (!decision.ok) throw new PolicyError(`ignored_exact entry "${p}" is not readable under this policy (${decision.reason}). Remove it or allow it in read.include.`);
     }
@@ -161,6 +163,9 @@ export class PathPolicy {
   get createDirectories() { return [...this.createDirs]; }
   /** Literal Git-ignored paths discovery may list (empty when the feature is off). */
   get ignoredExact() { return [...(this.spec.ignoredExact ?? [])]; }
+  /** Whether `rel` is listed in ignored_exact (exact spelling; entries are ASCII). */
+  isIgnoredExact(rel: string) { return (this.ignoredExactSet ??= new Set(this.spec.ignoredExact ?? [])).has(rel); }
+  private ignoredExactSet?: ReadonlySet<string>;
   get creatablePaths() { return [...this.spec.create.paths]; }
   summary() {
     return {

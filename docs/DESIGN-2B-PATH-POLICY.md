@@ -132,8 +132,10 @@ their `.git` check, so removing a nested-repository marker re-walks. The walk an
 inventory_paths visit budget. A read of an `ignored_exact` file checks again, before opening and after reading,
 that no parent holds `.git`; a change after that final check is the residual local race. Admitted entries carry the
 disk spelling, found without listing any directory: parents are lstat-verified first, then the realpath of the
-file must equal the listed path in NFC (a case-only alias is not admitted) and no second file may answer to the
-other normalization form (NFC/NFD twins are hidden). The final parent recheck honors the discovery deadline. Live `git_diff` refuses any working-tree
+file must equal the listed path byte for byte (a case-only alias is not admitted). Entries must be printable
+ASCII (policy load refuses others), so each has exactly one normalization form and no NFC/NFD twin or
+byte-length expansion can arise. Membership is an exact-spelling set lookup. Live `git_diff` never shows an
+untracked `ignored_exact` file as a creatable addition, even when `create.paths` also lists it. The final parent recheck honors the discovery deadline. Live `git_diff` refuses any working-tree
 input beneath a directory holding `.git`. Ordinary walk entries, refreshed entries and directories,
 and verified reads also require the root's device; a device change on refresh re-walks. An empty list is omitted from the policy, so existing digests do not move.
 - Each directory is lstat-ed before and after listing; if its identity moved, that directory is re-listed once, then the build fails with an explicit "changed during discovery" error.

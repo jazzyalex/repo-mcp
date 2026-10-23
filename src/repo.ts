@@ -452,7 +452,7 @@ export class RepoWorkspace {
     const limit = this.limits.edit_file_bytes;
     // A Git-ignored file exposed by ignored_exact is admitted only outside nested
     // repositories; check again at the read itself, before and after the bytes are read.
-    const ignoredExact = this.paths.ignoredExact.some(p => nfc(p) === nfc(rel));
+    const ignoredExact = this.paths.isIgnoredExact(rel);
     if (ignoredExact) await assertNotNested(this.root, rel).catch(() => { throw new SafeError(NOT_EXPOSED); });
     const { handle, stat } = await openVerified(this.root, rel, this.pathHook);
     try {
@@ -1491,9 +1491,10 @@ export class RepoWorkspace {
         if (stagedOnly.length) await ctx.append(stagedOnly.map(name => `# no working-tree patch for ${name} (index differs from ${base.requested})\n`).join(''));
         // A changed path whose working file fails the read rules (link, symlink, unsafe component, limits) is never given to Git.
         if (refused.length) await ctx.append(refused.map(r => `# no patch for ${r.name} (${r.reason}; git_diff reads only files that read and list_files would expose)\n`).join(''));
-        // Approved new files are not in HEAD or the index yet; they are shown as additions.
+        // Approved new files are not in HEAD or the index yet; they are shown as additions. An
+        // ignored_exact file stays untracked and is never shown as one.
         const inv = await this.current(ctx.deadline);
-        const candidates = inv.under(prefix).map(e => e.path).filter(f => this.isCreatable(f));
+        const candidates = inv.under(prefix).map(e => e.path).filter(f => this.isCreatable(f) && !this.paths.isIgnoredExact(f));
         for (const batch of batchPaths(candidates)) {
           await this.captureHook?.('before-git', ctx.attempt);
           ctx.deadline.check(ctx.expired);

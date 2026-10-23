@@ -281,19 +281,13 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
     if (stat.dev !== rootStat.dev) { skipped.other_device++; continue; }
     if (Number(stat.size) > ctx.maxFileBytes) { skipped.too_large++; continue; }
     // The entry carries the disk spelling, found without listing any directory: the parents
-    // are verified real directories, so realpath stays inside the root. It must equal the
-    // listed path in NFC (a case-only alias is not admitted), and no second file may answer
-    // to the other normalization form (NFC/NFD twins are both hidden).
+    // are verified real directories, so realpath stays inside the root. Entries are ASCII
+    // (policy load refuses others), so there is one normalization form; the disk spelling
+    // must equal the listed path byte for byte, so a case-only alias is not admitted.
     const real = await realpath(abs(ctx.root, rel)).catch(() => undefined);
     const rootReal = await realpath(ctx.root).catch(() => ctx.root);
-    const disk = real && path.relative(rootReal, real);
-    if (!disk || disk.startsWith('..') || path.isAbsolute(disk) || nfc(disk) !== nfc(rel)) { skipped.unsafe_name++; continue; }
-    let twin = false;
-    for (const form of [rel.normalize('NFC'), rel.normalize('NFD')]) {
-      const other = await lstat(abs(ctx.root, form), { bigint: true }).catch(() => undefined);
-      if (other && (other.dev !== stat.dev || other.ino !== stat.ino)) twin = true;
-    }
-    if (twin) { skipped.unsafe_name++; continue; }
+    const disk = real && path.relative(rootReal, real).split(path.sep).join('/');
+    if (disk !== rel) { skipped.unsafe_name++; continue; }
     entries.push({ path: disk, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
     listed.add(nfc(disk));
     admitted.add(disk);
