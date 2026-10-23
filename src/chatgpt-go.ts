@@ -23,7 +23,7 @@ import {
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
 import { execSessionsQuiet } from './exec-tool.js';
-import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
+import { candidateDigest, processGroupAlive, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
   pidReusedSince, releaseSlot, CLICK_SEQUENCE_MAX_MS, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, boundSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
@@ -44,8 +44,6 @@ export const GO_KIND = 'chatgpt-go-v1';
 const WS_CLAIM_KIND = 'chatgpt-go-ws-claim-v1';
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-/** Check errors that a later run retries: the seal or an exec command was not finished yet. */
-const RETRYABLE_CHECK_ERROR = /^(NOT_SEALED|EXEC_STILL_RUNNING): /;
 /** A stop latch that cannot be persisted is retried this often, holding the setup lease. */
 const LATCH_RETRY_MS = 5_000;
 const LATCH_RETRIES = 360;
@@ -114,6 +112,8 @@ export type GoManifest = {
   sealed?: string;
   checks?: CheckResult[];
   candidate_changed?: boolean;
+  /** Code only: the project check now running and its detached process group. */
+  check_running?: { index: number; pgid: number };
   /** Code only: candidate digest taken before the first check. */
   check_baseline?: string;
   /** Code only: why the checks could not run or finish; the run still completes. */
@@ -225,6 +225,17 @@ export async function goStatus(stateDir: string, requestId: string) {
  * request lock a live process holds (waiting for a slot or setting up). `task finish`
  * refuses while any exist (docs/GO-CONCURRENCY-SPEC.md section 9).
  */
+/**
+ * A coding request may give up its checkout only when its workspace is verified revoked,
+ * no project check it started can still run, and no exec command of its task can.
+ */
+async function codeCheckoutQuiet(stateDir: string, m: GoManifest): Promise<{ quiet: boolean; reason?: string }> {
+  if (!m.grant_id) return { quiet: true };
+  if (m.sealed !== 'revoked') return { quiet: false, reason: `workspace ${m.sealed ?? 'not sealed'}` };
+  if (m.check_running && processGroupAlive(m.check_running.pgid)) return { quiet: false, reason: `check ${m.check_running.index} process group ${m.check_running.pgid} is alive` };
+  return execSessionsQuiet(stateDir, m.task_id, m.created_at).catch(() => ({ quiet: false, reason: 'exec scan failed' }));
+}
+
 export async function activeGoRequestsForTask(stateDir: string, taskId: string) {
   const store = await StateStore.inspect(stateDir);
   if (!store) return [];
@@ -243,10 +254,7 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     const terminal = m.phase === 'cleaned' || m.phase === 'failed';
     // A terminal coding request may still own the checkout: its workspace is not verified
     // revoked, or an exec command it started may still run (the same proof its slot needs).
-    if (terminal && m.kind === 'code' && m.grant_id) {
-      const quiet = m.sealed === 'revoked' && (await execSessionsQuiet(stateDir, taskId, m.created_at).catch(() => ({ quiet: false }))).quiet;
-      if (!quiet) { active.push(m.request_id); continue; }
-    }
+    if (terminal && m.kind === 'code' && m.grant_id && !(await codeCheckoutQuiet(stateDir, m)).quiet) { active.push(m.request_id); continue; }
     let live = false;
     // An unreadable lock may belong to a live waiter: count it as live.
     let lock: unknown;
@@ -410,9 +418,7 @@ class Driver {
 
   /** A coding run may give up its checkout only once its workspace is revoked and no exec runs. */
   private async checkoutQuiet() {
-    if (!this.m.grant_id) return true;
-    if (this.m.sealed !== 'revoked') return false;
-    const scan = await execSessionsQuiet(this.stateDir, this.m.task_id, this.m.created_at).catch(() => ({ quiet: false, reason: 'scan failed' }));
+    const scan = await codeCheckoutQuiet(this.stateDir, this.m);
     if (!scan.quiet) process.stderr.write(`checkout not quiet: ${scan.reason}\n`);
     return scan.quiet;
   }
@@ -557,7 +563,6 @@ class Driver {
         if (this.m.output_file) await this.ensureOutputFile().catch(error => { repair = error; });
         await this.closeReview();
         await this.seal();
-        if (this.m.phase === 'cleaned') await this.runChecks();
       } finally {
         await this.releaseSlot();
       }
@@ -711,16 +716,20 @@ class Driver {
       if (error instanceof AccountError && error.code === 'LATCH_WRITE_FAILED') this.keepSlot = true;
       return this.denySend(codeOf(asGo(error), 'SEND_DENIED'));
     }
-    const left = SEND_CLICK_DEADLINE_MS - (this.now().getTime() - committedAt);
-    if (left <= 0) {
+    const pressDeadline = committedAt + SEND_CLICK_DEADLINE_MS;
+    if (this.now().getTime() >= pressDeadline) {
       // This process has not clicked: the attempt stays charged, the run is not submitted.
       return this.denySend('SEND_LATE');
     }
-    // Before any input, persist a bound that covers the whole click sequence and its
-    // settle window, so a crash mid-click can never leave too early a bound. If that write
-    // fails, nothing is clicked.
-    try { await boundSend(this.account, this.m.send_attempt_id!, new Date(this.now().getTime() + CLICK_SEQUENCE_MAX_MS + CLICK_SETTLE_MS)); }
+    // Before any input, persist a bound anchored to the commit: the press never starts
+    // after the 45 s deadline, the press and release commands take at most 30 s each, and
+    // a command that outlived its timeout settles within 60 s. If that write fails,
+    // nothing is clicked.
+    try { await boundSend(this.account, this.m.send_attempt_id!, new Date(pressDeadline + CLICK_SEQUENCE_MAX_MS + CLICK_SETTLE_MS)); }
     catch { return this.denySend('SEND_BOUND_UNWRITABLE'); }
+    // The remaining budget is measured after the write, so its time is never lost.
+    const left = pressDeadline - this.now().getTime();
+    if (left <= 0) return this.denySend('SEND_LATE');
     let clickFailed = false;
     try { await this.page.clickSend(left); }
     catch (error) {
@@ -922,10 +931,14 @@ class Driver {
    */
   private async runChecks() {
     if (this.m.kind !== 'code' || !this.m.code?.checks.length) return;
-    if (this.m.checks?.length === this.m.code.checks.length) return;
-    // A seal or exec that was not finished yet is retried; other check errors are final.
-    if (this.m.checks_error && !RETRYABLE_CHECK_ERROR.test(this.m.checks_error)) return;
+    // Checks run only on the journal path, where this request holds its coding slot; a
+    // recorded error is final (the coordinator runs the checks locally instead).
+    if (this.m.checks?.length === this.m.code.checks.length || this.m.checks_error) return;
     try {
+      // A check from an interrupted process may still run: never start another beside it.
+      if (this.m.check_running && processGroupAlive(this.m.check_running.pgid)) {
+        throw new GoError('CHECK_STILL_RUNNING', `Check ${this.m.check_running.index} from an interrupted run still runs (process group ${this.m.check_running.pgid}); checks skipped.`);
+      }
       // Checks against a workspace that may still accept edits would prove nothing.
       if (this.m.sealed !== 'revoked') throw new GoError('NOT_SEALED', `Workspace is not sealed (${this.m.sealed ?? 'unknown'}); checks skipped.`);
       const root = (await readMultiRepoCatalog(this.stateDir)).repositories[this.m.repository_id]?.root;
@@ -943,8 +956,9 @@ class Driver {
       if (!this.m.check_baseline) await this.save({ check_baseline: before });
       const checks = [...(this.m.checks ?? [])];
       for (let i = checks.length; i < this.m.code.checks.length; i++) {
-        checks.push(await runCheck(root, this.m.code.checks[i], path.join(this.store.dir, `${manifestPath(this.m.request_id)}.check-${i}.log`)));
-        await this.save({ checks });
+        checks.push(await runCheck(root, this.m.code.checks[i], path.join(this.store.dir, `${manifestPath(this.m.request_id)}.check-${i}.log`),
+          pgid => this.save({ check_running: { index: i, pgid } })));
+        await this.save({ checks, check_running: undefined });
       }
       await this.save({ candidate_changed: (await candidateDigest(root)) !== before });
     } catch (error) {

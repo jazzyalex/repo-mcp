@@ -59,7 +59,14 @@ function checkEnv(): NodeJS.ProcessEnv {
   return { ...env, NO_COLOR: '1', TERM: 'dumb', PAGER: 'cat', GIT_PAGER: 'cat', CI: '1' };
 }
 
-export async function runCheck(root: string, cmd: string, log: string): Promise<CheckResult> {
+/** True while the process group `pgid` (a detached check) still exists; unknown counts as alive. */
+export function processGroupAlive(pgid: number) {
+  try { process.kill(-pgid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+/** `onSpawn` receives the check's process group as soon as it exists, so a crash can be fenced. */
+export async function runCheck(root: string, cmd: string, log: string, onSpawn?: (pgid: number) => Promise<void>): Promise<CheckResult> {
   const file = await open(log, 'w+', 0o600);
   try {
     const { exit_code, timed_out } = await new Promise<{ exit_code: number | null; timed_out: boolean }>((resolve, reject) => {
@@ -67,6 +74,7 @@ export async function runCheck(root: string, cmd: string, log: string): Promise<
         cwd: root, detached: true, stdio: ['ignore', file.fd, file.fd],
         env: checkEnv()
       });
+      if (child.pid) void onSpawn?.(child.pid).catch(() => {});
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } }, CHECK_TIMEOUT_MS);
       child.on('error', error => { clearTimeout(timer); reject(error); });

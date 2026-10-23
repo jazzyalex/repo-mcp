@@ -102,8 +102,11 @@ command. `chatgpt-run probe` takes the same lease. A malformed lease record fail
 (`ACCOUNT_STATE_CORRUPT`). A release that keeps failing before the answer wait raises
 `LEASE_RELEASE_FAILED`, so the lease is never silently left behind a live process; at a
 terminal or held transition the state is saved first and the error is then raised.
-- Project checks blocked by `NOT_SEALED` or `EXEC_STILL_RUNNING` are retried by a later
-  run of the request; completed check results are kept.
+- Project checks run only on the journal path, where the request holds its coding slot.
+  A recorded check error is final: the coordinator runs the checks locally instead. A
+  rerun of a finished (`cleaned`/`failed`) request never runs checks. The running check's
+  process group is recorded (`check_running`); a new check never starts while it lives,
+  and the coding slot and `task finish` treat it like a live exec command.
 
 Lease sections (each acquired and released explicitly, never held during the answer
 wait, checks, or a recursive recovery):
@@ -128,10 +131,11 @@ least `min_gap_seconds` ago. If allowed, append `{id, at, bound: at + 120 s}`, t
 The gap and the hourly count use `confirmed_at` (the observed time, never earlier) when
 present, else `bound`. The click is made only within 45 s of the commit; a later click is
 not made, the run is resolved `not-submitted` (`SEND_LATE`) and the attempt stays charged.
-Before any click input, the bound is raised to cover the whole click sequence (five CDP
-commands of at most 30 s each) plus the 60 s settle window; if that write fails, nothing
-is clicked (`SEND_BOUND_UNWRITABLE`). The page gets the remaining 45 s press budget and
-never starts the mouse press past it (`SEND_NOT_CLICKED`, resolved `SEND_LATE`). When the
+Before any click input, the bound is raised to commit + 45 s (press deadline) + 60 s
+(press and release commands, 30 s each) + 60 s (settle window); if that write fails,
+nothing is clicked (`SEND_BOUND_UNWRITABLE`). The remaining press budget is measured
+after that write, and the page never starts the mouse press past the commit-anchored
+deadline (`SEND_NOT_CLICKED`, resolved `SEND_LATE`). When the
 click returns cleanly, the bound is set to the return time. A click command that
 failed or timed out may still run in Chrome: the bound moves to 60 s past the failure,
 and the driver keeps the setup lease while it confirms for those 60 s. A CDP command

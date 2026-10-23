@@ -27,8 +27,8 @@ const HOUR_MS = 3_600_000;
  */
 export const SEND_BOUND_MS = 120_000;
 export const SEND_CLICK_DEADLINE_MS = 45_000;
-/** Longest a whole click sequence can take: five CDP commands of at most 30 s each. */
-export const CLICK_SEQUENCE_MAX_MS = 150_000;
+/** Longest the press and release commands can take after the press starts: 30 s each. */
+export const CLICK_SEQUENCE_MAX_MS = 60_000;
 /**
  * A click command that failed or timed out may still run in Chrome: the driver keeps the
  * setup lease and moves the attempt bound this far past the failure while it settles.

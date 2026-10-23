@@ -666,7 +666,7 @@ test('before any click input the attempt bound covers the whole click sequence a
     await click();
   };
   assert.equal((await runGo(req(f, 'a'), { page, sleep })).phase, 'cleaned');
-  assert.ok(seen!.bound - seen!.at >= 150_000 + 60_000, 'a crash mid-click leaves a bound past every possible press');
+  assert.ok(seen!.bound - seen!.at >= 45_000 + 60_000 + 60_000, 'a crash mid-click leaves a bound past every possible press');
   assert.ok(seen!.budget > 0 && seen!.budget <= 45_000, 'the page gets the remaining press budget');
   const after = await (await StateStore.open(f.accountDir)).read<any>('account-v2', 'chatgpt-go-account-v2');
   assert.ok(after.attempts.at(-1).confirmed_at, 'a clean click is confirmed at the observed time');
@@ -681,4 +681,25 @@ test('a press budget that runs out inside the page clicks nothing and fails pre-
   assert.equal(r.failure_code, 'SEND_LATE');
   assert.equal(r.run_state, 'failed-pre-submit');
   assert.equal((await accountStatus(f.accountDir)).slots_in_use, 0);
+});
+
+// --- review round 9 fixes -------------------------------------------------------------------
+
+test('a project check whose process group still runs keeps the coding request in use', async t => {
+  const f = await fixture(t);
+  const { spawn } = await import('node:child_process');
+  const child = spawn('/bin/sh', ['-c', 'sleep 30'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } });
+  const store = await StateStore.open(f.stateDir);
+  const now = new Date(Date.now() - 1000).toISOString();
+  const manifest = {
+    request_id: 'code-z', request_digest: 'd', repository_id: 'repo', task_id: 'task', coordinator: 'claude', kind: 'code', profile: 'code',
+    prompt_sha256: 'p', prompt_file: '', session_id: 's', created_at: now, updated_at: now, phase: 'cleaned', grant_id: 'g', sealed: 'revoked',
+    check_running: { index: 0, pgid: child.pid }
+  };
+  await store.write(`chatgpt-go/${'9'.repeat(64)}`, 'chatgpt-go-v1', manifest);
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['code-z']);
+  process.kill(-child.pid!, 'SIGKILL');
+  await new Promise(r => child.once('exit', r));
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), []);
 });
