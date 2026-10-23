@@ -22,7 +22,7 @@ import {
 } from './chatgpt-run.js';
 import { recordTrustedBrowserObservation, type ModelProfile } from './model-policy.js';
 import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js';
-import { activeExecSessions, execSessionsQuiet } from './exec-tool.js';
+import { execSessionsQuiet } from './exec-tool.js';
 import { candidateDigest, runCheck, type CheckResult } from './go-checks.js';
 import {
   AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
@@ -235,8 +235,12 @@ export async function activeGoRequestsForTask(stateDir: string, taskId: string) 
     }
     if (m.task_id !== taskId) continue;
     const terminal = m.phase === 'cleaned' || m.phase === 'failed';
-    // A terminal coding request whose workspace is not verified revoked may still own it.
-    if (terminal && m.kind === 'code' && m.grant_id && m.sealed !== 'revoked') { active.push(m.request_id); continue; }
+    // A terminal coding request may still own the checkout: its workspace is not verified
+    // revoked, or an exec command it started may still run (the same proof its slot needs).
+    if (terminal && m.kind === 'code' && m.grant_id) {
+      const quiet = m.sealed === 'revoked' && (await execSessionsQuiet(stateDir, taskId, m.created_at).catch(() => ({ quiet: false }))).quiet;
+      if (!quiet) { active.push(m.request_id); continue; }
+    }
     let live = false;
     // An unreadable lock may belong to a live waiter: count it as live.
     let lock: unknown;
@@ -911,7 +915,7 @@ class Driver {
         // A revoked workspace's exec command is cancelled within seconds; never take the
         // baseline while one still runs.
         const deadline = Date.now() + 20_000;
-        while ((await activeExecSessions(this.stateDir, this.m.task_id)).length) {
+        while (!(await execSessionsQuiet(this.stateDir, this.m.task_id, this.m.created_at).catch(() => ({ quiet: false }))).quiet) {
           if (Date.now() > deadline) throw new GoError('EXEC_STILL_RUNNING', 'An exec command still runs after the seal; checks skipped.');
           await this.sleep(1_000);
         }

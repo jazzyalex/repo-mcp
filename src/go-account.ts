@@ -287,9 +287,11 @@ export async function admitSlot(store: StateStore, dir: string, req: SlotRequest
       const state = await update<State>(store, async account => {
         // Read the limits under the account lock, the same lock config-set holds.
         const { config } = await accountConfig(dir);
-        if (account.slots.some(s => s.key === req.key)) return { value: { admitted: true } };
+        // The latch is checked before re-entering an existing slot: a fresh request never
+        // continues past an owner stop (journal recovery uses adoptSlot instead).
         if (existsSync(path.join(dir, LATCH_FALLBACK))) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT work is stopped by ${LATCH_FALLBACK}; the owner clears it with chatgpt-run account unlatch --reason TEXT.`);
         if (account.latch) throw new AccountError('ACCOUNT_LATCHED', `New ChatGPT work is stopped: ${account.latch.code} at ${account.latch.at}. The owner clears it with chatgpt-run account unlatch --reason TEXT.`);
+        if (account.slots.some(s => s.key === req.key)) return { value: { admitted: true } };
         if (req.kind === 'code') {
           const owner = account.slots.find(s => (s.kind === 'code' && s.checkout === req.checkout) || s.kind === 'legacy');
           if (owner) throw new AccountError('REPOSITORY_BUSY', owner.kind === 'legacy'

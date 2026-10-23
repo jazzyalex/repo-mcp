@@ -7,6 +7,7 @@ import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
 import { authorizeWorkspace, WorkspaceInvalidError, type AuthorizedWorkspace } from './multirepo-state.js';
 import { StateStore, lockOwnerAlive } from './task-state.js';
+import { pidReusedSince } from './go-account.js';
 
 // The exec shell for code workspaces (docs/EXEC-TOOL.md). A command runs as the broker
 // user through /bin/sh in the registered checkout, with no sandbox. Each session has a
@@ -614,6 +615,8 @@ export async function activeExecSessions(stateDir: string, taskId: string) {
   return active;
 }
 
+const EXEC_STATES = new Set<string>(['starting', 'running', 'exited', 'failed', 'cancelled', 'timed_out', 'uncertain']);
+
 /**
  * Fail-closed proof that no exec command of `taskId` created at or after `since` can still
  * touch the checkout: every such record is readable and finished, or its broker and its
@@ -628,11 +631,16 @@ export async function execSessionsQuiet(stateDir: string, taskId: string, since:
     let record: ExecSessionRecord | undefined;
     try { record = await store.read<ExecSessionRecord>(`exec-sessions/${taskId}/${name}`, RECORD_KIND); }
     catch { return { quiet: false, reason: `unreadable exec session ${name}` }; }
-    if (!record || typeof record.state !== 'string' || !Number.isFinite(Date.parse(record.created_at))) return { quiet: false, reason: `malformed exec session ${name}` };
+    if (!record || typeof record !== 'object' || !EXEC_STATES.has(record.state) || typeof record.session_id !== 'string' ||
+        !Number.isSafeInteger(record.broker_pid) || record.broker_pid <= 0 || !Number.isFinite(Date.parse(record.created_at)) ||
+        (record.pgid !== undefined && (!Number.isSafeInteger(record.pgid) || record.pgid <= 1))) {
+      return { quiet: false, reason: `malformed exec session ${name}` };
+    }
     if (Date.parse(record.created_at) < from) continue;
     if (record.state !== 'starting' && record.state !== 'running' && record.state !== 'uncertain') continue;
+    // A broker PID now owned by a process started after the session is a reused PID.
     let brokerAlive = true;
-    try { brokerAlive = lockOwnerAlive(record.broker_pid); } catch { brokerAlive = true; }
+    try { brokerAlive = lockOwnerAlive(record.broker_pid) && !pidReusedSince(record.broker_pid, record.created_at); } catch { brokerAlive = true; }
     if (brokerAlive) return { quiet: false, reason: `exec session ${record.session_id} is ${record.state}` };
     if (!record.pgid) return { quiet: false, reason: `exec session ${record.session_id} lost its broker; its process group is unknown` };
     try { process.kill(-record.pgid, 0); return { quiet: false, reason: `exec session ${record.session_id} process group ${record.pgid} is still alive` }; }

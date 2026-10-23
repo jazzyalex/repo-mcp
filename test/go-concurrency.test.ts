@@ -610,3 +610,44 @@ test('a terminal coding request with an unsealed workspace keeps the task in use
   });
   assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['code-x']);
 });
+
+// --- review round 7 fixes -------------------------------------------------------------------
+
+const execRecord = (over: Record<string, unknown>) => ({ session_id: 's', workspace_id: 'w', repository_id: 'repo', task_id: 'task', request_id: 'r',
+  request_digest: 'd', cmd: 'x', cmd_sha256: 'h', cmd_length: 1, timeout_s: 1, state: 'running', reason: null, exit_code: null, signal: null,
+  output_bytes: 0, truncated: false, broker_instance: 'b', broker_pid: 999999, created_at: new Date().toISOString(), started_at: null,
+  ended_at: null, duration_ms: null, ...over });
+
+test('the quiet scan treats unknown exec states as busy and a reused broker PID as dead', async t => {
+  const f = await fixture(t);
+  const { execSessionsQuiet } = await import('../src/exec-tool.js');
+  const store = await StateStore.open(f.stateDir);
+  const rel = `exec-sessions/task/${'a'.repeat(32)}.json`;
+  await store.write(rel, 'exec-session-v1', execRecord({ state: 'runnng' }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', '1989-01-01T00:00:00Z')).quiet, false);
+  // This process started long after 1990: as the broker of a 1990 session its PID was reused.
+  await store.write(rel, 'exec-session-v1', execRecord({ broker_pid: process.pid, created_at: '1990-01-01T00:00:00.000Z', pgid: 999998 }));
+  assert.equal((await execSessionsQuiet(f.stateDir, 'task', '1989-01-01T00:00:00Z')).quiet, true);
+});
+
+test('a terminal sealed coding request with a live exec command keeps the task in use', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.stateDir);
+  const now = new Date(Date.now() - 1000).toISOString();
+  await store.write(`chatgpt-go/${'d'.repeat(64)}`, 'chatgpt-go-v1', {
+    request_id: 'code-y', request_digest: 'd', repository_id: 'repo', task_id: 'task', coordinator: 'claude', kind: 'code', profile: 'code',
+    prompt_sha256: 'p', prompt_file: '', session_id: 's', created_at: now, updated_at: now, phase: 'cleaned', grant_id: 'g', sealed: 'revoked'
+  });
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), []);
+  await store.write(`exec-sessions/task/${'e'.repeat(32)}.json`, 'exec-session-v1', execRecord({ broker_pid: process.pid }));
+  assert.deepEqual(await activeGoRequestsForTask(f.stateDir, 'task'), ['code-y']);
+});
+
+test('a fresh request re-entering its slot still stops at the owner latch', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  const slot = { key: 'k', requestId: 'k', stateDir: f.stateDir, kind: 'architecture' as const, checkout: null };
+  await admitSlot(store, f.accountDir, slot, { sleep });
+  await setLatch(store, f.accountDir, { code: 'OWNER_STOP', by: 'owner', reason: 'stop' }, new Date());
+  await assert.rejects(admitSlot(store, f.accountDir, slot, { sleep }), e => code(e, 'ACCOUNT_LATCHED'));
+});

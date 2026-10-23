@@ -169,7 +169,9 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
 - A coding run frees its slot only when its workspace (or unused grant) is verified
   revoked and a fail-closed scan proves no exec command of its task (created since the
   request) can still run: every record readable and finished, or both its broker and its
-  detached process group (`pgid`, now recorded) gone. Otherwise every release path
+  detached process group (`pgid`, now recorded) gone. A record with an unknown state or
+  missing identity fields is busy; a broker PID now owned by a process started after the
+  session counts as a dead broker (PID reuse). Project checks wait on the same proof. Otherwise every release path
   (finish, cleanup error, signal) keeps the slot, and `--resume` retries the seal and the
   remaining checks.
 - A challenge whose latch could not be persisted keeps the slot on every path, including
@@ -179,7 +181,10 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
   it) and retries every 5 s for 30 min; if it still fails, the process exits without
   releasing the lease, which dead-owner recovery frees only after the settle window.
 - `task finish` also counts a terminal coding request whose workspace is not verified
-  revoked, and any request whose lock a live process holds.
+  revoked or whose exec commands are not proven quiet, and any request whose lock a live
+  process holds.
+- Fresh admission checks the latch before re-entering an existing slot; only journal
+  recovery (`adoptSlot`) passes the latch.
 - Coding recovery refuses `REPOSITORY_BUSY` beside any other coding slot on the checkout
   or any legacy slot; a request's own legacy slot is upgraded to its real kind and
   checkout.
