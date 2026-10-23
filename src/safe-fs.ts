@@ -22,6 +22,14 @@ export async function assertNoSymlinks(root: string, rel: string) {
   }
 }
 
+/** No parent directory of root/rel holds a `.git` (the file is not inside a nested repository). */
+export async function assertNotNested(root: string, rel: string) {
+  const parts = rel.split('/');
+  for (let i = 1; i < parts.length; i++) {
+    if (await lstat(path.join(root, ...parts.slice(0, i), '.git')).then(() => true, () => false)) throw new SafeError('Path is inside a nested repository.');
+  }
+}
+
 /**
  * Open root/rel for reading and prove the descriptor is the in-tree file: check the components, open
  * with O_NOFOLLOW, then require realpath(path) === root/rel and the descriptor's (dev, ino) to equal an

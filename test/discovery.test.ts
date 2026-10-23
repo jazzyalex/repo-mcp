@@ -436,3 +436,23 @@ test('a parent of an ignored_exact file that becomes a nested repository during 
   assert.ok(last.inventory.skipped.nested_repo >= 1);
   await assert.rejects(repo.read('research/notes.md'), /not exposed/);
 });
+
+test('an ignored_exact file is not read once its parent becomes a nested repository at read time', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'needle\n' });
+  let arm = false;
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], ignored_exact: ['research/notes.md'] }), {
+    pathHook: async (stage, ctx) => { if (arm && stage === 'read:after-check' && ctx.path === 'research/notes.md') await mkdir(path.join(m.root, 'research', '.git')); }
+  }, m.track);
+  assert.ok((await listAll(repo)).paths.includes('research/notes.md'));
+  arm = true;
+  await assert.rejects(repo.read('research/notes.md'), /not exposed/);
+});
+
+test('removing a nested-repository marker makes a listed ignored file visible on refresh', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'needle\n' });
+  await mkdir(path.join(m.root, 'research', '.git'));
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], ignored_exact: ['research/notes.md'] }), {}, m.track);
+  assert.ok(!(await listAll(repo)).paths.includes('research/notes.md'));
+  await rm(path.join(m.root, 'research', '.git'), { recursive: true });
+  assert.ok((await listAll(repo)).paths.includes('research/notes.md'));
+});

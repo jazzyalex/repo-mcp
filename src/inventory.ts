@@ -239,11 +239,12 @@ async function admittedParentsUnchanged(ctx: WalkContext, inventory: Inventory, 
   return true;
 }
 
-async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>, skipped: Skipped) {
+async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>, skipped: Skipped, budget: { visited: number; cap: number }) {
   const listed = new Set(entries.map(e => nfc(e.path)));
   const walked = new Set(dirs.map(d => d.path));
-  let visited = 0;
-  const cap = 4 * ctx.inventoryPaths;
+  const counted = new Set<string>();
+  const count = (dir: string, key: keyof Skipped) => { if (!counted.has(dir)) { counted.add(dir); skipped[key]++; } };
+  const cap = budget.cap;
   for (const rel of ctx.policy.ignoredExact) {
     ctx.deadline.check(ctx.expired);
     if (listed.has(nfc(rel)) || !ctx.policy.decide(rel, 'read').ok) continue;
@@ -253,18 +254,21 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
     // later create anywhere on the path re-walks.
     let ok = true;
     for (let i = 1; i < parts.length && ok; i++) {
-      if (++visited > cap) throw limitError(`visited more than ${cap} ignored_exact components (4 x inventory_paths)`);
+      if (++budget.visited > cap) throw limitError(`visited more than ${cap} directory entries (4 x inventory_paths)`);
       ctx.deadline.check(ctx.expired);
       const dir = parts.slice(0, i).join('/');
       const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
-      ok = !!stat && stat.isDirectory() && !stat.isSymbolicLink();
-      if (ok && stat!.dev !== rootStat.dev) { skipped.other_device++; ok = false; }
-      if (ok && await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) { skipped.nested_repo++; ok = false; }
-      if (ok && !walked.has(dir)) { dirs.push({ path: dir, fp: dirFingerprint(stat!) }); walked.add(dir); }
+      if (!stat) { ok = false; break; }
+      if (stat.isSymbolicLink()) { count(dir, 'symlinks'); ok = false; break; }
+      if (!stat.isDirectory()) { count(dir, 'special'); ok = false; break; }
+      if (stat.dev !== rootStat.dev) { count(dir, 'other_device'); ok = false; break; }
+      // Watched before the .git check, so removing a nested-repository marker re-walks.
+      if (!walked.has(dir)) { dirs.push({ path: dir, fp: dirFingerprint(stat) }); walked.add(dir); }
+      if (await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) { count(dir, 'nested_repo'); ok = false; }
     }
     // Only a path Git actually ignores needs the exception; any other is the walk's business.
     if (!ok || !ignoredBy(ignored, rel)) continue;
-    if (++visited > cap) throw limitError(`visited more than ${cap} ignored_exact components (4 x inventory_paths)`);
+    if (++budget.visited > cap) throw limitError(`visited more than ${cap} directory entries (4 x inventory_paths)`);
     const stat = await lstat(abs(ctx.root, rel), { bigint: true }).catch(() => undefined);
     if (!stat) continue;
     if (stat.isSymbolicLink()) { skipped.symlinks++; continue; }
@@ -338,6 +342,7 @@ async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory
     }
   }
   const admitted = new Set<string>();
-  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat, admitted, skipped);
+  // One visit budget for the walk and the ignored_exact probes together.
+  await addIgnoredExact(ctx, ignored, entries, dirs, rootStat, admitted, skipped, { visited, cap: visitedCap });
   return { inventory: Inventory.of(entries, dirs, skipped, policy.digest), gitignores, admitted };
 }

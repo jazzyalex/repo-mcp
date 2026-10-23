@@ -17,7 +17,7 @@ import { TaskContext, type TaskOptions, type MutationResult, type Publication, t
 import { PathPolicy } from './path-policy.js';
 import { Inventory, walk, fingerprint, emptySkipped, type Entry, type WalkContext } from './inventory.js';
 import { fold, nfc, pathProblem } from './glob.js';
-import { openVerified, assertNoSymlinks, dirIdentity, assertSameDir, verifyPublished, removeIfSame, diffInput, readSymlinkVerified, type PathHook, type DiffInput } from './safe-fs.js';
+import { assertNotNested, openVerified, assertNoSymlinks, dirIdentity, assertSameDir, verifyPublished, removeIfSame, diffInput, readSymlinkVerified, type PathHook, type DiffInput } from './safe-fs.js';
 import { batchPaths } from './git-batches.js';
 import type { CompiledPolicy } from './policy.js';
 
@@ -450,6 +450,10 @@ export class RepoWorkspace {
   private async readResolved(rel: string) {
     if (pathProblem(rel)) throw new SafeError(NOT_EXPOSED);
     const limit = this.limits.edit_file_bytes;
+    // A Git-ignored file exposed by ignored_exact is admitted only outside nested
+    // repositories; check again at the read itself, before and after the bytes are read.
+    const ignoredExact = this.paths.ignoredExact.includes(rel);
+    if (ignoredExact) await assertNotNested(this.root, rel).catch(() => { throw new SafeError(NOT_EXPOSED); });
     const { handle, stat } = await openVerified(this.root, rel, this.pathHook);
     try {
       if (stat.size > limit) throw new SafeError(`File exceeds the ${formatBytes(limit)} file limit.`);
@@ -463,6 +467,7 @@ export class RepoWorkspace {
       try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
       catch { throw new NotTextError('File is not valid UTF-8 text.'); }
       if (content.includes('\0')) throw new NotTextError('Binary file unsupported.');
+      if (ignoredExact) await assertNotNested(this.root, rel).catch(() => { throw new SafeError(NOT_EXPOSED); });
       return { path: rel, sha256: sha256(bytes), content, mode: stat.mode & 0o777, bytes: size, fp: fingerprint(await handle.stat({ bigint: true })) };
     } finally { await handle.close(); }
   }
