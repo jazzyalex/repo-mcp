@@ -214,6 +214,8 @@ export class ExecManager {
     for (const record of records) {
       if (count <= keep) break;
       if (!isFinished(record.state) || this.running.has(record.session_id)) continue;
+      // The record is the proof a coding slot needs: keep it while its group may live.
+      if (!groupProvenGone(record)) continue;
       await rm(await this.logPath(taskId, record.session_id), { force: true });
       await store.remove(this.recordPath(taskId, record.session_id));
       this.unsaved.delete(record.session_id);
@@ -613,6 +615,13 @@ export async function activeExecSessions(stateDir: string, taskId: string) {
     active.push({ session_id: record.session_id, workspace_id: record.workspace_id, state: record.state, broker_pid: record.broker_pid, created_at: record.created_at });
   }
   return active;
+}
+
+/** A finished session whose spawned process group is proven gone, or that never spawned. */
+function groupProvenGone(record: ExecSessionRecord) {
+  if (!record.pgid) return !record.started_at;
+  try { process.kill(-record.pgid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
 }
 
 const EXEC_STATES = new Set<string>(['starting', 'running', 'exited', 'failed', 'cancelled', 'timed_out', 'uncertain']);

@@ -190,7 +190,8 @@ treat it like a denied commit (not-submitted, `SELECTION_STALE`).
   request) can still run: every record readable, and every spawned session's detached
   process group (`pgid`, now recorded) gone, whatever its recorded state; a running
   session also needs a dead broker. A finished session that ran with no recorded group is
-  busy; one that never spawned is quiet. A record with an unknown state or
+  busy; one that never spawned is quiet. Exec retention never deletes a record while its
+  group may live, so this proof survives the 20-session cap. A record with an unknown state or
   missing identity fields is busy; a broker PID now owned by a process started after the
   session counts as a dead broker (PID reuse). Project checks wait on the same proof. Otherwise every release path
   (finish, cleanup error, signal) keeps the slot, and `--resume` retries the seal and the

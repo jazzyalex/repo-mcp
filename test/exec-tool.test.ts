@@ -483,3 +483,30 @@ test('activeExecSessions reports running sessions from disk and ignores dead bro
     assert.deepEqual(await activeExecSessions(path.join(stateDir, 'missing'), 'task'), []);
   });
 });
+
+test('retention never deletes a finished session whose process group is still alive', async () => {
+  await withService(async ({ client, token, stateDir }) => {
+    const { spawn } = await import('node:child_process');
+    const child = spawn('/bin/sh', ['-c', 'sleep 60'], { detached: true, stdio: 'ignore' });
+    try {
+      const store = await StateStore.open(stateDir);
+      // The oldest record: finished, but its detached group survived.
+      const oldId = '0'.repeat(32);
+      await store.write(`exec-sessions/task/${oldId}.json`, 'exec-session-v1', {
+        session_id: oldId, workspace_id: 'w', repository_id: 'repo', task_id: 'task', request_id: 'old', request_digest: 'd', cmd: 'x',
+        cmd_sha256: 'h', cmd_length: 1, timeout_s: 1, state: 'exited', reason: null, exit_code: 0, signal: null, output_bytes: 0,
+        truncated: false, broker_instance: 'b', broker_pid: 999999, pgid: child.pid, created_at: '2000-01-01T00:00:00.000Z',
+        started_at: '2000-01-01T00:00:00.000Z', ended_at: '2000-01-01T00:00:01.000Z', duration_ms: 1000
+      });
+      for (let i = 0; i < 22; i++) assert.equal((await exec(client, token, `keep-live-${i}`, `echo ${i}`)).error, false);
+      const names = await store.list('exec-sessions/task');
+      assert.ok(names.includes(`${oldId}.json`), 'the record of a live group is kept past the cap');
+      const { execSessionsQuiet } = await import('../src/exec-tool.js');
+      assert.equal((await execSessionsQuiet(stateDir, 'task', '1999-01-01T00:00:00.000Z')).quiet, false);
+      // Let the last command's log settle before the fixture is removed.
+      await new Promise(r => setTimeout(r, 1_000));
+    } finally {
+      try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ }
+    }
+  });
+});
