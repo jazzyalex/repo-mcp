@@ -456,3 +456,12 @@ test('removing a nested-repository marker makes a listed ignored file visible on
   await rm(path.join(m.root, 'research', '.git'), { recursive: true });
   assert.ok((await listAll(repo)).paths.includes('research/notes.md'));
 });
+
+test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
+  const m = await makeRepo(t, { 'research/notes.md': 'old\n' });
+  const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);
+  await mkdir(path.join(m.root, 'research', '.git'));
+  await writeFile(path.join(m.root, 'research', 'notes.md'), 'SECRET-NEEDLE\n');
+  const page = await repo.diff().then(p => JSON.stringify(p), (e: Error) => e.message);
+  assert.ok(!page.includes('SECRET-NEEDLE'), page.slice(0, 300));
+});

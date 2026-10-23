@@ -106,7 +106,7 @@ which is also what a missing path returns.
 
 - **Workaround today:** an exact-mode policy listing each file. Exact mode is not
   filtered.
-- **Feature:** a policy key such as `read.ignored_exact: ["research/a.md", ...]`, default
+- **Feature:** the top-level policy key `ignored_exact: ["research/a.md", ...]`, default
   empty (off). Each entry is a literal path, never a glob. A listed ignored file enters
   the glob inventory only if it also passes the normal read policy, dotfile and secret
   gates, size, link and regular-file checks. Nothing else changes: the default still

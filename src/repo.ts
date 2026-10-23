@@ -452,7 +452,7 @@ export class RepoWorkspace {
     const limit = this.limits.edit_file_bytes;
     // A Git-ignored file exposed by ignored_exact is admitted only outside nested
     // repositories; check again at the read itself, before and after the bytes are read.
-    const ignoredExact = this.paths.ignoredExact.includes(rel);
+    const ignoredExact = this.paths.ignoredExact.some(p => nfc(p) === nfc(rel));
     if (ignoredExact) await assertNotNested(this.root, rel).catch(() => { throw new SafeError(NOT_EXPOSED); });
     const { handle, stat } = await openVerified(this.root, rel, this.pathHook);
     try {

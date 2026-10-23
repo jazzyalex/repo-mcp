@@ -230,13 +230,31 @@ async function admittedParentsUnchanged(ctx: WalkContext, inventory: Inventory, 
   for (const rel of admitted) {
     const parts = rel.split('/');
     for (let i = 1; i < parts.length; i++) {
+      ctx.deadline.check(ctx.expired);
       const dir = parts.slice(0, i).join('/');
       const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
       if (!stat || !stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== rootDev || dirFingerprint(stat) !== fps.get(dir)) return false;
       if (await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) return false;
     }
   }
+  ctx.deadline.check(ctx.expired);
   return true;
+}
+
+/**
+ * The on-disk spelling of `rel`: each component must match exactly one directory entry in
+ * NFC (so an NFD name on disk is found, and a case-only alias is not). Undefined if missing
+ * or ambiguous.
+ */
+async function diskSpelling(root: string, rel: string) {
+  const out: string[] = [];
+  for (const part of rel.split('/')) {
+    const names = await readdir(abs(root, out.join('/'))).catch(() => undefined);
+    const hits = names?.filter(n => nfc(n) === nfc(part)) ?? [];
+    if (hits.length !== 1) return undefined;
+    out.push(hits[0]);
+  }
+  return out.join('/');
 }
 
 async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entry[], dirs: Dir[], rootStat: BigIntStats, admitted: Set<string>, skipped: Skipped, budget: { visited: number; cap: number }) {
@@ -245,9 +263,12 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
   const counted = new Set<string>();
   const count = (dir: string, key: keyof Skipped) => { if (!counted.has(dir)) { counted.add(dir); skipped[key]++; } };
   const cap = budget.cap;
-  for (const rel of ctx.policy.ignoredExact) {
+  for (const listedRel of ctx.policy.ignoredExact) {
     ctx.deadline.check(ctx.expired);
-    if (listed.has(nfc(rel)) || !ctx.policy.decide(rel, 'read').ok) continue;
+    if (listed.has(nfc(listedRel)) || !ctx.policy.decide(listedRel, 'read').ok) continue;
+    // Entries carry the disk spelling (an NFD name stays NFD); a missing path keeps the
+    // policy spelling so its existing parents are still watched.
+    const rel = await diskSpelling(ctx.root, listedRel) ?? listedRel;
     const parts = rel.split('/');
     if (parts.some(p => UNSAFE_NAME.test(p) || Buffer.byteLength(p) > 255) || Buffer.byteLength(rel) > 256 || parts.length > MAX_DEPTH) continue;
     // Watch every existing real parent, even when a deeper one or the file is missing, so a

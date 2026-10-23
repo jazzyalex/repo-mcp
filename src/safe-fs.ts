@@ -74,7 +74,12 @@ export async function safeStatInput(root: string, rel: string): Promise<SafeStat
       const stat = await lstat(current, { bigint: true });
       if (stat.isSymbolicLink()) return { state: 'refused', reason: 'a path component is a symlink' };
       if (stat.dev !== rootStat.dev) return { state: 'refused', reason: 'it is on another device' };
-      if (i < parts.length - 1) { if (!stat.isDirectory()) return { state: 'refused', reason: 'a path component is not a directory' }; continue; }
+      if (i < parts.length - 1) {
+        if (!stat.isDirectory()) return { state: 'refused', reason: 'a path component is not a directory' };
+        // A directory holding .git is a nested repository: its files are never diff inputs.
+        if (await lstat(path.join(current, '.git')).then(() => true, () => false)) return { state: 'refused', reason: 'it is inside a nested repository' };
+        continue;
+      }
       if (!stat.isFile()) return { state: 'refused', reason: 'it is not a regular file' };
       if (stat.nlink > 1n) return { state: 'refused', reason: 'it has more than one hard link' };
       return { state: 'file', stat };
