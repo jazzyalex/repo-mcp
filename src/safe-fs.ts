@@ -22,11 +22,19 @@ export async function assertNoSymlinks(root: string, rel: string) {
   }
 }
 
+/**
+ * Whether `dir` holds a `.git` marker (a nested repository). Only ENOENT means no marker; any
+ * other lookup failure (EACCES, EIO, ...) counts as a marker, so a probe that cannot answer refuses.
+ */
+export async function hasGitMarker(dir: string) {
+  return lstat(path.join(dir, '.git')).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT');
+}
+
 /** No parent directory of root/rel holds a `.git` (the file is not inside a nested repository). */
 export async function assertNotNested(root: string, rel: string) {
   const parts = rel.split('/');
   for (let i = 1; i < parts.length; i++) {
-    if (await lstat(path.join(root, ...parts.slice(0, i), '.git')).then(() => true, () => false)) throw new SafeError('Path is inside a nested repository.');
+    if (await hasGitMarker(path.join(root, ...parts.slice(0, i)))) throw new SafeError('Path is inside a nested repository.');
   }
 }
 
@@ -77,7 +85,7 @@ export async function safeStatInput(root: string, rel: string): Promise<SafeStat
       if (i < parts.length - 1) {
         if (!stat.isDirectory()) return { state: 'refused', reason: 'a path component is not a directory' };
         // A directory holding .git is a nested repository: its files are never diff inputs.
-        if (await lstat(path.join(current, '.git')).then(() => true, () => false)) return { state: 'refused', reason: 'it is inside a nested repository' };
+        if (await hasGitMarker(current)) return { state: 'refused', reason: 'it is inside a nested repository' };
         continue;
       }
       if (!stat.isFile()) return { state: 'refused', reason: 'it is not a regular file' };

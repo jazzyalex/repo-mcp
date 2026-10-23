@@ -5,14 +5,15 @@ import { SafeError, sha256 } from './errors.js';
 import { runGit } from './exec.js';
 import { nfc } from './glob.js';
 import type { PathPolicy } from './path-policy.js';
-import type { PathHook } from './safe-fs.js';
+import { hasGitMarker, type PathHook } from './safe-fs.js';
 import type { Deadline } from './deadline.js';
 
 // Discovery (docs/DESIGN-2B-PATH-POLICY.md section 7). An inventory is the sorted list of permitted
 // regular files plus the directories that were walked. Fingerprints are change metadata, not content
 // identity: review and commit boundaries must still verify content hashes.
 
-export type Entry = { path: string; size: number; mode: number; fp: string };
+/** `ignored` marks an untracked Git-ignored file admitted through ignored_exact. */
+export type Entry = { path: string; size: number; mode: number; fp: string; ignored?: true };
 type Dir = { path: string; fp: string };
 export type Skipped = { symlinks: number; special: number; linked: number; too_large: number; unsafe_name: number; too_long: number; other_device: number; git_ignored: number; nested_repo: number };
 export const emptySkipped = (): Skipped => ({ symlinks: 0, special: 0, linked: 0, too_large: 0, unsafe_name: 0, too_long: 0, other_device: 0, git_ignored: 0, nested_repo: 0 });
@@ -234,7 +235,7 @@ async function admittedParentsUnchanged(ctx: WalkContext, inventory: Inventory, 
       const dir = parts.slice(0, i).join('/');
       const stat = await lstat(abs(ctx.root, dir), { bigint: true }).catch(() => undefined);
       if (!stat || !stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== rootDev || dirFingerprint(stat) !== fps.get(dir)) return false;
-      if (await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) return false;
+      if (await hasGitMarker(abs(ctx.root, dir))) return false;
     }
   }
   ctx.deadline.check(ctx.expired);
@@ -268,7 +269,7 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
       if (stat.dev !== rootStat.dev) { count(dir, 'other_device'); ok = false; break; }
       // Watched before the .git check, so removing a nested-repository marker re-walks.
       if (!walked.has(dir)) { dirs.push({ path: dir, fp: dirFingerprint(stat) }); walked.add(dir); }
-      if (await lstat(path.join(abs(ctx.root, dir), '.git')).then(() => true, () => false)) { count(dir, 'nested_repo'); ok = false; }
+      if (await hasGitMarker(abs(ctx.root, dir))) { count(dir, 'nested_repo'); ok = false; }
     }
     // Only a path Git actually ignores needs the exception; any other is the walk's business.
     if (!ok || !ignoredBy(ignored, rel)) continue;
@@ -288,7 +289,7 @@ async function addIgnoredExact(ctx: WalkContext, ignored: Ignored, entries: Entr
     const rootReal = await realpath(ctx.root).catch(() => ctx.root);
     const disk = real && path.relative(rootReal, real).split(path.sep).join('/');
     if (disk !== rel) { skipped.unsafe_name++; continue; }
-    entries.push({ path: disk, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat) });
+    entries.push({ path: disk, size: Number(stat.size), mode: Number(stat.mode), fp: fingerprint(stat), ignored: true });
     listed.add(nfc(disk));
     admitted.add(disk);
     if (entries.length > ctx.inventoryPaths) throw limitError(`more than ${ctx.inventoryPaths} permitted paths (inventory_paths)`);
@@ -338,7 +339,7 @@ async function walkOnce(ctx: WalkContext, ignored: Ignored): Promise<{ inventory
         if (ignored.dirs.has(nfc(child))) { skipped.git_ignored++; continue; }
         // A nested repository or submodule has its own index and ignore rules, which this repository's Git never
         // applies: its files are not walked at all.
-        if (await lstat(path.join(dir, name, '.git')).then(() => true, () => false)) { skipped.nested_repo++; continue; }
+        if (await hasGitMarker(path.join(dir, name))) { skipped.nested_repo++; continue; }
         stack.push({ rel: child, depth: depth + 1 });
         continue;
       }

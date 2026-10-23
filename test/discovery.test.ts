@@ -467,6 +467,30 @@ test('an untracked ignored_exact file that is also creatable never appears in li
   assert.ok(!page.includes('IGNORED-NEEDLE'), page.slice(0, 300));
 });
 
+test('an untracked ignored_exact file is advertised as editable only when edit would accept it', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'research/\n' }, { 'research/notes.md': 'n\n', 'research/plan.md': 'p\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ dotfiles: ['.gitignore'], write: { include: ['research/**'], exclude: [] }, create: { paths: ['research/plan.md'], directories: [], extensions: [] }, ignored_exact: ['research/notes.md', 'research/plan.md'] }), {}, m.track);
+  const files = (await repo.listFiles()).files;
+  assert.equal(files.find(f => f.path === 'research/notes.md')?.editable, false, 'write-included but untracked and not creatable');
+  assert.equal(files.find(f => f.path === 'research/plan.md')?.editable, true, 'creatable, so edit accepts it');
+  await assert.rejects(repo.edit('research/notes.md', 'n', 'm', (await repo.read('research/notes.md')).sha256));
+});
+
+test('a nested-repository marker probe that fails with anything but ENOENT refuses', async t => {
+  const { hasGitMarker } = await import('../src/safe-fs.js');
+  const { chmod, mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const base = await mkdtemp(path.join(tmpdir(), 'marker-'));
+  t.after(async () => { await chmod(path.join(base, 'locked'), 0o755).catch(() => {}); await rm(base, { recursive: true, force: true }); });
+  await mkdir(path.join(base, 'plain'));
+  await mkdir(path.join(base, 'nested', '.git'), { recursive: true });
+  await mkdir(path.join(base, 'locked'));
+  await chmod(path.join(base, 'locked'), 0o000);
+  assert.equal(await hasGitMarker(path.join(base, 'plain')), false, 'ENOENT: no marker');
+  assert.equal(await hasGitMarker(path.join(base, 'nested')), true);
+  if (process.getuid?.() !== 0) assert.equal(await hasGitMarker(path.join(base, 'locked')), true, 'EACCES counts as a marker');
+});
+
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
   const m = await makeRepo(t, { 'research/notes.md': 'old\n' });
   const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);

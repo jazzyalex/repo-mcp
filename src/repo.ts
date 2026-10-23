@@ -318,6 +318,8 @@ export class RepoWorkspace {
     }
   }
   private isCreatable(file: string) { return this.paths.createRule(file).ok; }
+  /** Write-permitted and accepted by edit: an untracked ignored_exact file also needs a create rule. */
+  private presentlyEditable(entry: Entry) { return this.paths.decide(entry.path, 'write').ok && (!entry.ignored || this.isCreatable(entry.path)); }
   private newDeadline() { return new Deadline(this.operationBudgetMs, this.monotonicClock); }
   private walkContext(deadline: Deadline): WalkContext {
     return {
@@ -724,7 +726,7 @@ export class RepoWorkspace {
     let used = 0, i = offset;
     const files: { path: string; bytes: number; editable: boolean }[] = [];
     for (; i < entries.length; i++) {
-      const item = { path: entries[i].path, bytes: entries[i].size, editable: this.legacy ? this.legacy.editable.includes(entries[i].path) : this.paths.decide(entries[i].path, 'write').ok };
+      const item = { path: entries[i].path, bytes: entries[i].size, editable: this.legacy ? this.legacy.editable.includes(entries[i].path) : this.presentlyEditable(entries[i]) };
       const cost = jsonBytes(item) + (files.length ? 1 : 0);
       const total = (i === entries.length - 1 ? done : more) + used + cost;
       if (total > budget) { if (!files.length) throw tooSmall(total); break; }
@@ -1206,7 +1208,7 @@ export class RepoWorkspace {
     const tests = this.paths.literalPaths.tests;
     const all = inv.entries.map(e => e.path);
     return {
-      files: all, editable_files: all.filter(f => this.paths.decide(f, 'write').ok),
+      files: all, editable_files: inv.entries.filter(e => this.presentlyEditable(e)).map(e => e.path),
       creatable_files: this.paths.creatablePaths, test_suites: tests.filter(f => inv.index.has(f)), configured_test_suites: tests,
       editable_test_files: tests.filter(f => this.paths.decide(f, 'write').ok)
     };
