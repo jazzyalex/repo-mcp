@@ -344,6 +344,14 @@ test('a branch-conditional include is re-checked when HEAD moves', async t => {
   assert.ok(!(await listAll(repo)).paths.includes('notes/local.txt'), 'rules that apply on the new branch are used');
 });
 
+test('on an unborn branch nothing is advertised as editable, since edit cannot check HEAD', async t => {
+  const m = await makeRepo(t, { 'src/a.md': 'a\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ write: { include: ['src/**'], exclude: [] } }), {}, m.track);
+  assert.equal((await repo.listFiles('src/')).files.find(f => f.path === 'src/a.md')?.editable, true);
+  await git(m.root, 'symbolic-ref', 'HEAD', 'refs/heads/unborn');
+  assert.ok((await repo.listFiles('src/')).files.every(f => !f.editable));
+});
+
 test('churn of unrelated ignored files does not make discovery fail', async t => {
   const m = await makeRepo(t, { '.gitignore': '*.tmp\n' }, { 'src/visible.txt': 'ok\n' });
   let n = 0;
@@ -532,6 +540,46 @@ test('editable flags say what edit accepts: tracked, or untracked with a create 
   await git(m.root, 'add', 'notes/loose.md');
   await git(m.root, 'commit', '-q', '-m', 'add loose');
   assert.equal((await flags())['notes/loose.md'], true);
+});
+
+test('a large writable tree asks Git for tracking once per generation, across every page', async t => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 3000; i++) files[`w/f-${i}.md`] = 'x\n';
+  const m = await makeRepo(t, files);
+  let tracking = 0;
+  const doc = policyDoc({ write: { include: ['w/**'], exclude: [] }, limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, page_bytes: 8192 } });
+  const repo = await openGlob(t, m.root, doc, { gitHook: args => { if (args[0] === 'ls-tree' || args[0] === 'ls-files') tracking++; } }, m.track);
+  tracking = 0;
+  const { paths } = await listAll(repo, 'w/');
+  assert.equal(paths.length, 3000);
+  let info = await repo.info() as { files_next_cursor: string | null; editable_files: string[] };
+  let pages = 1, editable = info.editable_files.length;
+  while (info.files_next_cursor) { info = await repo.filesPage(info.files_next_cursor) as typeof info; pages++; editable += info.editable_files.length; }
+  assert.ok(pages > 3, `${pages} pages`);
+  assert.equal(editable, 3000);
+  assert.equal(tracking, 2, 'one ls-tree and one ls-files for the whole traversal');
+});
+
+test('a list_files cursor goes stale when a commit changes editability between pages', async t => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 2000; i++) files[`w/f-${i}.md`] = 'x\n';
+  const m = await makeRepo(t, files);
+  await writeFile(path.join(m.root, 'w', 'zz-loose.md'), 'l\n');
+  const doc = policyDoc({ write: { include: ['w/**'], exclude: [] }, limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, page_bytes: 4096 } });
+  const repo = await openGlob(t, m.root, doc, {}, m.track);
+  const first = await repo.listFiles('w/');
+  assert.ok(first.next_cursor);
+  await git(m.root, 'add', 'w/zz-loose.md');
+  await git(m.root, 'commit', '-q', '-m', 'track loose');
+  await assert.rejects(repo.listFiles('w/', first.next_cursor!), /HEAD or index|stale|again/i);
+});
+
+test('editable_test_files lists only configured tests that exist and edit would accept', async t => {
+  const m = await makeRepo(t, { 'test/kept.test.js': 'k\n' });
+  const doc = policyDoc({ write: { include: ['test/**'], exclude: [] }, create: { paths: ['test/new.test.js'], directories: [], extensions: [] }, checks: [{ id: 'test/kept.test.js', path: 'test/kept.test.js' }, { id: 'test/new.test.js', path: 'test/new.test.js' }] });
+  const repo = await openGlob(t, m.root, doc, {}, m.track);
+  const info = await repo.info() as { editable_test_files: string[] };
+  assert.deepEqual(info.editable_test_files, ['test/kept.test.js'], 'the missing creatable test is not editable yet');
 });
 
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {

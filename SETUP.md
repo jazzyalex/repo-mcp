@@ -364,6 +364,7 @@ cannot be excepted.
 `write` permits it and it is either tracked (in HEAD and the index) or untracked with a create
 rule (`create.paths`, or `create.directories` with a matching extension). An untracked file
 that only matches `write.include` is readable but not editable until it is committed.
+Exact-path (v1) policies keep their configured editable list.
 
 **Git-ignored files in glob policies.** Glob policies hide untracked files that Git
 ignores, so `research/**` exposes nothing when `.gitignore` ignores `research/`. To expose
