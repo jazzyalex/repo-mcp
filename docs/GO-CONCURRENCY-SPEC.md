@@ -68,8 +68,9 @@ audit:    [{ at, action, key, reason }]               // last 100 owner releases
 
 `runGo` first loads or creates the manifest (unchanged), then **classifies**:
 
-- **Recovery** (manifest has `run_id` or `pending_run_id`, or phase past `admitted`, or
-  phase `cleaned`/`failed`): re-adopt the slot if it is missing (after a manual release),
+- **Recovery** (a durable journal run exists: `run_id`, or a `pending_run_id` whose journal
+  run is found; a `pending_run_id` without a journal run is a pre-submit restart and goes
+  through fresh admission): re-adopt the slot if it is missing (after a manual release),
   even above `max_concurrent`, and ignore the latch and the queue. Recovery never sends,
   so it must never wait for capacity. Terminal replay releases as today.
 - **Fresh**: wait for admission:

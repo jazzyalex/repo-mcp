@@ -804,10 +804,10 @@ class Driver {
     const deadline = this.now().getTime() + (this.options.timeoutMinutes ?? 45) * 60_000;
     let previous: TurnState | undefined;
     let unknownSince: number | undefined;
-    let signalled = false;
     while (true) {
-      // A challenge stops new work account-wide; this turn keeps being watched.
-      if (!signalled) signalled = (await this.checkSignal()) !== null;
+      // A challenge stops new work account-wide; this turn keeps being watched. It is
+      // checked on every poll, so a challenge still showing after an unlatch latches again.
+      await this.checkSignal();
       const state = await this.page.turnState(prompt).catch((): TurnState => ({ state: 'unknown', chars: 0 }));
       const at = this.now().getTime();
       if (state.state === 'done') {

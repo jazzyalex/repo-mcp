@@ -791,3 +791,18 @@ test('a latch write that fails once then succeeds frees the slot at the end of t
   assert.equal(status.latch?.code, 'BROWSER_CHALLENGE');
   assert.equal(status.slots_in_use, 0);
 });
+
+test('a challenge still showing after an owner unlatch latches the account again', async t => {
+  const f = await fixture(t);
+  const store = await StateStore.open(f.accountDir);
+  let polls = 0;
+  const page = new Page('a', newLog(), { signal: 'BROWSER_CHALLENGE', signalAfterSend: true, doneWhen: () => polls >= 3 });
+  const turn = page.turnState.bind(page);
+  page.turnState = async () => {
+    polls++;
+    if (polls === 2) await clearLatch(store, 'owner thinks it is resolved', new Date());
+    return turn();
+  };
+  assert.equal((await runGo(req(f, 'a'), { page, sleep })).phase, 'cleaned');
+  assert.equal((await accountStatus(f.accountDir)).latch?.code, 'BROWSER_CHALLENGE');
+});
