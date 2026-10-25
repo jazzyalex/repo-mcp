@@ -484,9 +484,16 @@ export async function authRecordCount(stateDir: string) {
  * Before new authorization records are written, expired ones are collected once the store is near the
  * cap (best effort; the cap check under the control lock still decides).
  */
-async function collectBeforeIssuing(stateDir: string) {
+async function collectBeforeIssuing(stateDir: string): Promise<string | undefined> {
   const { collectAuthorizationNearLimit } = await import('./gc.js');
-  await collectAuthorizationNearLimit(stateDir).catch(() => undefined);
+  try { await collectAuthorizationNearLimit(stateDir); return undefined; }
+  catch (error) { return error instanceof Error ? error.message : 'automatic collection failed'; }
+}
+/** The cap error names a failed automatic collection instead of claiming nothing was old enough. */
+function capError(collectFailure: string | undefined) {
+  return new SafeError(collectFailure
+    ? `Workspace authorization state reached its retention limit and automatic collection failed (${collectFailure}); run \`coord gc --apply\` and inspect its result.`
+    : 'Workspace authorization state reached its retention limit and no record is old enough to collect; close or revoke workspaces, or run `coord gc --apply` with a shorter --auth-retention-hours.');
 }
 async function readAuthStore(store: StateStore) {
   const raw = await store.read<unknown>(AUTH_PATH, 'multirepo-auth');
@@ -1267,7 +1274,7 @@ export async function issueWorkspaceGrant(options: { stateDir?: string; taskId: 
   const taskId = assertId(options.taskId, 'task ID');
   const ttlMs = options.ttlMs ?? GRANT_TTL_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 60 * 60_000) throw new SafeError('Grant TTL must be between 1 second and 1 hour.');
-  await collectBeforeIssuing(stateDir);
+  const collectFailure = await collectBeforeIssuing(stateDir);
   return withControlLock(stateDir, `grant workspace for task ${taskId}`, async store => {
     const catalog = await readCatalogStore(store);
     const task = catalog.tasks[taskId];
@@ -1281,9 +1288,8 @@ export async function issueWorkspaceGrant(options: { stateDir?: string; taskId: 
     }
     if (live.phase !== 'coding') throw new SafeError('Write grants can be issued only while the task is in coding phase.');
     const auth = await readAuthStore(store);
-    if (Object.keys(auth.grants).length + Object.keys(auth.workspaces).length + Object.keys(auth.requests).length >= MAX_AUTH_RECORDS) {
-      throw new SafeError('Workspace authorization state reached its retention limit and no record is old enough to collect; close or revoke workspaces, or run `coord gc --apply` with a shorter --auth-retention-hours.');
-    }
+    // A grant adds one record.
+    if (Object.keys(auth.grants).length + Object.keys(auth.workspaces).length + Object.keys(auth.requests).length + 1 > MAX_AUTH_RECORDS) throw capError(collectFailure);
     const grant: WorkspaceGrant = {
       grant_id: randomBytes(16).toString('hex'),
       repository_id: repository.repository_id,
@@ -1325,7 +1331,7 @@ export async function openWorkspace(options: {
   const taskId = assertId(options.taskId, 'task ID');
   const ttlMs = options.ttlMs ?? WORKSPACE_TTL_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 24 * 60 * 60_000) throw new SafeError('Workspace TTL must be between 1 minute and 24 hours.');
-  await collectBeforeIssuing(stateDir);
+  const collectFailure = await collectBeforeIssuing(stateDir);
   const open = () => withControlLock(stateDir, `open ${options.mode} workspace for ${taskId}`, async store => {
     const catalog = await readCatalogStore(store);
     const repository = catalog.repositories[repositoryId];
@@ -1365,7 +1371,8 @@ export async function openWorkspace(options: {
       if (selection.status !== 'open' || Date.now() >= Date.parse(selection.expires_at)) throw new SafeError('Previous workspace_open selection is no longer active; use a new request_id.');
       return { workspace_token: await workspaceToken(store, selection), selection, scope: scopeFor(selection, live), already_applied: true };
     }
-    if (Object.keys(auth.grants).length + Object.keys(auth.workspaces).length + Object.keys(auth.requests).length >= MAX_AUTH_RECORDS) throw new SafeError('Workspace authorization state reached its retention limit and no record is old enough to collect; close or revoke workspaces, or run `coord gc --apply` with a shorter --auth-retention-hours.');
+    // A fresh open adds a workspace and its request record.
+    if (Object.keys(auth.grants).length + Object.keys(auth.workspaces).length + Object.keys(auth.requests).length + 2 > MAX_AUTH_RECORDS) throw capError(collectFailure);
     let grant: WorkspaceGrant | undefined;
     if (options.mode === 'code') {
       if (!options.writeGrant) throw new SafeError('Coding workspace requires an operator-issued write_grant.');

@@ -212,7 +212,11 @@ with the same arguments returns the earlier selection (`already_applied: true`) 
 the same ID with different arguments, or after that selection closed or expired, is refused. Make every
 request ID unique, for example with a timestamp and random suffix as the skills do. Request records are
 kept for the authorization retention period (24 hours by default) and then collected; collection also
-runs automatically once authorization records reach three quarters of the 4096-record cap.
+runs automatically before `workspace_open` or a grant once authorization records reach three quarters of
+the 4096-record cap. It first checks without locks whether any record is old enough; if so it writes a
+`start` audit record to `gc-audit.jsonl`, collects exactly as `coord gc --apply` would, and writes a
+`delete` record. If the audit cannot be written, nothing is deleted, and an open at the cap fails with
+"automatic collection failed". A fresh `workspace_open` needs room for two records, a grant for one.
 
 Coordinator CLI (`npm run coord`) errors print the message on stderr and one JSON object
 `{"error": "COORDINATOR_ERROR", "message": "..."}` on stdout (except `--help` and text `status`), so a

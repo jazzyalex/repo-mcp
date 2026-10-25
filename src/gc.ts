@@ -119,15 +119,19 @@ export const AUTH_AUTO_COLLECT_AT = Math.floor(MAX_AUTH_RECORDS * 3 / 4);
  */
 export async function collectAuthorizationNearLimit(stateDir: string, options: { nowMs?: number; threshold?: number } = {}) {
   if (await authRecordCount(stateDir) < (options.threshold ?? AUTH_AUTO_COLLECT_AT)) return null;
+  const cutoffMs = (options.nowMs ?? Date.now()) - DEFAULT_AUTH_RETENTION_HOURS * HOUR_MS;
+  // Cheap preflight without locks: with nothing old enough, no task gate or admission lock is taken.
+  const eligible = await collectExpiredAuthorization({ stateDir, cutoffMs, apply: false });
+  if (!eligible.workspaces && !eligible.grants && !eligible.requests) return null;
+  // The intent is audited before anything is deleted; if the audit cannot be written, nothing is deleted.
+  await appendAudit(stateDir, { at: new Date().toISOString(), action: 'start', category: 'authorization', trigger: 'near-limit', eligible: { workspaces: eligible.workspaces, grants: eligible.grants, requests: eligible.requests } });
   const { withProtectedReviewWorkspaceIds } = await import('./review-state.js');
   const auth = await withProtectedReviewWorkspaceIds(stateDir, preserveWorkspaceIds =>
-    collectExpiredAuthorization({ stateDir, cutoffMs: (options.nowMs ?? Date.now()) - DEFAULT_AUTH_RETENTION_HOURS * HOUR_MS, apply: true, preserveWorkspaceIds }));
-  if (auth.workspaces || auth.grants || auth.requests) {
-    await appendAudit(stateDir, {
-      at: new Date().toISOString(), action: 'delete', category: 'authorization', trigger: 'near-limit',
-      workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests
-    });
-  }
+    collectExpiredAuthorization({ stateDir, cutoffMs, apply: true, preserveWorkspaceIds }));
+  await appendAudit(stateDir, {
+    at: new Date().toISOString(), action: 'delete', category: 'authorization', trigger: 'near-limit',
+    workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests
+  });
   return auth;
 }
 

@@ -1,3 +1,4 @@
+import { writeSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { coordinatorMigrateLegacy, coordinatorStatus, formatCoordinatorStatusText } from '../src/coordinator.js';
 import { garbageCollect } from '../src/gc.js';
@@ -93,10 +94,21 @@ Migration:
 // Errors print the plain message on stderr and, except for text-only output (help, status without --json),
 // one JSON object {"error": "COORDINATOR_ERROR", "message": ...} on stdout, so piping to jq still parses.
 const textOnly = process.argv.includes('--help') || (process.argv[2] === 'status' && !process.argv.includes('--json'));
+// Written synchronously (retrying a full non-blocking pipe), so process.exit never drops the error.
+function writeAll(fd: number, text: string) {
+  let rest = Buffer.from(text);
+  while (rest.length) {
+    try { rest = rest.subarray(writeSync(fd, rest)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EAGAIN') throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+}
 function fail(error: unknown): never {
   const message = error instanceof Error ? error.message : 'Coordinator operation failed.';
-  if (!textOnly) console.log(JSON.stringify({ error: 'COORDINATOR_ERROR', message }));
-  console.error(message);
+  if (!textOnly) writeAll(1, `${JSON.stringify({ error: 'COORDINATOR_ERROR', message })}\n`);
+  writeAll(2, `${message}\n`);
   process.exit(1);
 }
 function parsed<T>(parse: () => T): T {

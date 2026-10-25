@@ -194,6 +194,46 @@ test('gc keeps a terminal outcome whose filename does not bind its request ID', 
   assert.ok(await store.read(`tasks/${taskId}/outcomes/${wrongName}`, 'outcome'));
 });
 
+async function fillAuth(stateDir: string, taskId: string, total: number, at: string) {
+  const opened = await openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: `seed-${at}`, ttlMs: 60_000 });
+  await closeWorkspace({ stateDir, workspaceToken: opened.workspace_token, requestId: `seed-close-${at}` });
+  const store = await StateStore.open(stateDir);
+  const auth = await store.read<any>('control/multirepo-auth.json', 'multirepo-auth');
+  const [workspace] = Object.values<any>(auth.workspaces);
+  const [, request] = Object.entries<any>(auth.requests)[0];
+  const count = () => Object.keys(auth.workspaces).length + Object.keys(auth.requests).length + Object.keys(auth.grants).length;
+  for (let i = 0; count() < total; i++) {
+    const id = createHash('sha256').update(`fill-${at}-${i}`).digest('hex').slice(0, 32);
+    auth.workspaces[id] = { ...workspace, workspace_id: id, expires_at: at };
+    if (count() < total) auth.requests[createHash('sha256').update(`fill-req-${at}-${i}`).digest('hex')] = { ...request, workspace_id: id, at };
+  }
+  await store.write('control/multirepo-auth.json', 'multirepo-auth', auth);
+}
+
+test('near-limit collection audits before deleting and deletes nothing when the audit cannot be written', async t => {
+  const { MAX_AUTH_RECORDS, authRecordCount } = await import('../src/multirepo-state.js');
+  const { symlink } = await import('node:fs/promises');
+  const { base, stateDir, taskId } = await setup(t);
+  await fillAuth(stateDir, taskId, MAX_AUTH_RECORDS, '2020-01-01T00:00:00.000Z');
+  await writeFile(path.join(base, 'elsewhere.jsonl'), '');
+  await symlink(path.join(base, 'elsewhere.jsonl'), path.join(stateDir, 'gc-audit.jsonl'));
+  await assert.rejects(openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'blocked', ttlMs: 60_000 }), /automatic collection failed/);
+  assert.equal(await authRecordCount(stateDir), MAX_AUTH_RECORDS, 'nothing was deleted without an audit');
+});
+
+test('near-limit collection takes no locks and writes nothing when no record is old enough', async t => {
+  const { MAX_AUTH_RECORDS } = await import('../src/multirepo-state.js');
+  const { collectAuthorizationNearLimit } = await import('../src/gc.js');
+  const { stateDir, taskId } = await setup(t);
+  await fillAuth(stateDir, taskId, MAX_AUTH_RECORDS - 1, new Date(Date.now() + 3_600_000).toISOString());
+  assert.equal(await collectAuthorizationNearLimit(stateDir), null);
+  await assert.rejects(stat(path.join(stateDir, 'gc-audit.jsonl')), /ENOENT/);
+  // A fresh open needs room for two records; 4095 recent records leave one.
+  await assert.rejects(openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'one-short', ttlMs: 60_000 }), /no record is old enough/);
+  // A grant needs one record and still fits.
+  await issueWorkspaceGrant({ stateDir, taskId, ttlMs: 1_000 });
+});
+
 test('workspace_open collects expired authorization records itself instead of locking out at the cap', async t => {
   const { MAX_AUTH_RECORDS } = await import('../src/multirepo-state.js');
   const { stateDir, taskId } = await setup(t);
@@ -215,5 +255,6 @@ test('workspace_open collects expired authorization records itself instead of lo
   assert.equal(again.selection.status, 'open');
   const { authRecordCount } = await import('../src/multirepo-state.js');
   assert.ok(await authRecordCount(stateDir) < 100, 'old records were collected');
-  assert.ok((await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8')).includes('"trigger":"near-limit"'), 'the automatic collection is audited');
+  const audit = await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8');
+  assert.ok(audit.indexOf('"action":"start"') >= 0 && audit.indexOf('"action":"start"') < audit.indexOf('"action":"delete"'), 'the intent is audited before the deletion');
 });
