@@ -74,8 +74,13 @@ const PAGE_HELPERS = String.raw`
       const v = s?.getAttribute('aria-valuetext');
       if (v && EFFORTS.includes(v.trim())) return v.trim();
       const pop = s?.closest('[role="dialog"],[data-radix-popper-content-wrapper],[role="menu"]') || document;
-      const hits = [...pop.querySelectorAll('*')].filter(e => e.childElementCount === 0 && visible(e) && EFFORTS.includes(e.innerText?.trim()));
-      return hits.length === 1 ? hits[0].innerText.trim() : null;
+      const leaves = [...pop.querySelectorAll('*')].filter(e => e.childElementCount === 0 && visible(e)).map(e => e.innerText?.trim() ?? '');
+      // The slider's accessible position text ("Medium, 2 of 4.") names the effort unambiguously;
+      // a bare "Pro" may also be a model entry in the same menu.
+      const positions = [...new Set(leaves.map(t => /^(.+), \d+ of \d+\.?$/.exec(t)?.[1]).filter(t => t && EFFORTS.includes(t)))];
+      if (positions.length === 1) return positions[0];
+      const hits = leaves.filter(t => EFFORTS.includes(t));
+      return hits.length === 1 ? hits[0] : null;
     }
   };
   return true;
