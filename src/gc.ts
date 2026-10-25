@@ -117,8 +117,15 @@ export const AUTH_AUTO_COLLECT_AT = Math.floor(MAX_AUTH_RECORDS * 3 / 4);
  * exactly as `gc --apply` would (protected review workspaces and busy workspaces are kept), and audit
  * it. Returns null when below the threshold.
  */
+/** After a pass that removed nothing, later passes wait this long (per state directory, per process). */
+const AUTH_AUTO_COLLECT_BACKOFF_MS = 10 * 60_000;
+const lastFruitless = new Map<string, number>();
+
 export async function collectAuthorizationNearLimit(stateDir: string, options: { nowMs?: number; threshold?: number } = {}) {
   if (await authRecordCount(stateDir) < (options.threshold ?? AUTH_AUTO_COLLECT_AT)) return null;
+  // Old records that are protected or busy cannot be removed; do not rescan all task gates on every call.
+  const since = lastFruitless.get(stateDir);
+  if (since !== undefined && Date.now() - since < AUTH_AUTO_COLLECT_BACKOFF_MS) return null;
   const cutoffMs = (options.nowMs ?? Date.now()) - DEFAULT_AUTH_RETENTION_HOURS * HOUR_MS;
   // Cheap preflight without locks: with nothing old enough, no task gate or admission lock is taken.
   const eligible = await collectExpiredAuthorization({ stateDir, cutoffMs, apply: false });
@@ -132,6 +139,7 @@ export async function collectAuthorizationNearLimit(stateDir: string, options: {
     at: new Date().toISOString(), action: 'delete', category: 'authorization', trigger: 'near-limit',
     workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests
   });
+  if (auth.workspaces || auth.grants || auth.requests) lastFruitless.delete(stateDir); else lastFruitless.set(stateDir, Date.now());
   return auth;
 }
 
@@ -161,6 +169,11 @@ async function appendAudit(stateDir: string, record: Record<string, unknown>) {
     await handle.sync();
   } finally {
     await handle.close();
+  }
+  // A newly created audit file's directory entry is made durable too, before any deletion it precedes.
+  if (!prior) {
+    const dir = await open(stateDir, constants.O_RDONLY);
+    try { await dir.sync(); } finally { await dir.close(); }
   }
 }
 

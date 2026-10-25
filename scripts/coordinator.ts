@@ -94,13 +94,14 @@ Migration:
 // Errors print the plain message on stderr and, except for text-only output (help, status without --json),
 // one JSON object {"error": "COORDINATOR_ERROR", "message": ...} on stdout, so piping to jq still parses.
 const textOnly = process.argv.includes('--help') || (process.argv[2] === 'status' && !process.argv.includes('--json'));
-// Written synchronously (retrying a full non-blocking pipe), so process.exit never drops the error.
+// Written synchronously (retrying a full non-blocking pipe for up to about a second), so process.exit never
+// drops the error; a closed or stuck stdout never prevents the stderr message or the exit.
 function writeAll(fd: number, text: string) {
   let rest = Buffer.from(text);
-  while (rest.length) {
+  for (let waits = 0; rest.length;) {
     try { rest = rest.subarray(writeSync(fd, rest)); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EAGAIN') throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'EAGAIN' || ++waits > 200) return;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
   }

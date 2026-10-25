@@ -229,7 +229,7 @@ test('near-limit collection takes no locks and writes nothing when no record is 
   assert.equal(await collectAuthorizationNearLimit(stateDir), null);
   await assert.rejects(stat(path.join(stateDir, 'gc-audit.jsonl')), /ENOENT/);
   // A fresh open needs room for two records; 4095 recent records leave one.
-  await assert.rejects(openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'one-short', ttlMs: 60_000 }), /no record is old enough/);
+  await assert.rejects(openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'one-short', ttlMs: 60_000 }), /no record is currently safe to collect/);
   // A grant needs one record and still fits.
   await issueWorkspaceGrant({ stateDir, taskId, ttlMs: 1_000 });
 });
@@ -257,4 +257,21 @@ test('workspace_open collects expired authorization records itself instead of lo
   assert.ok(await authRecordCount(stateDir) < 100, 'old records were collected');
   const audit = await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8');
   assert.ok(audit.indexOf('"action":"start"') >= 0 && audit.indexOf('"action":"start"') < audit.indexOf('"action":"delete"'), 'the intent is audited before the deletion');
+});
+
+test('a near-limit pass that removes nothing is not repeated at once', async t => {
+  const { collectAuthorizationNearLimit } = await import('../src/gc.js');
+  const { acquireLock } = await import('../src/task-state.js');
+  const { stateDir, taskId } = await setup(t);
+  const opened = await openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'busy', ttlMs: 60_000 });
+  await closeWorkspace({ stateDir, workspaceToken: opened.workspace_token, requestId: 'busy-close' });
+  // The only old selection is busy, so a pass can remove nothing.
+  const lock = await acquireLock(await StateStore.open(stateDir), `workspace-${opened.selection.workspace_id}-admission`, 'test holds admission');
+  t.after(() => lock.release());
+  const future = Date.parse(opened.selection.expires_at) + 48 * 3_600_000;
+  const first = await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future });
+  assert.deepEqual([first?.workspaces, first?.grants, first?.requests], [0, 0, 0]);
+  const audit = await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8');
+  assert.equal(await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future }), null);
+  assert.equal(await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8'), audit, 'no second scan or audit');
 });

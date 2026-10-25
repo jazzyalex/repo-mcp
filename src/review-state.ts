@@ -648,7 +648,9 @@ async function protectedReviewWorkspaceIdsUnderHeldGates(stateDir: string) {
         repositoryId: journal.repository_id,
         taskId: journal.task_id,
         mode: 'review',
-        ttlMs: participant.workspace_ttl_ms
+        ttlMs: participant.workspace_ttl_ms,
+        // A commit-pinned open recorded its binding in the request digest.
+        reviewBinding: participant.commit_binding
       });
       if (!outcome) continue;
       const selection = outcome.selection;

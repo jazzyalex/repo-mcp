@@ -493,7 +493,7 @@ async function collectBeforeIssuing(stateDir: string): Promise<string | undefine
 function capError(collectFailure: string | undefined) {
   return new SafeError(collectFailure
     ? `Workspace authorization state reached its retention limit and automatic collection failed (${collectFailure}); run \`coord gc --apply\` and inspect its result.`
-    : 'Workspace authorization state reached its retention limit and no record is old enough to collect; close or revoke workspaces, or run `coord gc --apply` with a shorter --auth-retention-hours.');
+    : 'Workspace authorization state reached its retention limit and no record is currently safe to collect (none is old enough, or the old ones belong to busy or pending-review workspaces); close or revoke workspaces, or run `coord gc --apply` with a shorter --auth-retention-hours.');
 }
 async function readAuthStore(store: StateStore) {
   const raw = await store.read<unknown>(AUTH_PATH, 'multirepo-auth');

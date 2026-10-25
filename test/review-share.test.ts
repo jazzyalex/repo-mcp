@@ -1592,3 +1592,21 @@ test('sanitized review status exposes counts/provenance but no bearer secrets or
   assert.ok(!serialized.includes(options.prompt));
   assert.ok(!serialized.includes(options.workspaceRequestId), 'status exposes counts, not raw workspace request IDs');
 });
+
+test('a pending commit-pinned review participant does not block authorization GC', async t => {
+  const { stateDir } = await fixture(t, { phase: 'review', extraCommit: true });
+  const options = prepareOptions(stateDir, 'codex', 'pinned-gc', { baseRef: 'HEAD^', headRef: 'HEAD', scopePrefix: 'src/' });
+  const prepared = await prepareOrJoinReview(options);
+  assert.ok(prepared.participant.commit_binding);
+  const opened = await openForParticipant(stateDir, prepared);
+  assert.equal(prepared.participant.workspace_association, 'pending');
+  const result = await garbageCollect({
+    stateDir, apply: true, authRetentionHours: 1, captureRetentionHours: 0, taskRetentionDays: 1,
+    nowMs: Date.parse(opened.selection.expires_at) + 2 * 60 * 60_000
+  });
+  assert.equal(result.mode, 'apply');
+  const auth = await (await StateStore.open(stateDir)).read<any>('control/multirepo-auth.json', 'multirepo-auth');
+  assert.ok(auth.workspaces[opened.selection.workspace_id], 'the pending pinned workspace is protected, not a GC failure');
+  const reconciled = await reconcileReviewParticipant({ stateDir, taskId: 'task', participantId: prepared.participant.participant_id });
+  assert.equal(reconciled.participant.workspace_association, 'bound');
+});
