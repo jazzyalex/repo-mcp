@@ -207,3 +207,21 @@ with tempfile.TemporaryDirectory() as temp:
  const result=spawnSync('python3',['-c',program],{encoding:'utf8',timeout:10000});
  assert.equal(result.status,0,result.stdout+result.stderr);
 });
+
+test('connect.sh refuses a standalone tunnel that does not send the client token', async () => {
+ const root=await mkdtemp(path.join(os.tmpdir(),'mcp-connect-header-'));
+ try {
+  const home=path.join(root,'home');
+  await mkdir(path.join(home,'Library','LaunchAgents'),{recursive:true});
+  const fake=path.join(root,'fake-client');
+  await writeFile(fake,'#!/bin/bash\nexit 0\n',{mode:0o700});
+  await writeFile(path.join(root,'runtime.key'),'saved-synthetic-key',{mode:0o600});
+  await writeFile(path.join(root,'tunnel-id'),'tunnel_test\n');
+  await writeFile(path.join(root,'install.json'),'{}');
+  const plist=spawnSync('python3',['-c','import plistlib,sys; plistlib.dump({"Label":"local.repo-mcp.tunnel","ProgramArguments":["/bin/tunnel-client","run","--mcp.server-url","http://127.0.0.1:8787/mcp"]},open(sys.argv[1],"wb"))',path.join(home,'Library','LaunchAgents','local.repo-mcp.tunnel.plist')],{encoding:'utf8'});
+  assert.equal(plist.status,0,plist.stderr);
+  const r=spawnSync('/bin/bash',['scripts/connect.sh'],{env:{...process.env,HOME:home,MCP_STATE_DIR:root,TUNNEL_CLIENT_BIN:fake},input:'',encoding:'utf8',timeout:10000});
+  assert.equal(r.status,1);
+  assert.match(r.stderr,/does not send the broker client token/);
+ } finally {await rm(root,{recursive:true,force:true});}
+});

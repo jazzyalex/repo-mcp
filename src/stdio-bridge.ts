@@ -49,7 +49,7 @@ export async function createBridge(options: BridgeOptions) {
 }
 
 export function parseBridgeArgs(argv: string[]) {
-  let url = 'http://127.0.0.1:8787/mcp', stateDir: string | undefined, originalNames = false;
+  let url: string | undefined, stateDir: string | undefined, originalNames = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--url') url = argv[++i] ?? '';
@@ -57,7 +57,9 @@ export function parseBridgeArgs(argv: string[]) {
     else if (arg === '--original-names') originalNames = true;
     else throw new Error(`Unknown argument ${arg}. Use: [--url URL] [--state-dir DIR] [--original-names]`);
   }
-  const parsed = new URL(url);
-  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)) throw new Error('--url must be a loopback http URL.');
+  if (url !== undefined) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)) throw new Error('--url must be a loopback http URL.');
+  }
   return { url, stateDir, originalNames };
 }

@@ -957,7 +957,9 @@ claude mcp add --scope user repo-mcp -- "$(command -v node)" "$PWD/dist/src/stdi
 claude mcp get repo-mcp
 ```
 
-`--original-names` keeps the broker's tool names (`read`, `edit`, ...); Claude Code
+The bridge reads the token from the default broker state directory and connects to the
+port configured there; for a custom state directory add `--state-dir DIR` (or `--url`
+for an explicit loopback URL). `--original-names` keeps the broker's tool names (`read`, `edit`, ...); Claude Code
 already namespaces them as `mcp__repo-mcp__read`. An older entry made with
 `--transport http` must be removed first (`claude mcp remove --scope user repo-mcp`).
 

@@ -47,7 +47,8 @@ repository into a user-approved development location first.
    broker if needed, and inspect `service status`. Run `service start` only for first
    load or intentional upgrade/recovery because it reloads launchd and may interrupt
    in-flight calls.
-4. Configure the durable tunnel only if missing or unhealthy. Reuse saved credentials.
+4. Configure the durable tunnel if missing or unhealthy, and on every upgrade run
+   `python3 scripts/install-tunnel-service.py --install` after the broker starts. Reuse saved credentials.
    If no tunnel ID/runtime credential exists, explain the one-time account step and guide
    the user through creating a private tunnel and a runtime key with **Tunnels Read +
    Use**. Accept the key only through the hidden prompt used by
@@ -441,7 +442,12 @@ Stop if any fail. Otherwise:
 python3 scripts/install-agent-skills.py --install
 npm run --silent coord -- service start     # reloads launchd; interrupts in-flight calls
 npm run --silent coord -- service status    # new process_pid, "local_mcp": "ready"
+python3 scripts/install-tunnel-service.py --install   # reconcile the tunnel (sends the broker's client token)
 ```
+
+The tunnel reinstall is safe on every deploy: it changes nothing when the definition is
+current, and it adds the client-token header to a tunnel installed before the broker
+required it (without the header ChatGPT gets 401 while the tunnel looks healthy).
 
 Then run the client route proof above. After an MCP schema change, also refresh the
 Repo MCP app's tools in ChatGPT and start a new ChatGPT conversation.

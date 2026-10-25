@@ -6,7 +6,9 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { startMultiRepoServer } from '../src/multirepo-server.js';
-import { clientAuthPaths, readClientToken } from '../src/client-auth.js';
+import { clientAuthPaths, ensureClientToken, readClientToken } from '../src/client-auth.js';
+import { configureMultiRepoService } from '../src/multirepo-state.js';
+import { createServer } from 'node:net';
 import { createBridge, parseBridgeArgs, prefixedName } from '../src/stdio-bridge.js';
 
 async function broker(t: { after(fn: () => Promise<void>): void }) {
@@ -58,4 +60,29 @@ test('the stdio bridge fails with a wrong token and accepts only loopback URLs',
   await assert.rejects(createBridge({ url: service.url, token: 'f'.repeat(64) }));
   assert.throws(() => parseBridgeArgs(['--url', 'https://example.com/mcp']), /loopback/);
   assert.equal(parseBridgeArgs(['--original-names']).originalNames, true);
+});
+
+test('concurrent token setup in one process agrees on one token', async t => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-client-auth-race-')));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const tokens = await Promise.all(Array.from({ length: 8 }, () => ensureClientToken(path.join(base, 'state'))));
+  assert.equal(new Set(tokens).size, 1);
+});
+
+test('the stdio bridge uses the state directory and configured port when --url is omitted', async t => {
+  const base = await realpath(await mkdtemp(path.join(os.tmpdir(), 'repo-mcp-bridge-custom-')));
+  const stateDir = path.join(base, 'custom-state');
+  const port = await new Promise<number>(resolve => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as { port: number }).port; s.close(() => resolve(p)); }); });
+  await configureMultiRepoService({ stateDir, port });
+  const service = await startMultiRepoServer(stateDir);
+  t.after(async () => { await service.close(); await rm(base, { recursive: true, force: true }); });
+  const { StdioClientTransport } = await import('@modelcontextprotocol/client/stdio');
+  const client = new Client({ name: 'bridge-custom', version: '1' });
+  await client.connect(new StdioClientTransport({
+    command: process.execPath, args: ['--import', 'tsx', path.join(process.cwd(), 'src/stdio-main.ts'), '--state-dir', stateDir],
+    env: { ...process.env, REPO_MCP_STATE_DIR: '' } as Record<string, string>
+  }));
+  t.after(() => client.close());
+  const info = await client.callTool({ name: 'service_info', arguments: {} });
+  assert.notEqual(info.isError, true);
 });

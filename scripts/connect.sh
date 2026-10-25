@@ -69,6 +69,13 @@ if [[ "$mcp_save" == true ]]; then
   exit 0
 fi
 if [[ -f "$mcp_tunnel/install.json" ]]; then
+  # A tunnel installed before the broker required its client token sends no Authorization
+  # header; the broker would refuse it while the tunnel still looks healthy.
+  mcp_plist="$HOME/Library/LaunchAgents/local.repo-mcp.tunnel.plist"
+  if ! plutil -extract ProgramArguments json -o - "$mcp_plist" 2>/dev/null | grep -q 'mcp.extra-headers'; then
+    printf 'The installed tunnel service does not send the broker client token. Run: python3 scripts/install-tunnel-service.py --install\n' >&2
+    exit 1
+  fi
   launchctl kickstart -k "gui/$(id -u)/local.repo-mcp.tunnel"
   # Wait for a new health URL and a successful poll, not the old process status.
   sleep 2

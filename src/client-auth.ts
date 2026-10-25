@@ -1,5 +1,5 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SafeError } from './errors.js';
 
@@ -44,9 +44,10 @@ export async function ensureClientToken(stateDir: string) {
   const header = `Bearer ${token}`;
   const current = await readFile(paths.header, 'utf8').catch(() => undefined);
   if (current !== header) {
-    const temp = `${paths.header}.${process.pid}.tmp`;
-    await writeFile(temp, header, { mode: 0o600 });
-    await rename(temp, paths.header);
+    // A unique temp name per call, so concurrent starts never share one.
+    const temp = `${paths.header}.${randomUUID()}.tmp`;
+    try { await writeFile(temp, header, { mode: 0o600, flag: 'wx' }); await rename(temp, paths.header); }
+    finally { await rm(temp, { force: true }); }
   }
   await ownerOnlyFile(paths.header);
   return token;
