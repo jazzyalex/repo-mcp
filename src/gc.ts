@@ -4,7 +4,7 @@ import { lstat, open, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
 import { CAPTURE_ID, type CaptureMeta } from './capture.js';
-import { collectExpiredAuthorization, readMultiRepoCatalog } from './multirepo-state.js';
+import { MAX_AUTH_RECORDS, authRecordCount, collectExpiredAuthorization, readMultiRepoCatalog } from './multirepo-state.js';
 import { StateStore, acquireLock } from './task-state.js';
 import { taskStatus, withCompletedTaskGcLease, type Completion, type Outcome } from './task.js';
 
@@ -107,6 +107,28 @@ async function checkedFile(stateDir: string, rel: string): Promise<ExpectedFile>
     if (i === parts.length - 1) return { rel, dev: String(info.dev), ino: String(info.ino), size: info.size };
   }
   throw new SafeError('GC received an empty state path.');
+}
+
+/** Automatic collection starts at three quarters of the authorization cap. */
+export const AUTH_AUTO_COLLECT_AT = Math.floor(MAX_AUTH_RECORDS * 3 / 4);
+
+/**
+ * Collect authorization records past the default retention once the store holds `threshold` or more,
+ * exactly as `gc --apply` would (protected review workspaces and busy workspaces are kept), and audit
+ * it. Returns null when below the threshold.
+ */
+export async function collectAuthorizationNearLimit(stateDir: string, options: { nowMs?: number; threshold?: number } = {}) {
+  if (await authRecordCount(stateDir) < (options.threshold ?? AUTH_AUTO_COLLECT_AT)) return null;
+  const { withProtectedReviewWorkspaceIds } = await import('./review-state.js');
+  const auth = await withProtectedReviewWorkspaceIds(stateDir, preserveWorkspaceIds =>
+    collectExpiredAuthorization({ stateDir, cutoffMs: (options.nowMs ?? Date.now()) - DEFAULT_AUTH_RETENTION_HOURS * HOUR_MS, apply: true, preserveWorkspaceIds }));
+  if (auth.workspaces || auth.grants || auth.requests) {
+    await appendAudit(stateDir, {
+      at: new Date().toISOString(), action: 'delete', category: 'authorization', trigger: 'near-limit',
+      workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests
+    });
+  }
+  return auth;
 }
 
 async function appendAudit(stateDir: string, record: Record<string, unknown>) {

@@ -1095,7 +1095,11 @@ export class RepoWorkspace {
           // link publishes complete contents atomically and fails if any target exists.
           try { await link(temp, target); }
           catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new NotAppliedError('Path already exists. Read it before editing; creation never overwrites.');
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+              // A hidden file (for example one Git ignores) cannot be read first, so say why instead.
+              if (!this.legacy && !(await this.current()).resolve(file)) throw new NotAppliedError('Path already exists but is not exposed (for example, Git ignores it), so it cannot be read or edited here; creation never overwrites. Choose another path, or ask the operator to expose it.');
+              throw new NotAppliedError('Path already exists. Read it before editing; creation never overwrites.');
+            }
             throw error;
           }
           published = true;

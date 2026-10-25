@@ -622,6 +622,13 @@ test('a read-only policy never lists tracking names for editability', async t =>
   assert.equal(tracking, 0);
 });
 
+test('create_file over an existing hidden file says it is not exposed instead of asking for a read', async t => {
+  const m = await makeRepo(t, { '.gitignore': 'notes/\n' }, { 'notes/a.md': 'hidden\n' });
+  const repo = await openGlob(t, m.root, policyDoc({ write: { include: ['notes/**'], exclude: [] }, create: { paths: ['notes/a.md'], directories: [], extensions: [] } }), {}, m.track);
+  await assert.rejects(repo.createFile('notes/a.md', 'new\n'), /exists but is not exposed/);
+  assert.equal(await readFile(path.join(m.root, 'notes', 'a.md'), 'utf8'), 'hidden\n');
+});
+
 test('live git_diff never returns a tracked file beneath a newly nested repository', async t => {
   const m = await makeRepo(t, { 'research/notes.md': 'old\n' });
   const repo = await openGlob(t, m.root, policyDoc(), {}, m.track);

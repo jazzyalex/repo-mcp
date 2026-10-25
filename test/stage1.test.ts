@@ -1401,6 +1401,12 @@ test('multi-repository coordinator CLI rejects extra positionals and out-of-comm
   const startTask = run('service', 'start', '--task', 'not-valid-here');
   assert.notEqual(startTask.status, 0);
   assert.match(startTask.stderr, /--task.*not valid.*service start/i);
+  // Errors are also one JSON object on stdout, so `| jq` still parses.
+  assert.deepEqual(Object.keys(JSON.parse(startTask.stdout)), ['error', 'message']);
+  assert.equal(JSON.parse(startTask.stdout).error, 'COORDINATOR_ERROR');
+  const badOption = run('task', 'list', '--no-such-option');
+  assert.notEqual(badOption.status, 0);
+  assert.equal(JSON.parse(badOption.stdout).error, 'COORDINATOR_ERROR');
 
   const repositoryPort = run('repository', 'list', '--port', '9000');
   assert.notEqual(repositoryPort.status, 0);

@@ -90,7 +90,19 @@ Migration:
   coord migration rollback-active-service [--state-dir PATH]
 `;
 
-const { positionals, values } = parseArgs({
+// Errors print the plain message on stderr and, except for text-only output (help, status without --json),
+// one JSON object {"error": "COORDINATOR_ERROR", "message": ...} on stdout, so piping to jq still parses.
+const textOnly = process.argv.includes('--help') || (process.argv[2] === 'status' && !process.argv.includes('--json'));
+function fail(error: unknown): never {
+  const message = error instanceof Error ? error.message : 'Coordinator operation failed.';
+  if (!textOnly) console.log(JSON.stringify({ error: 'COORDINATOR_ERROR', message }));
+  console.error(message);
+  process.exit(1);
+}
+function parsed<T>(parse: () => T): T {
+  try { return parse(); } catch (error) { return fail(error); }
+}
+const { positionals, values } = parsed(() => parseArgs({
   allowPositionals: true,
   options: {
     task: { type: 'string' },
@@ -128,7 +140,7 @@ const { positionals, values } = parseArgs({
     'max-records': { type: 'string' },
     json: { type: 'boolean' }
   }
-});
+}));
 
 const [area, command] = positionals;
 const stateDir = values['state-dir'] ?? process.env.REPO_MCP_STATE_DIR ?? defaultStateDir();
@@ -363,6 +375,5 @@ try {
     throw new Error('Area must be service, repository, task, workspace, review or migration.');
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : 'Coordinator operation failed.');
-  process.exit(1);
+  fail(error);
 }

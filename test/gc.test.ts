@@ -193,3 +193,27 @@ test('gc keeps a terminal outcome whose filename does not bind its request ID', 
   assert.ok(result.skipped.some(item => item.reason === `outcome-unsafe:${'f'.repeat(32)}`));
   assert.ok(await store.read(`tasks/${taskId}/outcomes/${wrongName}`, 'outcome'));
 });
+
+test('workspace_open collects expired authorization records itself instead of locking out at the cap', async t => {
+  const { MAX_AUTH_RECORDS } = await import('../src/multirepo-state.js');
+  const { stateDir, taskId } = await setup(t);
+  const opened = await openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'seed', ttlMs: 60_000 });
+  await closeWorkspace({ stateDir, workspaceToken: opened.workspace_token, requestId: 'seed-close' });
+  const store = await StateStore.open(stateDir);
+  const auth = await store.read<any>('control/multirepo-auth.json', 'multirepo-auth');
+  const [workspace] = Object.values<any>(auth.workspaces);
+  const requests = Object.entries<any>(auth.requests);
+  // Fill the store to the cap with old, closed selections and their request records.
+  for (let i = 0; Object.keys(auth.workspaces).length + Object.keys(auth.requests).length + Object.keys(auth.grants).length < MAX_AUTH_RECORDS; i++) {
+    const id = createHash('sha256').update(`old-${i}`).digest('hex').slice(0, 32);
+    auth.workspaces[id] = { ...workspace, workspace_id: id, expires_at: '2020-01-01T00:00:00.000Z' };
+    const [key, request] = requests[0];
+    auth.requests[createHash("sha256").update(`${key}-old-${i}`).digest("hex")] = { ...request, workspace_id: id, at: "2020-01-01T00:00:00.000Z" };
+  }
+  await store.write('control/multirepo-auth.json', 'multirepo-auth', auth);
+  const again = await openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'after-cap', ttlMs: 60_000 });
+  assert.equal(again.selection.status, 'open');
+  const { authRecordCount } = await import('../src/multirepo-state.js');
+  assert.ok(await authRecordCount(stateDir) < 100, 'old records were collected');
+  assert.ok((await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8')).includes('"trigger":"near-limit"'), 'the automatic collection is audited');
+});

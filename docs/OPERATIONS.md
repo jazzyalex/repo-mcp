@@ -207,6 +207,17 @@ Every repository tool requires a server-issued `workspace_token`. There is no am
 
 `workspace_open` accepts only registered `repository_id` and `task_id` values; it never accepts a filesystem root or policy path.
 
+`workspace_open` `request_id` values are global to the service, not per repository or task. The same ID
+with the same arguments returns the earlier selection (`already_applied: true`) while it is still open;
+the same ID with different arguments, or after that selection closed or expired, is refused. Make every
+request ID unique, for example with a timestamp and random suffix as the skills do. Request records are
+kept for the authorization retention period (24 hours by default) and then collected; collection also
+runs automatically once authorization records reach three quarters of the 4096-record cap.
+
+Coordinator CLI (`npm run coord`) errors print the message on stderr and one JSON object
+`{"error": "COORDINATOR_ERROR", "message": "..."}` on stdout (except `--help` and text `status`), so a
+`| jq` pipeline still parses on failure; the exit code is 1.
+
 Modes are:
 
 - `inspect`: read-only.
