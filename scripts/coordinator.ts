@@ -93,7 +93,10 @@ Migration:
 
 // Errors print the plain message on stderr and, except for text-only output (help, status without --json),
 // one JSON object {"error": "COORDINATOR_ERROR", "message": ...} on stdout, so piping to jq still parses.
-const textOnly = process.argv.includes('--help') || (process.argv[2] === 'status' && !process.argv.includes('--json'));
+// Classified before parsing (parse errors) and again from the parsed positionals.
+const AREAS = ['service', 'repository', 'task', 'workspace', 'review', 'migration'];
+const rawArgs = process.argv.slice(2);
+let textOnly = rawArgs.includes('--help') || (rawArgs.includes('status') && !rawArgs.some(a => AREAS.includes(a)) && !rawArgs.includes('--json'));
 // Written synchronously (retrying a full non-blocking pipe for up to about a second), so process.exit never
 // drops the error; a closed or stuck stdout never prevents the stderr message or the exit.
 function writeAll(fd: number, text: string) {
@@ -156,6 +159,7 @@ const { positionals, values } = parsed(() => parseArgs({
 }));
 
 const [area, command] = positionals;
+textOnly = !!values.help || (positionals.length === 1 && area === 'status' && !values.json);
 const stateDir = values['state-dir'] ?? process.env.REPO_MCP_STATE_DIR ?? defaultStateDir();
 const asStrictInteger = (name: 'auth-retention-hours' | 'capture-retention-hours' | 'task-retention-days' | 'max-records') => {
   const raw = values[name];

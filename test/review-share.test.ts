@@ -1610,3 +1610,19 @@ test('a pending commit-pinned review participant does not block authorization GC
   const reconciled = await reconcileReviewParticipant({ stateDir, taskId: 'task', participantId: prepared.participant.participant_id });
   assert.equal(reconciled.participant.workspace_association, 'bound');
 });
+
+test('an invalidated, bound review participant no longer protects its expired workspace from GC', async t => {
+  const { stateDir } = await fixture(t, { phase: 'review' });
+  const options = prepareOptions(stateDir, 'codex', 'invalidated-bound-gc');
+  const prepared = await prepareOrJoinReview(options);
+  const opened = await openForParticipant(stateDir, prepared);
+  const bound = await reconcileReviewParticipant({ stateDir, taskId: 'task', participantId: prepared.participant.participant_id });
+  assert.equal(bound.participant.workspace_association, 'bound');
+  await setRepositoryEnabled({ stateDir, repositoryId: 'repo', enabled: false });
+  await garbageCollect({
+    stateDir, apply: true, authRetentionHours: 1, captureRetentionHours: 0, taskRetentionDays: 1,
+    nowMs: Date.parse(opened.selection.expires_at) + 2 * 60 * 60_000
+  });
+  const auth = await (await StateStore.open(stateDir)).read<any>('control/multirepo-auth.json', 'multirepo-auth');
+  assert.equal(auth.workspaces[opened.selection.workspace_id], undefined, 'the invalidated bound workspace is collected');
+});

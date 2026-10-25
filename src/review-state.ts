@@ -635,9 +635,12 @@ async function protectedReviewWorkspaceIdsUnderHeldGates(stateDir: string) {
     for (const participant of journal.participants) {
       if (participant.state === 'closed') continue;
       if (participant.workspace_association === 'bound' && participant.workspace_id) {
-        protectedIds.add(participant.workspace_id);
+        // An invalidated participant's bound workspace has nothing left to reconcile, so it is not kept.
+        if (participantProtected(participant)) protectedIds.add(participant.workspace_id);
         continue;
       }
+      // A pending participant stays protected even when invalidated: its workspace_open ledger is the
+      // evidence a later reconcile needs.
       if (participant.workspace_association !== 'pending') continue;
 
       const run = await chatGptRunStatus(participant.run_id, stateDir);

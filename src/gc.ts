@@ -391,7 +391,9 @@ export async function garbageCollect(options: GcOptions): Promise<GcSummary> {
         stateDir: options.stateDir,
         cutoffMs: nowMs - authHours * HOUR_MS,
         apply,
-        preserveWorkspaceIds
+        preserveWorkspaceIds,
+        // The exact IDs are audited before the ledger is rewritten; a failed audit deletes nothing.
+        beforeWrite: plan => appendAudit(options.stateDir, { at: new Date().toISOString(), action: 'delete', category: 'authorization', ids: plan })
       })
     );
     const target = apply ? summary.removed : summary.would_remove;
@@ -402,7 +404,7 @@ export async function garbageCollect(options: GcOptions): Promise<GcSummary> {
     for (const workspaceId of auth.skipped_workspaces) summary.skipped.push({ workspace_id: workspaceId, reason: 'workspace-busy-or-unsafe' });
     if (apply && (auth.workspaces || auth.grants || auth.requests)) {
       await appendAudit(options.stateDir, {
-        at: new Date().toISOString(), action: 'delete', category: 'authorization',
+        at: new Date().toISOString(), action: 'committed', category: 'authorization',
         workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests
       });
     }

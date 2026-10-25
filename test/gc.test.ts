@@ -68,6 +68,9 @@ test('gc defaults to a read-only plan and atomically prunes expired authorizatio
   assert.equal(applied.removed.requests, 2);
   const after = await store.read<any>('control/multirepo-auth.json', 'multirepo-auth');
   assert.deepEqual(after, { schema_version: 1, grants: {}, workspaces: {}, requests: {} });
+  const audit = await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8');
+  const del = audit.indexOf('"action":"delete","category":"authorization","ids"');
+  assert.ok(del >= 0 && del < audit.indexOf('"action":"committed","category":"authorization"'), 'manual gc audits exact IDs before the rewrite');
   assert.ok(await store.read('control/multirepo-auth-used.json', 'multirepo-auth-used'));
 
   await store.remove('control/multirepo-catalog.json');

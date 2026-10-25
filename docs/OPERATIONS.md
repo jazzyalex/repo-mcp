@@ -225,9 +225,12 @@ room left for the call. A crashed collection's locks (`garbage collect authoriza
 `gc workspace <id>`) are recoverable with `coord service recover-stale-control` and
 `coord workspace recover-stale`. A fresh `workspace_open` needs room for two records, a grant for one.
 
-Coordinator CLI (`npm run coord`) errors print the message on stderr and one JSON object
+Coordinator CLI errors print the message on stderr and one JSON object
 `{"error": "COORDINATOR_ERROR", "message": "..."}` on stdout (except `--help` and text `status`), so a
-`| jq` pipeline still parses on failure; the exit code is 1.
+`| jq` pipeline still parses on failure; the exit code is 1. Run it as `npm run --silent coord -- ...`
+when piping: without `--silent`, npm prints its own banner lines on stdout. Manual `coord gc --apply`
+audits the same way as the automatic collection: a `delete` record with the exact IDs before the
+ledger rewrite, then `committed`.
 
 Modes are:
 
