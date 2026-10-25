@@ -48,7 +48,7 @@ async function withService(run: (ctx: {
   const service = await startMultiRepoServer(stateDir, 0);
   const client = new Client({ name: 'mcp-report-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url), { requestInit: { headers: { Authorization: `Bearer ${service.clientToken}` } } }));
     const inspect = await call(client, 'workspace_open', { repository_id: 'repo', task_id: 'inspect-task', mode: 'inspect', request_id: 'open-inspect-report' });
     assert.equal(inspect.error, false, String(inspect.data));
     await call(client, 'workspace_close', { workspace_token: inspect.data.workspace_token, request_id: 'close-inspect-first' });

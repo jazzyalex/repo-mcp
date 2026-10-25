@@ -126,8 +126,12 @@ an untrusted contributor on your own account, and review the result and
 
 ## Transport and secrets
 
-- The loopback HTTP listener is not an independent end-user identity boundary.
-  Never expose it directly to a public network; use the private authenticated tunnel.
+- The loopback HTTP listener requires a client token on every MCP request
+  (`Authorization: Bearer`, from the owner-only `state/client-auth/token`). The
+  standalone tunnel service sends it by file reference and the stdio bridge reads it, so
+  another local user or process that can reach the port but not the file is refused.
+  Browser requests are also refused by Host and Origin checks. The token identifies the
+  installation, not a conversation; never expose the listener to a public network.
 - Tunnel authentication proves the approved transport path, not the individual
   conversation holding a workspace bearer token.
 - Secrets and runtime state are owner-only files under

@@ -43,11 +43,12 @@ test('onboarding documents, skills and safe policies agree', async () => {
   assert.match(claudeSkill, /never edits the served\s+repository through Repo MCP itself/i);
   assert.match(claudeSkill, /starts `chatgpt-run go`, which drives the browser/is);
   assert.match(claudeSkill, /Never substitute\s+Claude's own analysis.*Oracle/is);
-  assert.match(claudeSkill, /claude mcp add --scope user --transport http repo-mcp http:\/\/127\.0\.0\.1:8787\/mcp/);
+  // Claude Code connects through the stdio bridge, which adds the broker's client token.
+  assert.match(claudeSkill, /claude mcp add --scope user repo-mcp -- .*dist\/src\/stdio-main\.js.*--original-names/);
   assert.match(claudeSkill, /WorkingDirectory.*control checkout/is);
   const codexSkill = await readFile(path.join(PROJECT_BASE, '.codex/skills/repo-mcp/SKILL.md'), 'utf8');
   assert.match(codexSkill, /claude mcp get repo-mcp/i);
-  assert.match(codexSkill, /http:\/\/127\.0\.0\.1:8787\/mcp/);
+  assert.match(codexSkill, /dist\/src\/stdio-main\.js/);
   assert.match(codexSkill, /WorkingDirectory.*control checkout/is);
   assert.match(codexSkill, /each configured real client route/i);
   assert.match(codexSkill, /request to "use Repo MCP review".*ChatGPT web/is);

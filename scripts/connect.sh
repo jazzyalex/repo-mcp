@@ -75,6 +75,10 @@ if [[ -f "$mcp_tunnel/install.json" ]]; then
   node "$mcp_project/scripts/tunnel-status.mjs" --health-file "$mcp_tunnel/health.url"
   exit $?
 fi
+# The managed runtime cannot send the broker's client token header, so the broker would
+# refuse every request; only the standalone service (which sends it) is supported.
+printf 'No standalone tunnel service is installed. The broker requires its client token, which only the\nstandalone service sends. Run: python3 scripts/install-tunnel-service.py --install\n' >&2
+exit 1
 # The managed runtime may reuse a running process with the old credential loaded.
 # Stop it explicitly so reconnect always reads the current key file.
 "$mcp_bin" runtimes stop repo-mcp > "$mcp_tunnel/stop-result.json" 2> "$mcp_tunnel/stop-error.log" || true

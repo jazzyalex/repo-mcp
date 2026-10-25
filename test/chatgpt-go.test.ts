@@ -730,7 +730,9 @@ test('without a Repo MCP report the page text is read only when the owner opted 
   const { stateDir } = await fixture(t);
   await configure(stateDir, { page_text_fallback: false });
   const page = new FakePage();
-  const held = await runGo({ ...base(stateDir), requestId: 'no-report' }, { page, sleep });
+  const prompt = `${PROMPT}\nworkspace request ID ws-no-report`;
+  await writeFile(base(stateDir).promptFile, prompt);
+  const held = await runGo({ ...base(stateDir), requestId: 'no-report', workspaceRequestId: 'ws-no-report', prompt }, { page, sleep });
   assert.equal(held.phase, 'uncertain');
   assert.equal(held.failure_code, 'MCP_REPORT_MISSING');
   assert.equal(held.output_file, null);
@@ -748,8 +750,19 @@ test('without a Repo MCP report the page text is read only when the owner opted 
 test('a held MCP_REPORT_MISSING run keeps its slot until resume', async t => {
   const { stateDir } = await fixture(t);
   await configure(stateDir, { page_text_fallback: false });
-  const held = await runGo({ ...base(stateDir), requestId: 'slot-held' }, { page: new FakePage(), sleep });
+  const held = await runGo({ ...base(stateDir), requestId: 'slot-held', workspaceRequestId: 'ws-slot-held', prompt: `${PROMPT}\nworkspace request ID ws-slot-held` }, { page: new FakePage(), sleep });
   assert.equal(held.failure_code, 'MCP_REPORT_MISSING');
   const { accountStatus } = await import('../src/go-account.js');
   assert.equal((await accountStatus(base(stateDir).accountDir)).slots_in_use, 1, 'an uncertain run holds the account slot');
+});
+
+test('an architecture request without a workspace is refused before sending when the page-text fallback is off', async t => {
+  const { stateDir } = await fixture(t);
+  await configure(stateDir, { page_text_fallback: false });
+  const page = new FakePage();
+  await assert.rejects(runGo({ ...base(stateDir), requestId: 'no-ws' }, { page, sleep }), (e: Error & { code?: string }) => e.code === 'INVALID_REQUEST' && /workspace-request-id/.test(e.message));
+  assert.equal(page.clicks, 0);
+  await configure(stateDir, { page_text_fallback: true });
+  const ok = await runGo({ ...base(stateDir), requestId: 'no-ws-opted-in' }, { page: new FakePage(), sleep });
+  assert.equal(ok.phase, 'cleaned');
 });

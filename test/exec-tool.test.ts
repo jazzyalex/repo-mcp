@@ -45,7 +45,7 @@ async function withService(run: (ctx: Ctx) => Promise<void>, options: { exec?: b
   const client = new Client({ name: 'exec-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   let serviceClosed = false;
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url), { requestInit: { headers: { Authorization: `Bearer ${service.clientToken}` } } }));
     const openCode = async (taskId: string, requestId: string, exec: boolean) => {
       const grant = await issueWorkspaceGrant({ stateDir, taskId, ...(exec ? { exec: true } : {}) });
       assert.equal(grant.exec, exec);

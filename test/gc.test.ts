@@ -281,3 +281,17 @@ test('a near-limit pass that removes nothing is not repeated at once', async t =
   const forced = await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future, force: true });
   assert.equal(forced?.workspaces, 1);
 });
+
+test('closing an already closed workspace again adds no authorization record', async t => {
+  const { authRecordCount } = await import('../src/multirepo-state.js');
+  const { stateDir, taskId } = await setup(t);
+  const opened = await openWorkspace({ stateDir, repositoryId: 'repo', taskId, mode: 'inspect', requestId: 'close-twice', ttlMs: 60_000 });
+  await closeWorkspace({ stateDir, workspaceToken: opened.workspace_token, requestId: 'close-1' });
+  const count = await authRecordCount(stateDir);
+  for (let i = 2; i < 6; i++) {
+    const again = await closeWorkspace({ stateDir, workspaceToken: opened.workspace_token, requestId: `close-${i}` });
+    assert.equal(again.already_applied, true);
+    assert.equal(again.status, 'closed');
+  }
+  assert.equal(await authRecordCount(stateDir), count);
+});

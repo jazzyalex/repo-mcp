@@ -102,13 +102,17 @@ def legacy_definition_matches(plist: dict, legacy_root: Path, tunnel_id: str) ->
     )
 
 
-def desired_plist(client: Path, credentials: Path, tunnel: Path, tunnel_id: str, port: int) -> dict:
+def desired_plist(client: Path, credentials: Path, tunnel: Path, tunnel_id: str, port: int, auth_header: Path) -> dict:
+    # The broker requires its client token on every MCP request; the tunnel client sends
+    # the header value from the broker's owner-only file, so the token never sits in the plist.
     return {
         'Label': LABEL,
         'ProgramArguments': [
             str(client), 'run', '--control-plane.tunnel-id', tunnel_id,
             '--control-plane.api-key', 'file:' + str(credentials / 'runtime.key'),
             '--mcp.server-url', f'http://127.0.0.1:{port}/mcp',
+            '--mcp.extra-headers', 'Authorization: file:' + str(auth_header),
+            '--mcp.discovery-extra-headers', 'Authorization: file:' + str(auth_header),
             '--mcp.startup-wait-timeout', '30s',
             '--health.listen-addr', '127.0.0.1:0',
             '--health.url-file', str(tunnel / 'health.url')
@@ -262,6 +266,7 @@ def main() -> int:
     parser.add_argument('--state-dir', type=Path)
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--client', type=Path, help='Absolute path to the official tunnel-client')
+    parser.add_argument('--broker-state-dir', type=Path, help='Broker state directory holding client-auth/ (default: <root>/state)')
     args = parser.parse_args()
     if sys.platform != 'darwin' or not 1024 <= args.port <= 65535:
         parser.error('Requires macOS and a port between 1024 and 65535.')
@@ -308,7 +313,8 @@ def main() -> int:
         selected_client = (args.client.expanduser().resolve(strict=True) if args.client
                            else Path(shutil.which('tunnel-client') or binaries / 'tunnel-client').resolve(strict=True))
 
-    plist = desired_plist(selected_client, credentials, tunnel, tunnel_id, args.port)
+    auth_header = (args.broker_state_dir.expanduser().resolve() if args.broker_state_dir else root / 'state') / 'client-auth' / 'authorization'
+    plist = desired_plist(selected_client, credentials, tunnel, tunnel_id, args.port, auth_header)
     plist_bytes = plistlib.dumps(plist, sort_keys=True)
     for name in ('stdout.log', 'stderr.log'):
         destination = tunnel / name
@@ -322,6 +328,10 @@ def main() -> int:
 
     if not selected_client.is_file() or not os.access(selected_client, os.X_OK):
         parser.error('Official tunnel client must be an executable regular file.')
+    try:
+        private_file(auth_header)
+    except Exception:
+        parser.error(f'Broker client token header {auth_header} is missing or not owner-only; start the broker first (it creates client-auth/).')
     record = {
         'version': 1,
         'label': LABEL,

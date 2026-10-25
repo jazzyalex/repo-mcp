@@ -58,7 +58,7 @@ Usage:
     [--timeout-minutes N] [--max-per-hour N] [--no-wait]
     (waits in code for a free slot; --no-wait fails with ACCOUNT_BUSY instead)
     architecture: pass --workspace-request-id ID so ChatGPT can deliver a finish report; without it the
-      run holds MCP_REPORT_MISSING unless page_text_fallback is on
+      request is refused before sending unless page_text_fallback is on
     review also needs: --workspace-request-id ID --base-ref COMMIT --head-ref COMMIT [--scope-prefix P]
     code also needs: --workspace-request-id ID [--base-ref REF] [--check CMD]... [--exec]
       (go issues the single-use write grant and appends it to the sent text; never put one in the prompt)

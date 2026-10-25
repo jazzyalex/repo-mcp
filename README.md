@@ -49,7 +49,7 @@ flowchart LR
         repos[("Approved Git checkouts")]
     end
     chatgpt -- "MCP over private tunnel" --> tunnel --> broker
-    claude -- "MCP over loopback HTTP" --> broker
+    claude -- "MCP over stdio bridge + client token" --> broker
     coord -- "register, bind, grant" --> state
     broker --> state
     broker -- "policy-checked file access" --> repos
@@ -68,8 +68,9 @@ flowchart LR
 ChatGPT reaches the local server through the official
 [OpenAI tunnel client](https://github.com/openai/tunnel-client)
 ([Secure MCP tunnels guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)).
-The loopback port is never exposed to the internet. Claude Code connects to the
-loopback URL directly and needs no tunnel.
+The loopback port is never exposed to the internet, and every MCP request must carry
+the broker's client token. Claude Code and Claude Desktop connect through the bundled
+stdio bridge, which adds the token, and need no tunnel.
 
 Read [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the full model: workspaces,
 modes, grants, epochs and the review flow.
@@ -207,7 +208,7 @@ npm run coord -- service configure --port 8787 && npm run coord -- service start
 ```
 
 ```bash
-claude mcp add --scope user --transport http repo-mcp http://127.0.0.1:8787/mcp
+npm run build && claude mcp add --scope user repo-mcp -- "$(command -v node)" "$PWD/dist/src/stdio-main.js" --original-names
 ```
 
 Then follow [SETUP.md](SETUP.md) to create the tunnel, connect ChatGPT, register your
@@ -274,9 +275,12 @@ See [SECURITY.md](SECURITY.md) for the threat model and how to report a vulnerab
   ChatGPT app registration.
 - **ChatGPT access:** developer mode, custom MCP apps and write actions depend on your
   ChatGPT plan and workspace settings. Check OpenAI's current documentation.
-- **Clients:** ChatGPT (through the tunnel) and Claude Code, including the Code tab of
-  the Claude desktop app (through loopback HTTP). Claude Desktop chat and claude.ai
-  connectors cannot reach a loopback server, and Repo MCP has no stdio mode yet.
+- **Clients:** ChatGPT (through the tunnel), Claude Code and Claude Desktop chat (both
+  through the bundled stdio bridge, which adds the broker's client token). claude.ai web
+  connectors are not supported: they need a public URL, which Repo MCP never exposes.
+- **Client token:** the broker refuses MCP requests without
+  `Authorization: Bearer <client token>`. The standalone tunnel service sends it from an
+  owner-only file; reaching the loopback port alone is not enough.
 - **Coding through ChatGPT** can be coordinated by Codex or Claude Code. In both
   cases ChatGPT makes the edits through a `code` workspace and a single-use write grant.
   The coordinator starts `go --kind code`.

@@ -361,7 +361,7 @@ Workspace and write-grant tokens are bearer capabilities. They are authenticated
 
 Repo MCP does not infer authority from MCP transport sessions, request IDs, SDK protocol-era identifiers, or optional conversation metadata. A copied valid bearer token remains a bearer token within its lifetime and permissions.
 
-The loopback HTTP listener has no independent end-user identity boundary. Never expose it directly to a public network; use the private authenticated tunnel.
+The loopback HTTP listener requires the client token (`state/client-auth/token`) as `Authorization: Bearer` on every MCP request; the standalone tunnel service and the stdio bridge add it. Rotate it by stopping the broker, deleting `state/client-auth/`, starting the broker (a new token is created), then restarting the tunnel service and Claude sessions. Never expose the listener directly to a public network.
 
 See [SECURITY.md](../SECURITY.md) and [docs/MULTI-REPO-SPEC.md](MULTI-REPO-SPEC.md).
 

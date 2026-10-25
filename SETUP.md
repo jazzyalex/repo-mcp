@@ -946,13 +946,37 @@ that can enforce a real pre-submit hook.
 
 ### Claude Code review setup
 
-Claude Code can use the same local MCP endpoint for independent reviews. Add it
-once for the current user while the stable server is running:
+Claude Code connects through the bundled stdio bridge, which reads the broker's client
+token (`state/client-auth/token`) and forwards to the loopback endpoint. The broker refuses
+MCP requests without that token, so a plain HTTP entry no longer works. Add it once for the
+current user from the control checkout, after `npm run build`, while the stable server is
+running:
 
 ```sh
-claude mcp add --scope user --transport http repo-mcp http://127.0.0.1:8787/mcp
+claude mcp add --scope user repo-mcp -- "$(command -v node)" "$PWD/dist/src/stdio-main.js" --original-names
 claude mcp get repo-mcp
 ```
+
+`--original-names` keeps the broker's tool names (`read`, `edit`, ...); Claude Code
+already namespaces them as `mcp__repo-mcp__read`. An older entry made with
+`--transport http` must be removed first (`claude mcp remove --scope user repo-mcp`).
+
+### Claude Desktop chat
+
+Claude Desktop chat starts local MCP servers over stdio. Add the bridge to
+`~/Library/Application Support/Claude/claude_desktop_config.json` (absolute paths):
+
+```json
+{"mcpServers": {"repo-mcp": {"command": "/absolute/path/to/node",
+  "args": ["/absolute/path/to/repo-mcp/dist/src/stdio-main.js"]}}}
+```
+
+Without `--original-names` the bridge exposes generic tools with a `repo_` prefix
+(`repo_read`, `repo_edit`, `repo_search`, `repo_list_files`, `repo_finish`, ...), so they
+are not confused with the client's own tools; names that already start with `repo_`,
+`repository_`, `workspace_` or `service_` keep their spelling. claude.ai web connectors are
+not supported: they connect from Anthropic's servers and need a public URL, and Repo MCP
+never exposes the broker publicly.
 
 Install the bundled setup, review, and architecture skills through the ownership-aware installer:
 

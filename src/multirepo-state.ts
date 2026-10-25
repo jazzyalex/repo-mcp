@@ -1495,6 +1495,7 @@ export async function closeReviewWorkspaceUnderGate(options: {
         }
         return { workspace_id: selection.workspace_id, status: auth.workspaces[selection.workspace_id]?.status ?? selection.status, already_applied: true };
       }
+      if (selection.status !== 'open') return { workspace_id: selection.workspace_id, status: selection.status, already_applied: true };
       auth.workspaces[selection.workspace_id] = { ...selection, status: 'closed' };
       auth.requests[key] = { operation: 'workspace_close', args_digest: digest, workspace_id: selection.workspace_id, at: nowIso() };
       await writeAuth(controlStore, auth);
@@ -1572,6 +1573,8 @@ export async function closeWorkspace(options: { stateDir?: string; workspaceToke
         if (prior.operation !== 'workspace_close' || prior.args_digest !== digest || prior.workspace_id !== selection.workspace_id) throw new SafeError('request_id was already used with different workspace arguments.');
         return { workspace_id: selection.workspace_id, status: auth.workspaces[selection.workspace_id]?.status ?? selection.status, already_applied: true };
       }
+      // Closing a selection that is no longer open changes nothing, so it adds no ledger record.
+      if (selection.status !== 'open') return { workspace_id: selection.workspace_id, status: selection.status, already_applied: true };
       const next = { ...selection, status: 'closed' as const };
       auth.workspaces[selection.workspace_id] = next;
       auth.requests[key] = { operation: 'workspace_close', args_digest: digest, workspace_id: selection.workspace_id, at: nowIso() };

@@ -335,6 +335,11 @@ export async function runGo(options: GoOptions, deps: GoDeps): Promise<GoResult>
         throw new GoError('INVALID_REQUEST', 'Review target options need --kind review.');
       }
       if (kind === 'architecture' && options.baseRef !== undefined) throw new GoError('INVALID_REQUEST', '--base-ref needs --kind review or code.');
+      // Without a workspace there is no finish report, so with the page-text fallback off the run
+      // would send and then always hold MCP_REPORT_MISSING: refuse it before anything is sent.
+      if (kind === 'architecture' && !options.workspaceRequestId && !(await accountConfig(options.accountDir ?? DEFAULT_ACCOUNT_DIR)).config.page_text_fallback) {
+        throw new GoError('INVALID_REQUEST', 'go --kind architecture needs --workspace-request-id so ChatGPT can deliver a finish report (or opt in with: account config-set page_text_fallback=true).');
+      }
       if (kind !== 'code' && (options.checks?.length || options.exec)) throw new GoError('INVALID_REQUEST', '--check and --exec need --kind code.');
       let code: GoCodeTarget | undefined;
       if (kind === 'code') {

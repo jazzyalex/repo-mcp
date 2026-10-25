@@ -195,7 +195,7 @@ test('permanent broker starts with an empty catalog and no ambient repository', 
   const service = await startMultiRepoServer(stateDir, 0);
   const client = new Client({ name: 'empty-broker-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url), { requestInit: { headers: { Authorization: `Bearer ${service.clientToken}` } } }));
     const info = await call(client, 'service_info');
     const repositories = await call(client, 'repository_list');
     assert.equal(info.error, false, String(info.data));
@@ -623,7 +623,7 @@ test('broker reauthorizes mutations and checks inside the task gate after contro
   });
   const client = new Client({ name: 'gated-authorization-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url), { requestInit: { headers: { Authorization: `Bearer ${service.clientToken}` } } }));
     const grant = await issueWorkspaceGrant({ stateDir, taskId: 'task' });
     const code = await call(client, 'workspace_open', {
       repository_id: 'repo', task_id: 'task', mode: 'code', request_id: 'open-code-gated', write_grant: grant.write_grant
@@ -708,7 +708,7 @@ test('commit-pinned repo_info budgets instructions and separates checkout identi
   const service = await startMultiRepoServer(stateDir, 0);
   const client = new Client({ name: 'pinned-info-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url), { requestInit: { headers: { Authorization: `Bearer ${service.clientToken}` } } }));
     const opened = await call(client, 'workspace_open', {
       repository_id: 'repo',
       task_id: 'task',
@@ -767,7 +767,7 @@ test('multi-repository broker isolates workspaces, writers, cursors, requests an
   const service = await startMultiRepoServer(stateDir, 0);
   const client = new Client({ name: 'multirepo-test', version: '1' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(service.url)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(service.url), { requestInit: { headers: { Authorization: `Bearer ${service.clientToken}` } } }));
     const tools = await client.listTools();
     assert.deepEqual(
       tools.tools.map(tool => tool.name).sort(),

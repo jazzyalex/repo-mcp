@@ -54,9 +54,12 @@ repository into a user-approved development location first.
    `scripts/connect.sh --save-key`; never ask for it in chat or in a command. Install the
    tunnel service and verify `npm run connection:status`.
 5. Configure Claude Code for the current user when it is not already connected. Require
-   `claude mcp get repo-mcp` to show the expected loopback endpoint. When missing, add
-   the user-scoped HTTP server named `repo-mcp` at
-   `http://127.0.0.1:8787/mcp`, then verify it with `claude mcp list`.
+   `claude mcp get repo-mcp` to show the stdio bridge (`dist/src/stdio-main.js`). When
+   missing, or when it is an older `--transport http` entry (the broker now requires its
+   client token, which only the bridge adds), run from the control checkout
+   `claude mcp remove --scope user repo-mcp` if needed, then
+   `claude mcp add --scope user repo-mcp -- "$(command -v node)" "$PWD/dist/src/stdio-main.js" --original-names`,
+   and verify it with `claude mcp list`.
 6. Help create or refresh the developer-mode ChatGPT MCP app using the private tunnel.
    Use available authorized browser control; otherwise ask for the single precise UI
    action. After a schema update, use **Refresh tools** and a new ChatGPT conversation.
@@ -379,7 +382,7 @@ now(){ python3 -I -c 'import datetime;print(datetime.datetime.now(datetime.timez
 ```bash
 npm run --silent coord -- service status          # expect "local_mcp": "ready"
 npm run --silent connection:status                # expect "state": "ready" (ChatGPT tunnel)
-claude mcp get repo-mcp                           # expect "Connected", http://127.0.0.1:8787/mcp
+claude mcp get repo-mcp                           # expect "Connected", stdio bridge dist/src/stdio-main.js
 python3 scripts/install-agent-skills.py --check   # expect "agent skills are current"
 ```
 

@@ -12,6 +12,7 @@ import { jsonBytes } from './paging.js';
 import { StateStore } from './task-state.js';
 import { RELEASE_VERSION } from './version.js';
 import { jsonToolResult } from './tool-result.js';
+import { clientTokenMatches, ensureClientToken } from './client-auth.js';
 import { MCP_REPORT_MAX_BYTES, recordMcpReport } from './mcp-report.js';
 import {
   EXEC_DEFAULT_YIELD_MS, EXEC_MAX_CMD_CHARS, EXEC_MAX_TIMEOUT_S, EXEC_MAX_WAIT_MS, ExecManager
@@ -265,12 +266,16 @@ export type MultiRepoServerOptions = {
   reconcileIntervalMs?: number;
   /** Toolchain PATH for exec; defaults to REPO_MCP_EXEC_PATH, then EXEC_DEFAULT_PATH. */
   execPath?: string;
+  /** Client token; defaults to the state directory's (created on first start). */
+  clientToken?: string;
 };
 
 export async function startMultiRepoServer(stateDir: string, port?: number, options: MultiRepoServerOptions = {}) {
   await StateStore.open(stateDir);
   const configured = await getMultiRepoServiceConfig(stateDir);
   const listenPort = port ?? configured.port;
+  // Every MCP request must carry the client token: reaching the loopback port is not enough.
+  const clientToken = options.clientToken ?? await ensureClientToken(stateDir);
   const runtimes = new RuntimeManager(stateDir, { hooks: options.runtimeHooks, reconcileIntervalMs: options.reconcileIntervalMs });
   const auditFile = path.join(stateDir, 'multirepo-audit.jsonl');
   const processAttestation = {
@@ -399,6 +404,11 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
       return;
     }
     if (req.url !== '/mcp') { res.writeHead(404); res.end(); return; }
+    if (!clientTokenMatches(req.headers.authorization, clientToken)) {
+      res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer realm="repo-mcp"' });
+      res.end(JSON.stringify({ error: 'unauthorized', message: 'Repo MCP needs Authorization: Bearer <client token> (client-auth/token in the broker state directory). Configure the client as described in SETUP.md.' }));
+      return;
+    }
     try { await handle(req, res); } catch { if (!res.headersSent) res.writeHead(500); res.end(); }
   });
   http.requestTimeout = 15_000;
@@ -409,6 +419,7 @@ export async function startMultiRepoServer(stateDir: string, port?: number, opti
   if (!addr || typeof addr === 'string') throw new Error('No listening address');
   return {
     url: `http://127.0.0.1:${addr.port}/mcp`,
+    clientToken,
     processAttestation,
     close: async () => {
       await exec.close();

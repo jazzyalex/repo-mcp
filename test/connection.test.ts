@@ -16,12 +16,13 @@ test('reconnect reuses the saved key without prompting or exposing upstream secr
   const r=spawnSync('/bin/bash',['scripts/connect.sh'],{env:{...process.env,MCP_STATE_DIR:root,TUNNEL_CLIENT_BIN:fake},input:'',encoding:'utf8',timeout:10000});
   assert.equal(r.status,1);
   assert.match(r.stdout,/Reusing the saved/);
-  assert.match(r.stdout,/credential_rejected/);
+  // Without the standalone service the managed runtime is refused: it cannot send the client token.
+  assert.match(r.stderr,/standalone service/);
   assert.doesNotMatch(r.stdout+r.stderr,/sk-secret-sentinel|Paste the runtime key/);
   assert.equal(await readFile(path.join(root,'runtime.key'),'utf8'),'saved-synthetic-key');
   assert.equal((await stat(path.join(root,'runtime.key'))).mode & 0o777,0o600);
   const rotate=spawnSync('/bin/bash',['scripts/connect.sh','--rotate-key'],{env:{...process.env,MCP_STATE_DIR:root,TUNNEL_CLIENT_BIN:fake},input:'replacement-synthetic-key\n',encoding:'utf8',timeout:10000});
-  assert.equal(rotate.status,1); // credential failure remains a failure even after rotation
+  assert.equal(rotate.status,1); // still refused without the standalone service, but the key is rotated
   assert.equal(await readFile(path.join(root,'runtime.key'),'utf8'),'replacement-synthetic-key');
   assert.doesNotMatch(rotate.stdout+rotate.stderr,/replacement-synthetic-key|sk-secret-sentinel/);
  } finally {await rm(root,{recursive:true,force:true});}
@@ -51,6 +52,11 @@ test('standalone tunnel preview uses durable private state with no checkout depe
   assert.equal(plist.WorkingDirectory,path.join(canonicalState,'tunnel'));
   assert.equal(args[args.indexOf('--control-plane.api-key')+1],`file:${path.join(canonicalState,'credentials','runtime.key')}`);
   assert.equal(args[args.indexOf('--health.url-file')+1],path.join(canonicalState,'tunnel','health.url'));
+  // The tunnel sends the broker's client token header from its owner-only file.
+  const header=`Authorization: file:${path.join(canonicalState,'state','client-auth','authorization')}`;
+  assert.equal(args[args.indexOf('--mcp.extra-headers')+1],header);
+  assert.equal(args[args.indexOf('--mcp.discovery-extra-headers')+1],header);
+  assert.doesNotMatch(JSON.stringify(plist),/Bearer [a-f0-9]{64}/);
   assert.equal(plist.StandardOutPath,path.join(canonicalState,'tunnel','stdout.log'));
   assert.equal(plist.StandardErrorPath,path.join(canonicalState,'tunnel','stderr.log'));
   assert.doesNotMatch(JSON.stringify(plist),/repo-mcp-trial|\.trial/);
