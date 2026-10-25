@@ -39,7 +39,11 @@ const PAGE_HELPERS = String.raw`
   const norm = t => t.replace(/\s+/g, ' ').trim();
   // The model button may carry a caption line above the effort ("Thinking effort" then
   // "Extra High"): the effort is its last non-empty line.
-  const effort = e => text(e).split('\n').map(l => l.trim()).filter(Boolean).at(-1) ?? '';
+  // The button's last label line ends with the effort; it may carry a model prefix ("5.6 Medium").
+  const effort = e => {
+    const last = text(e).split('\n').map(l => l.trim()).filter(Boolean).at(-1) ?? '';
+    return [...EFFORTS].sort((a, b) => b.length - a.length).find(x => last === x || last.endsWith(' ' + x)) ?? last;
+  };
   window.__go = {
     find(name) {
       const spec = S[name];
