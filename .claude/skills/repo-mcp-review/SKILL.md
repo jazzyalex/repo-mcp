@@ -113,7 +113,8 @@ per Chrome start. Never connect to Chrome's debugging port yourself.
 5. **Read the result** (first line of `$R/go.json`, one JSON object):
    - `exit=0`, `phase: cleaned`: read the review from `output_file`. `outcome` is `ship`
      or `no-ship`. It comes from the `finish` report when `output_source` is
-     `mcp-report`; otherwise from the last `VERDICT:` line of the page text, and a
+     `mcp-report`; otherwise (only with the owner's `page_text_fallback` opt-in; without
+     it the run holds `MCP_REPORT_MISSING`) from the last `VERDICT:` line of the page text, and a
      missing verdict counts as `no-ship`. `participant: closed` means the review
      participant was released; `warning:<code>` means it was not, so report it.
      `cleanup` is `archived`, or `warning:<code>` when only archiving failed.

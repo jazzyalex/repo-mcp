@@ -274,8 +274,14 @@ chatgpt-run go --kind review [--profile review|review-critical] --workspace-requ
 - **Immutable:** the first report wins. The same report again returns the same `ack_id`;
   different content or outcome is rejected.
 - **Not a completion signal:** a report does not change the run state. `go` still waits
-  for a finished turn (section 6), then saves the report text as the run output instead
-  of the page text. `output_source` in the result is `mcp-report` or `page`.
+  for a finished turn (section 6), then saves the report text as the run output.
+  `output_source` in the result is `mcp-report` or `page`.
+- **Page text is opt-in:** reading the answer off the page is the account setting
+  `page_text_fallback` (default false), because OpenAI's terms forbid programmatically
+  extracting Output. Off, a finished turn without a report holds `MCP_REPORT_MISSING`
+  and nothing is read; while polling, only the answer's length leaves the page. On, the
+  page text is read as before. Opting in and resuming a held run reads it without
+  sending again.
 - **Architecture** passes may also pass `--workspace-request-id` to enable the report.
 - **Not yet:** the coding seal (an accepted report stops further mutations) waits for
   `go --kind code`.

@@ -545,6 +545,7 @@ The limits are owner settings in
 | `max_per_hour` | 25 | 1-500 | Sends in any rolling hour, all runs together. |
 | `min_gap_seconds` | 30 | 0-3600 | Minimum time between two sends. |
 | `latch_enabled` | true | true/false | A browser challenge stops new work until the owner clears it. |
+| `page_text_fallback` | false | true/false | Opt-in. With no `finish` report, read the answer text off the ChatGPT page. Off: the run holds `MCP_REPORT_MISSING` and nothing is read. See the note below. |
 
 ```sh
 npm run --silent chatgpt-run -- account status
@@ -615,6 +616,7 @@ does not delete the chat.
 | `REQUEST_CONFLICT` | The request ID was used with different inputs. Use a new ID. |
 | `SEND_UNCONFIRMED` | The send click may have happened but the message was not seen. The run is `uncertain` (exit 3). Check the chat. Never resend. Resume. |
 | `COMPLETION_UNOBSERVED` | The finished answer was not seen in time. The run is `uncertain`. Resume. |
+| `MCP_REPORT_MISSING` | The turn finished without a `finish` report and `page_text_fallback` is off, so the answer was not read. The run is `uncertain` and holds its slot. Read the chat at `conversation_url`, then `--release-admission --reason`; or opt in (`account config-set page_text_fallback=true`) and `--resume` (nothing is sent again). |
 | `WORKSPACE_NOT_OPENED` / `WORKSPACE_RECONCILIATION_REQUIRED` / `WORKSPACE_STALE` | ChatGPT did not open a workspace with the request ID, or it opened a stale one. The run is held. Resume, or check the chat. |
 
 ## Release archive

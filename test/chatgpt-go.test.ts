@@ -28,8 +28,9 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   await bindRegisteredTask({ stateDir, repositoryId: 'repo', taskId: 'task' });
   await writeFile(path.join(base, 'prompt.txt'), PROMPT);
   // Tests drive many sends at once on a fake clock; the send gap is covered by its own tests.
+  // The fake page has no Repo MCP report, so the page-text fallback is opted in unless a test turns it off.
   await mkdir(path.join(base, 'account'), { recursive: true });
-  await writeFile(path.join(base, 'account', 'config.json'), JSON.stringify({ min_gap_seconds: 0 }));
+  await writeFile(path.join(base, 'account', 'config.json'), JSON.stringify({ min_gap_seconds: 0, page_text_fallback: true }));
   t.after(() => rm(base, { recursive: true, force: true }));
   return { stateDir };
 }
@@ -62,7 +63,8 @@ class FakePage implements ChatGptPage {
     this.polls++;
     return this.polls <= (this.opts.busyPolls ?? 1) ? { state: 'busy', chars: 10 } : { state: 'done', chars: (this.opts.answer ?? ANSWER).length };
   }
-  async readAnswer() { return this.opts.answer ?? ANSWER; }
+  answerReads = 0;
+  async readAnswer() { this.answerReads++; return this.opts.answer ?? ANSWER; }
   async archive() { if (this.opts.failArchive) throw new GoError('UI_MISSING:archive'); this.archived++; }
   async closeTab() {}
   async close() {}
@@ -75,7 +77,7 @@ const base = (stateDir: string, requestId = 'req-1') => ({
 });
 /** Owner config for the test account store; tests keep the send gap at 0 unless they test it. */
 const configure = (stateDir: string, config: Record<string, unknown>) =>
-  writeFile(path.join(stateDir, '..', 'account', 'config.json'), JSON.stringify({ min_gap_seconds: 0, ...config }));
+  writeFile(path.join(stateDir, '..', 'account', 'config.json'), JSON.stringify({ min_gap_seconds: 0, page_text_fallback: true, ...config }));
 const crashAt = (phase: GoPhase) => (p: GoPhase) => { if (p === phase) throw new Error(`crash at ${phase}`); };
 
 test('go happy path sends once, completes, archives and releases the account', async t => {
@@ -720,4 +722,23 @@ test('a check recorded as started without a saved result is never run again', as
   assert.equal(again.checks?.length, 1);
   assert.match(again.checks_error ?? '', /^CHECK_RESULT_UNKNOWN/);
   assert.equal(await readFile(path.join(repoRoot(stateDir), 'ran-two.txt'), 'utf8'), 'two\n');
+});
+
+test('without a Repo MCP report the page text is read only when the owner opted in', async t => {
+  const { stateDir } = await fixture(t);
+  await configure(stateDir, { page_text_fallback: false });
+  const page = new FakePage();
+  const held = await runGo({ ...base(stateDir), requestId: 'no-report' }, { page, sleep });
+  assert.equal(held.phase, 'uncertain');
+  assert.equal(held.failure_code, 'MCP_REPORT_MISSING');
+  assert.equal(held.output_file, null);
+  assert.equal(page.answerReads, 0, 'the answer is never read off the page');
+  // Opting in later and resuming reads the finished answer; nothing is sent again.
+  await configure(stateDir, { page_text_fallback: true });
+  const clicks = page.clicks;
+  const resumed = await runGo({ stateDir, requestId: 'no-report', accountDir: base(stateDir).accountDir }, { page, sleep });
+  assert.equal(resumed.phase, 'cleaned');
+  assert.equal(resumed.output_source, 'page');
+  assert.equal(page.answerReads, 1);
+  assert.equal(page.clicks, clicks, 'resume never sends again');
 });

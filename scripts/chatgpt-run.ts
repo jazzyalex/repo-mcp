@@ -66,7 +66,9 @@ Usage:
   chatgpt-run account status                      slots, queue, sends in the last hour, latch, config
   chatgpt-run account config                      effective limits and where each comes from
   chatgpt-run account config-set KEY=VALUE        max_concurrent (1-50, default 10), max_per_hour (1-500, default 25),
-                                                  min_gap_seconds (0-3600, default 30), latch_enabled (true/false, default true)
+                                                  min_gap_seconds (0-3600, default 30), latch_enabled (true/false, default true),
+                                                  page_text_fallback (true/false, default false: read the answer off
+                                                  the page when no finish report arrived)
   chatgpt-run account latch --reason TEXT         stop new ChatGPT work now
   chatgpt-run account unlatch --reason TEXT       allow new ChatGPT work again
   chatgpt-run account release-slot --key KEY --reason TEXT

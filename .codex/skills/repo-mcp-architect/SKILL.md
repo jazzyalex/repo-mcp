@@ -56,7 +56,9 @@ connection prompts the owner again.
 4. **Read the result** (first line of `$R/go.json`, one JSON object):
    - `exit=0`, `phase: cleaned`: read the answer from `output_file`. `output_source` is
      `mcp-report` when ChatGPT delivered it through `finish`, or `page` when `go` read the
-     page text instead (an older connector without `finish`, or ChatGPT skipped the call). `cleanup` is
+     page text instead (only when the owner opted in with `account config-set
+     page_text_fallback=true`). Without the opt-in, a run with no `finish` report holds
+     `MCP_REPORT_MISSING`: report `conversation_url` and stop. `cleanup` is
      `archived`, or `warning:<code>` when only archiving failed; the answer is still saved.
      Check that the answer ends with the requested `VERDICT` line. If it does not, report
      the pass as incomplete and do not finish the task as successful.

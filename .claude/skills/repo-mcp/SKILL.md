@@ -298,6 +298,9 @@ yourself.
    - `exit=3`: the prompt may have been sent. Run `go --request-id "$GOREQ" --resume`
      once; never start a new request. If it still exits 3, report `conversation_url`
      and stop.
+     `failure_code: MCP_REPORT_MISSING` means ChatGPT gave no `finish` report and the
+     owner has not opted in to reading the page (`account config-set
+     page_text_fallback=true`); report `conversation_url` and stop.
    - `exit=1`, `phase: failed`: nothing was sent when `run_id` is null or the run is
      `failed-pre-submit`; the grant is already revoked. Retry once with a new `GOREQ`
      and `WSREQ` for `UI_*`, `COMPOSER_*` or `BROWSER_SETUP_FAILED`.

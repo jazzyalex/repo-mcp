@@ -57,11 +57,13 @@ const PAGE_HELPERS = String.raw`
       .filter(e => !e.closest('[hidden],[inert]') && visible(e)); },
     answerText(e) { return (e?.innerText || '').replace(/^\s*ChatGPT said:\s*/, '').trim(); },
     turnState() { return [...document.querySelectorAll('[data-talvt-turn-state]')].at(-1)?.getAttribute('data-talvt-turn-state') ?? null; },
-    turnOrder(promptHead) {
+    // The answer text leaves the page only when asked for (the opt-in page-text fallback); polling sees its length.
+    turnOrder(promptHead, withText) {
       const users = this.messages('user'); const last = users.at(-1);
-      if (!last || !norm(last.innerText || '').includes(promptHead)) return { user: false, answer: '' };
+      if (!last || !norm(last.innerText || '').includes(promptHead)) return { user: false, chars: 0, answer: '' };
       const answers = this.messages('assistant').filter(a => last.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING);
-      return { user: true, answer: this.answerText(answers.at(-1)), userLength: norm(last.innerText || '').length, turn: this.turnState() };
+      const text = this.answerText(answers.at(-1));
+      return { user: true, chars: text.length, answer: withText ? text : '', userLength: norm(last.innerText || '').length, turn: this.turnState() };
     },
     sliderLabel() {
       const s = document.querySelector('[role="slider"]');
@@ -320,10 +322,10 @@ export class CdpChatGptPage implements ChatGptPage {
     return /^https:\/\/chatgpt\.com\/c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/.exec(href)?.[0];
   }
 
-  private async order(prompt: string) {
+  private async order(prompt: string, withText = false) {
     await this.helpers();
     const head = normalize(prompt).slice(0, 300);
-    return this.eval<{ user: boolean; answer: string; userLength?: number; turn?: string | null }>(`window.__go.turnOrder(${JSON.stringify(head)})`);
+    return this.eval<{ user: boolean; chars: number; answer: string; userLength?: number; turn?: string | null }>(`window.__go.turnOrder(${JSON.stringify(head)}, ${withText})`);
   }
 
   async hasExpectedUserMessage(prompt: string) {
@@ -354,13 +356,13 @@ export class CdpChatGptPage implements ChatGptPage {
     if (!o.user) return { state: 'unknown', chars: 0 };
     const stop = await this.eval<number>('window.__go.find("stop").length');
     // Busy while a Stop control shows or the turn marker says it is not complete.
-    if (stop > 0 || (o.turn != null && o.turn !== 'complete')) return { state: 'busy', chars: o.answer.length };
-    if (o.turn !== 'complete') return { state: 'unknown', chars: o.answer.length };
-    return o.answer ? { state: 'done', chars: o.answer.length } : { state: 'unknown', chars: 0 };
+    if (stop > 0 || (o.turn != null && o.turn !== 'complete')) return { state: 'busy', chars: o.chars };
+    if (o.turn !== 'complete') return { state: 'unknown', chars: o.chars };
+    return o.chars ? { state: 'done', chars: o.chars } : { state: 'unknown', chars: 0 };
   }
 
   async readAnswer(prompt: string) {
-    return (await this.order(prompt)).answer;
+    return (await this.order(prompt, true)).answer;
   }
 
   async archive() {

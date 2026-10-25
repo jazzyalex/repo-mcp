@@ -48,13 +48,15 @@ export class AccountError extends SafeError {
 
 // --- owner configuration ---------------------------------------------------------------
 
-export type AccountConfig = { max_concurrent: number; max_per_hour: number; min_gap_seconds: number; latch_enabled: boolean };
+export type AccountConfig = { max_concurrent: number; max_per_hour: number; min_gap_seconds: number; latch_enabled: boolean; page_text_fallback: boolean };
 
 const CONFIG_KEYS: Record<keyof AccountConfig, { default: number | boolean; min?: number; max?: number }> = {
   max_concurrent: { default: 10, min: 1, max: 50 },
   max_per_hour: { default: 25, min: 1, max: 500 },
   min_gap_seconds: { default: 30, min: 0, max: 3600 },
-  latch_enabled: { default: true }
+  latch_enabled: { default: true },
+  // Off by default: without a `finish` report, go reads the answer from the page only when the owner opts in.
+  page_text_fallback: { default: false }
 };
 
 function checkValue(key: string, value: unknown): number | boolean {

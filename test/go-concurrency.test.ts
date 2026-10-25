@@ -27,7 +27,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, config: Reco
   await registerRepository({ stateDir, repositoryId: 'repo', root, policyPath });
   await bindRegisteredTask({ stateDir, repositoryId: 'repo', taskId: 'task' });
   await mkdir(accountDir, { recursive: true });
-  await writeFile(path.join(accountDir, 'config.json'), JSON.stringify({ min_gap_seconds: 0, ...config }));
+  await writeFile(path.join(accountDir, 'config.json'), JSON.stringify({ min_gap_seconds: 0, page_text_fallback: true, ...config }));
   t.after(() => rm(base, { recursive: true, force: true }));
   return { stateDir, accountDir };
 }
@@ -248,14 +248,15 @@ test('v1 admission migrates to v2 and fences 0.3 binaries', async t => {
 test('owner config validates keys and values and reports sources', async t => {
   const f = await fixture(t);
   await rm(path.join(f.accountDir, 'config.json'));
-  assert.deepEqual((await accountConfig(f.accountDir)).config, { max_concurrent: 10, max_per_hour: 25, min_gap_seconds: 30, latch_enabled: true });
-  for (const bad of ['max_concurrent=0', 'max_concurrent=51', 'max_per_hour=x', 'latch_enabled=1', 'bogus=1', 'nonsense']) {
+  assert.deepEqual((await accountConfig(f.accountDir)).config, { max_concurrent: 10, max_per_hour: 25, min_gap_seconds: 30, latch_enabled: true, page_text_fallback: false });
+  for (const bad of ['max_concurrent=0', 'max_concurrent=51', 'max_per_hour=x', 'latch_enabled=1', 'page_text_fallback=yes', 'bogus=1', 'nonsense']) {
     await assert.rejects(setAccountConfig(bad, f.accountDir), e => code(e, 'ACCOUNT_CONFIG_INVALID'), bad);
   }
   const set = await setAccountConfig('max_concurrent=3', f.accountDir);
   assert.equal(set.config.max_concurrent, 3);
   assert.equal(set.source.max_concurrent, 'config.json');
   assert.equal(JSON.parse(await readFile(path.join(f.accountDir, 'config.json'), 'utf8')).max_concurrent, 3);
+  assert.equal((await setAccountConfig('page_text_fallback=true', f.accountDir)).config.page_text_fallback, true);
   await writeFile(path.join(f.accountDir, 'config.json'), '{"max_per_hour": 0}');
   await assert.rejects(accountConfig(f.accountDir), e => code(e, 'ACCOUNT_CONFIG_INVALID'));
 });

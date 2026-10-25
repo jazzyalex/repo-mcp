@@ -25,7 +25,7 @@ import { readMcpReportForRequest, type McpReportOutcome } from './mcp-report.js'
 import { execSessionsQuiet } from './exec-tool.js';
 import { candidateDigest, processGroupAlive, processGroupGone, runCheck, type CheckResult } from './go-checks.js';
 import {
-  AccountError, DEFAULT_ACCOUNT_DIR, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
+  AccountError, DEFAULT_ACCOUNT_DIR, accountConfig, acquireSetupLease, admitSlot, adoptSlot, commitSend, confirmSend,
   pidReusedSince, releaseSlot, CLICK_SEQUENCE_MAX_MS, CLICK_SETTLE_MS, SEND_CLICK_DEADLINE_MS, boundSend, setLatch, waitForSendWindow, type SetupLease, type SlotRequest
 } from './go-account.js';
 import { grantState, issueWorkspaceGrant, readMultiRepoCatalog, revokeGrant, revokeWorkspace, workspaceForOpenRequest } from './multirepo-state.js';
@@ -823,9 +823,12 @@ class Driver {
       previous = state;
       await this.sleep(POLL_MS);
     }
-    // A report delivered through `finish` is the exact text ChatGPT chose to hand back; the
-    // page text is the fallback. Either way only a finished turn completes the run.
+    // A report delivered through `finish` is the exact text ChatGPT chose to hand back. Reading
+    // the answer off the page is an owner opt-in (account page_text_fallback, off by default);
+    // without it a run with no report holds, and nothing is read. Either way only a finished
+    // turn completes the run.
     const report = await this.report();
+    if (!report && !(await accountConfig(this.accountDir)).config.page_text_fallback) return this.hold('MCP_REPORT_MISSING');
     const answer = report?.summary_markdown ?? await this.page.readAnswer(prompt);
     if (!answer.trim()) return this.hold('EMPTY_ANSWER');
     return this.complete(answer, report ? report.outcome : undefined);

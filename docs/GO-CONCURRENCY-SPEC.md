@@ -32,6 +32,7 @@ owner-only (mode 600). Every key is optional; a missing file or key means the de
 | `max_per_hour` | 25 | 1-500 | Send attempts in any rolling hour, all slots together. |
 | `min_gap_seconds` | 30 | 0-3600 | Minimum time between two send attempts. |
 | `latch_enabled` | true | true/false | A detected browser challenge stops new work (section 6). |
+| `page_text_fallback` | false | true/false | Opt-in reading of the answer off the page when no `finish` report arrived (GO-DRIVER-SPEC section 7). |
 
 - `chatgpt-run account config` prints the effective values and the source of each.
 - `chatgpt-run account config-set KEY=VALUE` validates and writes atomically.
