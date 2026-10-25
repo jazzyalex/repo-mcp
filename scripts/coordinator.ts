@@ -94,9 +94,8 @@ Migration:
 // Errors print the plain message on stderr and, except for text-only output (help, status without --json),
 // one JSON object {"error": "COORDINATOR_ERROR", "message": ...} on stdout, so piping to jq still parses.
 // Classified before parsing (parse errors) and again from the parsed positionals.
-const AREAS = ['service', 'repository', 'task', 'workspace', 'review', 'migration'];
 const rawArgs = process.argv.slice(2);
-let textOnly = rawArgs.includes('--help') || (rawArgs.includes('status') && !rawArgs.some(a => AREAS.includes(a)) && !rawArgs.includes('--json'));
+let textOnly = rawArgs.includes('--help') || (rawArgs[0] === 'status' && !rawArgs.includes('--json'));
 // Written synchronously (retrying a full non-blocking pipe for up to about a second), so process.exit never
 // drops the error; a closed or stuck stdout never prevents the stderr message or the exit.
 function writeAll(fd: number, text: string) {

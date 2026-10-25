@@ -488,7 +488,8 @@ async function collectBeforeIssuing(stateDir: string): Promise<string | undefine
   const { collectAuthorizationNearLimit } = await import('./gc.js');
   // With no room left for a fresh open, the fruitless-pass backoff is bypassed once per call.
   try { await collectAuthorizationNearLimit(stateDir, { force: await authRecordCount(stateDir) + 2 > MAX_AUTH_RECORDS }); return undefined; }
-  catch (error) { return error instanceof Error ? error.message : 'automatic collection failed'; }
+  // Only a SafeError's message is client-safe; anything else (it may name operator-state paths) stays generic.
+  catch (error) { return error instanceof SafeError ? error.message : 'internal error; see the broker log and run `coord gc --apply`'; }
 }
 /** The cap error names a failed automatic collection instead of claiming nothing was old enough. */
 function capError(collectFailure: string | undefined) {
