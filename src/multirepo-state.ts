@@ -486,7 +486,8 @@ export async function authRecordCount(stateDir: string) {
  */
 async function collectBeforeIssuing(stateDir: string): Promise<string | undefined> {
   const { collectAuthorizationNearLimit } = await import('./gc.js');
-  try { await collectAuthorizationNearLimit(stateDir); return undefined; }
+  // With no room left for a fresh open, the fruitless-pass backoff is bypassed once per call.
+  try { await collectAuthorizationNearLimit(stateDir, { force: await authRecordCount(stateDir) + 2 > MAX_AUTH_RECORDS }); return undefined; }
   catch (error) { return error instanceof Error ? error.message : 'automatic collection failed'; }
 }
 /** The cap error names a failed automatic collection instead of claiming nothing was old enough. */
@@ -614,6 +615,8 @@ export async function collectExpiredAuthorization(options: {
   cutoffMs: number;
   apply: boolean;
   preserveWorkspaceIds?: Set<string>;
+  /** Called under the control lock with the exact IDs, before the ledger is rewritten; a throw aborts. */
+  beforeWrite?: (plan: { workspaces: string[]; grants: string[]; requests: string[] }) => Promise<void>;
 }): Promise<AuthorizationGcResult> {
   const inspected = await StateStore.inspect(options.stateDir);
   if (!inspected) return { workspaces: 0, grants: 0, requests: 0, skipped_workspaces: [] };
@@ -645,6 +648,7 @@ export async function collectExpiredAuthorization(options: {
       const auth = await readAuthStore(controlStore);
       const plan = authorizationGcPlan(auth, options.cutoffMs, allowed, options.preserveWorkspaceIds);
       if (plan.workspaces.length || plan.grants.length || plan.requests.length) {
+        await options.beforeWrite?.({ workspaces: plan.workspaces, grants: plan.grants, requests: plan.requests });
         if (authHasHistory(auth)) await ensureAuthUsed(controlStore);
         for (const id of plan.workspaces) delete auth.workspaces[id];
         for (const id of plan.grants) delete auth.grants[id];
@@ -664,7 +668,7 @@ export async function collectExpiredAuthorization(options: {
 }
 
 function knownControlPurpose(purpose: string) {
-  if (purpose === 'configure multi-repository service' || purpose === 'rollback active-service catalog migration' || purpose === 'explicit multirepo control recovery') return true;
+  if (purpose === 'configure multi-repository service' || purpose === 'rollback active-service catalog migration' || purpose === 'explicit multirepo control recovery' || purpose === 'garbage collect authorization state') return true;
   const idPrefixes = [
     'register repository ', 'enable repository ', 'disable repository ', 'remove repository ',
     'bind task ', 'publish task ', 'drain task ', 'grant workspace for task ',
@@ -697,6 +701,8 @@ function admissionPurposeMatchesSelection(selection: WorkspaceSelection, purpose
   if (purpose === `close workspace ${workspaceId}`) return selection.status === 'open' || selection.status === 'closed';
   if (purpose === `revoke workspace ${workspaceId}`) return selection.status === 'open' || selection.status === 'revoked';
   if (purpose === `explicit workspace ${workspaceId} admission recovery`) return true;
+  // Authorization GC claims only expired selections it may delete.
+  if (purpose === `gc workspace ${workspaceId}`) return true;
   return false;
 }
 
@@ -740,10 +746,11 @@ export async function recoverWorkspaceAdmissionLock(options: {
   const store = await StateStore.open(stateDir);
   const auth = await readAuthStore(store);
   const selection = auth.workspaces[workspaceId];
-  if (!selection) throw new SafeError('Workspace selection is unknown; refusing admission-lock recovery.');
   const key = admissionKey(workspaceId);
-  const existing = await staleLockForRecovery(store, key, purpose => admissionPurposeMatchesSelection(selection, purpose));
-  if (!existing) return { recovered: false, workspace_id: workspaceId, status: selection.status };
+  // A GC that died after deleting the selection can leave its admission lock behind; only that lock is recoverable without a selection.
+  const existing = await staleLockForRecovery(store, key, purpose => selection ? admissionPurposeMatchesSelection(selection, purpose) : purpose === `gc workspace ${workspaceId}`);
+  if (!selection && !existing) throw new SafeError('Workspace selection is unknown; refusing admission-lock recovery.');
+  if (!existing) return { recovered: false, workspace_id: workspaceId, status: selection!.status };
   await options.beforeRecover?.();
   const recovered = await acquireLock(store, key, `explicit workspace ${workspaceId} admission recovery`, {
     recoverStale: true,
@@ -754,7 +761,7 @@ export async function recoverWorkspaceAdmissionLock(options: {
   return {
     recovered: true,
     workspace_id: workspaceId,
-    status: selection.status,
+    status: selection?.status ?? 'deleted',
     previous_pid: existing.pid,
     previous_purpose: existing.purpose,
     acquired_at: existing.acquired_at

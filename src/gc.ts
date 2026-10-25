@@ -121,25 +121,27 @@ export const AUTH_AUTO_COLLECT_AT = Math.floor(MAX_AUTH_RECORDS * 3 / 4);
 const AUTH_AUTO_COLLECT_BACKOFF_MS = 10 * 60_000;
 const lastFruitless = new Map<string, number>();
 
-export async function collectAuthorizationNearLimit(stateDir: string, options: { nowMs?: number; threshold?: number } = {}) {
+export async function collectAuthorizationNearLimit(stateDir: string, options: { nowMs?: number; threshold?: number; force?: boolean } = {}) {
   if (await authRecordCount(stateDir) < (options.threshold ?? AUTH_AUTO_COLLECT_AT)) return null;
   // Old records that are protected or busy cannot be removed; do not rescan all task gates on every call.
   const since = lastFruitless.get(stateDir);
-  if (since !== undefined && Date.now() - since < AUTH_AUTO_COLLECT_BACKOFF_MS) return null;
+  if (!options.force && since !== undefined && Date.now() - since < AUTH_AUTO_COLLECT_BACKOFF_MS) return null;
   const cutoffMs = (options.nowMs ?? Date.now()) - DEFAULT_AUTH_RETENTION_HOURS * HOUR_MS;
   // Cheap preflight without locks: with nothing old enough, no task gate or admission lock is taken.
   const eligible = await collectExpiredAuthorization({ stateDir, cutoffMs, apply: false });
   if (!eligible.workspaces && !eligible.grants && !eligible.requests) return null;
-  // The intent is audited before anything is deleted; if the audit cannot be written, nothing is deleted.
-  await appendAudit(stateDir, { at: new Date().toISOString(), action: 'start', category: 'authorization', trigger: 'near-limit', eligible: { workspaces: eligible.workspaces, grants: eligible.grants, requests: eligible.requests } });
   const { withProtectedReviewWorkspaceIds } = await import('./review-state.js');
+  // The exact IDs are audited under the control lock before the ledger is rewritten (no audit, no deletion);
+  // a `committed` record follows the rewrite.
   const auth = await withProtectedReviewWorkspaceIds(stateDir, preserveWorkspaceIds =>
-    collectExpiredAuthorization({ stateDir, cutoffMs, apply: true, preserveWorkspaceIds }));
-  await appendAudit(stateDir, {
-    at: new Date().toISOString(), action: 'delete', category: 'authorization', trigger: 'near-limit',
-    workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests
-  });
-  if (auth.workspaces || auth.grants || auth.requests) lastFruitless.delete(stateDir); else lastFruitless.set(stateDir, Date.now());
+    collectExpiredAuthorization({
+      stateDir, cutoffMs, apply: true, preserveWorkspaceIds,
+      beforeWrite: plan => appendAudit(stateDir, { at: new Date().toISOString(), action: 'delete', category: 'authorization', trigger: 'near-limit', ids: plan })
+    }));
+  if (auth.workspaces || auth.grants || auth.requests) {
+    lastFruitless.delete(stateDir);
+    await appendAudit(stateDir, { at: new Date().toISOString(), action: 'committed', category: 'authorization', trigger: 'near-limit', workspaces: auth.workspaces, grants: auth.grants, requests: auth.requests });
+  } else lastFruitless.set(stateDir, Date.now());
   return auth;
 }
 

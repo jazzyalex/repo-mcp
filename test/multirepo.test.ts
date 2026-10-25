@@ -323,6 +323,21 @@ test('explicit stale-lock recovery never steals live or replacement control/admi
       /unexpected purpose|inspect operator state/i,
       'a stale read lock is inconsistent with a revoked persisted workspace'
     );
+    await store.remove(`locks/${admission}.json`);
+
+    // A crashed authorization GC leaves locks with its own purposes; recovery accepts them.
+    await store.write('locks/multirepo-control-v1.json', 'lock', { ...staleControl, token: 'gc-control', purpose: 'garbage collect authorization state' });
+    assert.equal((await recoverMultiRepoControlLock({ stateDir })).recovered, true);
+    await store.write(`locks/${admission}.json`, 'lock', { pid: deadPid, hostname: os.hostname(), token: 'gc-admission', purpose: `gc workspace ${workspaceId}`, acquired_at: at });
+    assert.equal((await recoverWorkspaceAdmissionLock({ stateDir, workspaceId })).recovered, true);
+    // Its admission lock is recoverable even after the selection itself was deleted.
+    const orphan = 'f'.repeat(32);
+    await store.write(`locks/workspace-${orphan}-admission.json`, 'lock', { pid: deadPid, hostname: os.hostname(), token: 'gc-orphan', purpose: `gc workspace ${orphan}`, acquired_at: at });
+    const recoveredOrphan = await recoverWorkspaceAdmissionLock({ stateDir, workspaceId: orphan });
+    assert.equal(recoveredOrphan.recovered, true);
+    assert.equal(recoveredOrphan.status, 'deleted');
+    await store.write(`locks/workspace-${orphan}-admission.json`, 'lock', { pid: deadPid, hostname: os.hostname(), token: 'not-gc', purpose: `workspace ${orphan} read`, acquired_at: at });
+    await assert.rejects(recoverWorkspaceAdmissionLock({ stateDir, workspaceId: orphan }), /unexpected purpose|unknown/i);
   } finally {
     await rm(base, { recursive: true, force: true });
   }

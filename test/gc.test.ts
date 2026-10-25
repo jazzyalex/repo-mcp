@@ -256,7 +256,8 @@ test('workspace_open collects expired authorization records itself instead of lo
   const { authRecordCount } = await import('../src/multirepo-state.js');
   assert.ok(await authRecordCount(stateDir) < 100, 'old records were collected');
   const audit = await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8');
-  assert.ok(audit.indexOf('"action":"start"') >= 0 && audit.indexOf('"action":"start"') < audit.indexOf('"action":"delete"'), 'the intent is audited before the deletion');
+  assert.ok(audit.indexOf('"action":"delete"') >= 0 && audit.indexOf('"action":"delete"') < audit.indexOf('"action":"committed"'), 'the exact IDs are audited before the commit record');
+  assert.match(audit, /"ids":\{"workspaces":\["[a-f0-9]{32}"/);
 });
 
 test('a near-limit pass that removes nothing is not repeated at once', async t => {
@@ -267,11 +268,13 @@ test('a near-limit pass that removes nothing is not repeated at once', async t =
   await closeWorkspace({ stateDir, workspaceToken: opened.workspace_token, requestId: 'busy-close' });
   // The only old selection is busy, so a pass can remove nothing.
   const lock = await acquireLock(await StateStore.open(stateDir), `workspace-${opened.selection.workspace_id}-admission`, 'test holds admission');
-  t.after(() => lock.release());
   const future = Date.parse(opened.selection.expires_at) + 48 * 3_600_000;
   const first = await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future });
   assert.deepEqual([first?.workspaces, first?.grants, first?.requests], [0, 0, 0]);
-  const audit = await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8');
-  assert.equal(await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future }), null);
-  assert.equal(await readFile(path.join(stateDir, 'gc-audit.jsonl'), 'utf8'), audit, 'no second scan or audit');
+  await assert.rejects(stat(path.join(stateDir, 'gc-audit.jsonl')), /ENOENT/, 'a pass that deletes nothing writes no audit');
+  assert.equal(await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future }), null, 'backed off');
+  // When the store is out of room the caller forces one pass; once the lock is released it collects.
+  await lock.release();
+  const forced = await collectAuthorizationNearLimit(stateDir, { threshold: 1, nowMs: future, force: true });
+  assert.equal(forced?.workspaces, 1);
 });
