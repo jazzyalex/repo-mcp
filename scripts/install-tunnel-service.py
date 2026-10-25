@@ -66,6 +66,16 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
         raise
 
 
+def installed_program_args(existing: bytes | None) -> list[str]:
+    if existing is None:
+        return []
+    try:
+        args = plistlib.loads(existing).get('ProgramArguments')
+    except Exception:
+        return []
+    return [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
+
+
 def value_after(args: list[str], flag: str) -> str | None:
     try:
         index = args.index(flag)
@@ -264,11 +274,11 @@ def main() -> int:
     parser.add_argument('--migrate', action='store_true')
     parser.add_argument('--legacy-root', type=Path)
     parser.add_argument('--state-dir', type=Path)
-    parser.add_argument('--port', type=int, default=8787)
+    parser.add_argument('--port', type=int, help='Broker port (default: the installed tunnel\'s, else 8787)')
     parser.add_argument('--client', type=Path, help='Absolute path to the official tunnel-client')
     parser.add_argument('--broker-state-dir', type=Path, help='Broker state directory holding client-auth/ (default: <root>/state)')
     args = parser.parse_args()
-    if sys.platform != 'darwin' or not 1024 <= args.port <= 65535:
+    if sys.platform != 'darwin' or (args.port is not None and not 1024 <= args.port <= 65535):
         parser.error('Requires macOS and a port between 1024 and 65535.')
     if args.migrate and (not args.install or not args.legacy_root):
         parser.error('--migrate requires --install and an explicit --legacy-root.')
@@ -313,7 +323,20 @@ def main() -> int:
         selected_client = (args.client.expanduser().resolve(strict=True) if args.client
                            else Path(shutil.which('tunnel-client') or binaries / 'tunnel-client').resolve(strict=True))
 
-    auth_header = (args.broker_state_dir.expanduser().resolve() if args.broker_state_dir else root / 'state') / 'client-auth' / 'authorization'
+    # An upgrade keeps the installed tunnel's broker port and token header file unless the
+    # operator names new ones; fixed defaults would retarget a custom install.
+    installed_args = installed_program_args(existing)
+    installed_url = value_after(installed_args, '--mcp.server-url') or ''
+    port_match = re.fullmatch(r'http://127\.0\.0\.1:(\d+)/mcp', installed_url)
+    port = args.port if args.port is not None else (int(port_match.group(1)) if port_match else 8787)
+    installed_header = value_after(installed_args, '--mcp.extra-headers') or ''
+    if args.broker_state_dir:
+        auth_header = args.broker_state_dir.expanduser().resolve() / 'client-auth' / 'authorization'
+    elif installed_header.startswith('Authorization: file:'):
+        auth_header = Path(installed_header[len('Authorization: file:'):])
+    else:
+        auth_header = root / 'state' / 'client-auth' / 'authorization'
+    args.port = port
     plist = desired_plist(selected_client, credentials, tunnel, tunnel_id, args.port, auth_header)
     plist_bytes = plistlib.dumps(plist, sort_keys=True)
     for name in ('stdout.log', 'stderr.log'):

@@ -39,7 +39,7 @@ test('standalone tunnel preview uses durable private state with no checkout depe
   const client=path.join(root,'tunnel-client');
   await writeFile(client,'#!/bin/sh\nexit 0\n',{mode:0o700});
   const result=spawnSync('python3',['scripts/install-tunnel-service.py','--client',client],{
-   env:{...process.env,REPO_MCP_HOME:state},encoding:'utf8'
+   env:{...process.env,REPO_MCP_HOME:state,HOME:path.join(root,'home')},encoding:'utf8'
   });
   assert.equal(result.status,0,result.stdout+result.stderr);
   const canonicalState=await realpath(state);
@@ -223,5 +223,32 @@ test('connect.sh refuses a standalone tunnel that does not send the client token
   const r=spawnSync('/bin/bash',['scripts/connect.sh'],{env:{...process.env,HOME:home,MCP_STATE_DIR:root,TUNNEL_CLIENT_BIN:fake},input:'',encoding:'utf8',timeout:10000});
   assert.equal(r.status,1);
   assert.match(r.stderr,/does not send the broker client token/);
+ } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test('a bare tunnel reinstall keeps an installed custom broker port and token header file', async () => {
+ const root=await mkdtemp(path.join(os.tmpdir(),'mcp-tunnel-keep-'));
+ try {
+  const state=path.join(root,'app-support');
+  const credentials=path.join(state,'credentials');
+  await mkdir(credentials,{recursive:true,mode:0o700});
+  await writeFile(path.join(credentials,'runtime.key'),'synthetic-key',{mode:0o600});
+  await writeFile(path.join(credentials,'tunnel-id'),'tunnel_test\n',{mode:0o600});
+  const client=path.join(root,'tunnel-client');
+  await writeFile(client,'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const home=path.join(root,'home');
+  const agents=path.join(home,'Library','LaunchAgents');
+  await mkdir(agents,{recursive:true});
+  const customHeader=path.join(root,'custom-state','client-auth','authorization');
+  const made=spawnSync('python3',['-c','import plistlib,sys; plistlib.dump({"Label":"local.repo-mcp.tunnel","ProgramArguments":["/bin/tunnel-client","run","--mcp.server-url","http://127.0.0.1:8899/mcp","--mcp.extra-headers","Authorization: file:"+sys.argv[2]]},open(sys.argv[1],"wb"))',path.join(agents,'local.repo-mcp.tunnel.plist'),customHeader],{encoding:'utf8'});
+  assert.equal(made.status,0,made.stderr);
+  const result=spawnSync('python3',['scripts/install-tunnel-service.py','--client',client],{env:{...process.env,REPO_MCP_HOME:state,HOME:home},encoding:'utf8'});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+  const preview=path.join(await realpath(state),'tunnel','local.repo-mcp.tunnel.preview.plist');
+  const decoded=spawnSync('python3',['-c','import json,plistlib,sys; print(json.dumps(plistlib.load(open(sys.argv[1],"rb"))))',preview],{encoding:'utf8'});
+  const args:string[]=JSON.parse(decoded.stdout).ProgramArguments;
+  assert.equal(args[args.indexOf('--mcp.server-url')+1],'http://127.0.0.1:8899/mcp');
+  assert.equal(args[args.indexOf('--mcp.extra-headers')+1],`Authorization: file:${customHeader}`);
+  assert.equal(args[args.indexOf('--mcp.discovery-extra-headers')+1],`Authorization: file:${customHeader}`);
  } finally {await rm(root,{recursive:true,force:true});}
 });
