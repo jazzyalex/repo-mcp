@@ -1080,7 +1080,9 @@ class Driver {
             this.stateDir, this.now());
           return this.finish('failed', { failure_code: 'CONFIRMED_NOT_SUBMITTED' });
         }
-        return this.reattachAndConfirm(run.failure_code ?? 'SEND_UNCONFIRMED');
+        // A missing report is a completion-time hold, not a send problem: if a resume cannot confirm the
+        // send, say so instead of repeating the report code.
+        return this.reattachAndConfirm(run.failure_code && run.failure_code !== 'MCP_REPORT_MISSING' ? run.failure_code : 'SEND_UNCONFIRMED');
       case 'submitted': {
         const prompt = this.requirePrompt();
         await this.takeLease();

@@ -441,6 +441,8 @@ test('a workspace request ID that already opened a workspace is refused for a ne
 
 test('review uses the finish report as answer and outcome over the page text', async t => {
   const r = await reviewFixture(t);
+  // The report path works on the default config (no page-text opt-in).
+  await configure(r.stateDir, { page_text_fallback: false });
   const REPORT = '## Review\n\nNo blocking findings.';
   const onSend = async () => {
     const opened = await openWorkspace({ stateDir: r.stateDir, repositoryId: 'repo', taskId: 'task', mode: 'review',
@@ -741,4 +743,13 @@ test('without a Repo MCP report the page text is read only when the owner opted 
   assert.equal(resumed.output_source, 'page');
   assert.equal(page.answerReads, 1);
   assert.equal(page.clicks, clicks, 'resume never sends again');
+});
+
+test('a held MCP_REPORT_MISSING run keeps its slot until resume', async t => {
+  const { stateDir } = await fixture(t);
+  await configure(stateDir, { page_text_fallback: false });
+  const held = await runGo({ ...base(stateDir), requestId: 'slot-held' }, { page: new FakePage(), sleep });
+  assert.equal(held.failure_code, 'MCP_REPORT_MISSING');
+  const { accountStatus } = await import('../src/go-account.js');
+  assert.equal((await accountStatus(base(stateDir).accountDir)).slots_in_use, 1, 'an uncertain run holds the account slot');
 });

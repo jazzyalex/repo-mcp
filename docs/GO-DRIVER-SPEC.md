@@ -282,7 +282,7 @@ chatgpt-run go --kind review [--profile review|review-critical] --workspace-requ
   and nothing is read; while polling, only the answer's length leaves the page. On, the
   page text is read as before. Opting in and resuming a held run reads it without
   sending again.
-- **Architecture** passes may also pass `--workspace-request-id` to enable the report.
+- **Architecture** passes may also pass `--workspace-request-id` to enable the report. Without it there is no report, so unless `page_text_fallback` is on, the run sends, then always holds `MCP_REPORT_MISSING`; the architect skills always pass it.
 - **Not yet:** the coding seal (an accepted report stops further mutations) waits for
   `go --kind code`.
 

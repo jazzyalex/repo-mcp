@@ -545,7 +545,7 @@ The limits are owner settings in
 | `max_per_hour` | 25 | 1-500 | Sends in any rolling hour, all runs together. |
 | `min_gap_seconds` | 30 | 0-3600 | Minimum time between two sends. |
 | `latch_enabled` | true | true/false | A browser challenge stops new work until the owner clears it. |
-| `page_text_fallback` | false | true/false | Opt-in. With no `finish` report, read the answer text off the ChatGPT page. Off: the run holds `MCP_REPORT_MISSING` and nothing is read. See the note below. |
+| `page_text_fallback` | false | true/false | Opt-in. With no `finish` report, read the answer text off the ChatGPT page. Off: the run holds `MCP_REPORT_MISSING` and nothing is read (OpenAI's terms forbid programmatically extracting Output, so this is the owner's choice). |
 
 ```sh
 npm run --silent chatgpt-run -- account status
