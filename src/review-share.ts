@@ -655,11 +655,19 @@ export async function closeReviewParticipant(options: {
       fail('REVIEW_PROTECTED', 'Review participant cannot close while its run remains unresolved.');
     }
     if (participant.workspace_association === 'bound') {
-      await closeReviewWorkspaceUnderGate({
-        stateDir: options.stateDir,
-        workspaceId: participant.workspace_id!,
-        requestId: options.requestId
-      });
+      try {
+        await closeReviewWorkspaceUnderGate({
+          stateDir: options.stateDir,
+          workspaceId: participant.workspace_id!,
+          requestId: options.requestId
+        });
+      } catch (error) {
+        // An invalidated participant's workspace is not GC-protected; once audited GC removed it there is nothing to close.
+        const { authorizationDeletionAudited } = await import('./gc.js');
+        const collected = participant.state === 'invalidated' && error instanceof SafeError && error.message === 'Review workspace selection is unknown.' &&
+          await authorizationDeletionAudited(options.stateDir, participant.workspace_id!);
+        if (!collected) throw error;
+      }
     }
     const at = new Date().toISOString();
     const participants = journal!.participants.map(item =>

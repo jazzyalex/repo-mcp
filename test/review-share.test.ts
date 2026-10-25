@@ -1625,4 +1625,8 @@ test('an invalidated, bound review participant no longer protects its expired wo
   });
   const auth = await (await StateStore.open(stateDir)).read<any>('control/multirepo-auth.json', 'multirepo-auth');
   assert.equal(auth.workspaces[opened.selection.workspace_id], undefined, 'the invalidated bound workspace is collected');
+  // The participant can still be closed: the GC audit proves its workspace was collected, not lost.
+  await failChatGptRunBeforeSubmit(prepared.run.run_id, 'CANCELLED', stateDir, OBSERVED);
+  const closed = await closeReviewParticipant({ stateDir, taskId: 'task', participantId: prepared.participant.participant_id, requestId: 'close-after-gc' });
+  assert.equal(closed.participant.state, 'closed');
 });

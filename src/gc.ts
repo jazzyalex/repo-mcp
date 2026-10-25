@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
-import { lstat, open, stat } from 'node:fs/promises';
+import { lstat, open, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { SafeError, sha256 } from './errors.js';
 import { CAPTURE_ID, type CaptureMeta } from './capture.js';
@@ -107,6 +107,22 @@ async function checkedFile(stateDir: string, rel: string): Promise<ExpectedFile>
     if (i === parts.length - 1) return { rel, dev: String(info.dev), ino: String(info.ino), size: info.size };
   }
   throw new SafeError('GC received an empty state path.');
+}
+
+/**
+ * Whether an authorization-GC `delete` audit record names this workspace ID: the evidence that a
+ * missing selection was collected, not lost.
+ */
+export async function authorizationDeletionAudited(stateDir: string, workspaceId: string) {
+  const text = await readFile(path.join(stateDir, AUDIT_PATH), 'utf8').catch(() => '');
+  for (const line of text.split('\n')) {
+    if (!line.includes(workspaceId)) continue;
+    try {
+      const record = JSON.parse(line) as { action?: string; category?: string; ids?: { workspaces?: unknown } };
+      if (record.action === 'delete' && record.category === 'authorization' && Array.isArray(record.ids?.workspaces) && record.ids.workspaces.includes(workspaceId)) return true;
+    } catch { /* a torn line is not evidence */ }
+  }
+  return false;
 }
 
 /** Automatic collection starts at three quarters of the authorization cap. */
